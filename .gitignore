@@ -1,0 +1,49 @@
+# Environment variables
+.env
+.env.local
+*.env
+
+# Secrets and credentials
+values-secrets.yaml
+values-*.secrets.yaml
+*-secrets.yaml
+secrets.enc
+*.key
+*.pem
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Build artifacts
+*.o
+*.a
+*.so
+*.dll
+*.exe
+
+# OS
+.DS_Store
+Thumbs.db

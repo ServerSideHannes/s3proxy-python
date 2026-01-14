@@ -1,0 +1,12 @@
+apiVersion: v2
+name: s3proxy-python
+description: Transparent S3 encryption proxy with AES-256-GCM
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+dependencies:
+  - name: redis-ha
+    version: "4.35.5"
+    repository: "https://dandydeveloper.github.io/charts"
+    condition: redis-ha.enabled

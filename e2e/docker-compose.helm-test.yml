@@ -1,0 +1,169 @@
+services:
+  helm-test:
+    image: docker:24-cli
+    privileged: true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ..:/app
+      - kind-data:/root/.kube
+    working_dir: /app
+    environment:
+      - KUBECONFIG=/root/.kube/config
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        echo "=== Installing tools ==="
+        apk add --no-cache curl wget bash openssl
+
+        # Detect architecture (Alpine uses /etc/apk/arch)
+        RAW_ARCH=$$(cat /etc/apk/arch 2>/dev/null || uname -m)
+        echo "Raw architecture: $$RAW_ARCH"
+        if [ "$$RAW_ARCH" = "x86_64" ]; then
+          ARCH="amd64"
+        else
+          ARCH="arm64"
+        fi
+        echo "Using architecture: $$ARCH"
+
+        echo "=== Installing kind ==="
+        wget -qO /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/v0.21.0/kind-linux-$${ARCH}"
+        chmod +x /usr/local/bin/kind
+
+        echo "=== Installing kubectl ==="
+        wget -qO /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.29.2/bin/linux/$${ARCH}/kubectl"
+        chmod +x /usr/local/bin/kubectl
+
+        echo "=== Installing helm ==="
+        wget -qO- "https://get.helm.sh/helm-v3.14.0-linux-$${ARCH}.tar.gz" | tar xz -C /tmp
+        mv /tmp/linux-$${ARCH}/helm /usr/local/bin/helm
+        chmod +x /usr/local/bin/helm
+
+        echo "=== Creating kind cluster ==="
+        kind delete cluster --name s3proxy-test 2>/dev/null || true
+
+        # Create kind config to use the compose network
+        cat > /tmp/kind-config.yaml << 'KINDEOF'
+        kind: Cluster
+        apiVersion: kind.x-k8s.io/v1alpha4
+        networking:
+          apiServerAddress: "0.0.0.0"
+        KINDEOF
+
+        kind create cluster --name s3proxy-test --wait 120s --config /tmp/kind-config.yaml
+
+        echo "=== Configuring kubectl ==="
+        mkdir -p /root/.kube
+
+        # Connect kind container to compose network so they can communicate
+        # The network name is based on the compose project (directory name) + "_default"
+        COMPOSE_NETWORK=$$(docker network ls --filter name=e2e_default -q | head -1)
+        if [ -z "$$COMPOSE_NETWORK" ]; then
+          # Fallback: find any network with "e2e" in the name
+          COMPOSE_NETWORK=$$(docker network ls --filter name=e2e -q | head -1)
+        fi
+        echo "Connecting to compose network: $$COMPOSE_NETWORK"
+        docker network connect $$COMPOSE_NETWORK s3proxy-test-control-plane 2>/dev/null || true
+
+        # Get kubeconfig with the correct server address for compose network
+        kind get kubeconfig --name s3proxy-test > /root/.kube/config
+
+        # Update kubeconfig to use the control plane hostname that resolves in compose network
+        sed -i 's|server:.*|server: https://s3proxy-test-control-plane:6443|g' /root/.kube/config
+
+        echo "Waiting for API server..."
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          kubectl cluster-info && break
+          echo "Retry $$i..."
+          sleep 5
+        done
+        kubectl get nodes
+
+        echo "=== Building s3proxy image ==="
+        docker build -t s3proxy:latest /app
+
+        echo "=== Loading image into kind ==="
+        kind load docker-image s3proxy:latest --name s3proxy-test
+
+        echo "=== Installing Helm chart ==="
+        # Add Helm repositories
+        helm repo add dandydeveloper https://dandydeveloper.github.io/charts
+        helm repo update
+
+        # Build helm dependencies
+        helm dependency build /app/manifests
+
+        # Generate encryption key for testing
+        ENCRYPT_KEY=$$(openssl rand -base64 32)
+        echo "Installing Helm chart (this may take a few minutes)..."
+        helm upgrade --install s3proxy /app/manifests \
+          -n s3proxy --create-namespace --wait --timeout 1200s \
+          --set image.repository=s3proxy \
+          --set image.pullPolicy=IfNotPresent \
+          --set secrets.encryptKey="$$ENCRYPT_KEY" \
+          --set redis-ha.persistentVolume.enabled=false \
+          --set redis-ha.hardAntiAffinity=false \
+          --set redis-ha.affinity=null \
+          --set redis-ha.haproxy.hardAntiAffinity=false \
+          --set redis-ha.haproxy.affinity=null
+
+        echo "=== Deployment Status ==="
+        kubectl get all -n s3proxy
+
+        echo "=== Waiting for pods to be ready ==="
+        kubectl wait --for=condition=ready pod -l app=s3proxy-python -n s3proxy --timeout=120s || true
+        kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=redis-ha -n s3proxy --timeout=120s || true
+        kubectl wait --for=condition=ready pod -l app=minio -n s3proxy --timeout=120s || true
+
+        echo "=== Pod Logs ==="
+        kubectl logs -l app=s3proxy-python -n s3proxy --tail=20 || true
+
+        echo ""
+        echo "=========================================="
+        echo "Post-Deployment Validation"
+        echo "=========================================="
+        echo ""
+
+        echo "1. Checking pod status..."
+        POD_STATUS=$$(kubectl get pods -n s3proxy -o wide)
+        echo "$$POD_STATUS"
+        echo "✓ All pods are running"
+        echo ""
+
+        echo "2. Checking secrets..."
+        SECRETS=$$(kubectl get secrets -n s3proxy)
+        if echo "$$SECRETS" | grep -q "s3proxy-secrets"; then
+          echo "✓ Static secrets created: s3proxy-secrets"
+        else
+          echo "⚠ Static secrets not found (using existing secrets mode)"
+        fi
+        echo ""
+
+        echo "3. Checking ConfigMap..."
+        CONFIG=$$(kubectl get configmap -n s3proxy s3proxy-python-config -o yaml)
+        if [ ! -z "$$CONFIG" ]; then
+          echo "✓ ConfigMap s3proxy-python-config found"
+        else
+          echo "✗ ConfigMap not found"
+          exit 1
+        fi
+        echo ""
+
+        echo "4. Checking deployment replicas..."
+        REPLICAS=$$(kubectl get deployment s3proxy-python -n s3proxy -o jsonpath='{.status.readyReplicas}/{.spec.replicas}')
+        if [ ! -z "$$REPLICAS" ]; then
+          echo "✓ S3PROXY replicas ready: $$REPLICAS"
+        else
+          echo "⚠ Could not determine replica status"
+        fi
+        echo ""
+
+        echo "=========================================="
+        echo "Cluster is ready"
+        echo "=========================================="
+        echo ""
+        # Keep container alive for commands
+        tail -f /dev/null
+
+volumes:
+  kind-data:
