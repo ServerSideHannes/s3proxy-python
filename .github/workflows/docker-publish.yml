@@ -7,8 +7,6 @@ on:
         description: 'Docker image tag'
         required: true
         type: string
-  pull_request:
-    branches: [main]
 
 env:
   REGISTRY: ghcr.io
