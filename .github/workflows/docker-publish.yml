@@ -1,11 +1,12 @@
 name: Build and Push Docker Image
 
 on:
-  push:
-    branches:
-      - main
-      - add-docker-workflow
-    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Docker image tag'
+        required: true
+        type: string
   pull_request:
     branches: [main]
 
@@ -35,51 +36,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels)
-        id: meta
-        uses: docker/metadata-action@v5.7.0
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix={{branch}}-,format=short
-            type=semver,pattern={{version}}
-
-      - name: Check if image exists
-        id: check
-        if: github.event_name != 'pull_request'
-        continue-on-error: true
-        run: |
-          TAGS="${{ steps.meta.outputs.tags }}"
-          IMAGE_EXISTS=false
-
-          for TAG in $TAGS; do
-            echo "Checking if image exists: $TAG"
-            if docker manifest inspect $TAG > /dev/null 2>&1; then
-              echo "Image already exists: $TAG"
-              IMAGE_EXISTS=true
-            else
-              echo "Image does not exist: $TAG"
-              IMAGE_EXISTS=false
-              break
-            fi
-          done
-
-          echo "should_push=$([[ "$IMAGE_EXISTS" == "false" ]] && echo "true" || echo "false")" >> $GITHUB_OUTPUT
-
       - name: Build and push Docker image
-        if: github.event_name == 'pull_request' || steps.check.outputs.should_push == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
-
-      - name: Image push skipped
-        if: github.event_name != 'pull_request' && steps.check.outputs.should_push != 'true'
-        run: |
-          echo "All image tags already exist in registry. Skipping build and push."
