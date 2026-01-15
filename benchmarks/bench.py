@@ -25,14 +25,12 @@ from statistics import mean, stdev
 
 import aioboto3
 
-# Object sizes
+# Object sizes for realistic single-part uploads
 SIZES = {
     "tiny": 1024,           # 1 KB
     "small": 64 * 1024,     # 64 KB
     "medium": 1024 * 1024,  # 1 MB
     "large": 10 * 1024 * 1024,  # 10 MB
-    "xlarge": 100 * 1024 * 1024,  # 100 MB
-    "huge": 1024 * 1024 * 1024,  # 1 GiB
 }
 
 # Endpoints

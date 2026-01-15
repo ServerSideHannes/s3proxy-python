@@ -68,9 +68,9 @@ services:
       S3PROXY_ENCRYPT_KEY: benchmark-test-key-32-bytes-!!
       AWS_ACCESS_KEY_ID: benchmarkadminuser
       AWS_SECRET_ACCESS_KEY: benchmarkadminpassword
-      # Higher limits for benchmarking
-      S3PROXY_MAX_CONCURRENT_UPLOADS: "50"
-      S3PROXY_MAX_CONCURRENT_DOWNLOADS: "50"
+      # Throttle for realistic single-part uploads (10MB files)
+      # Memory: 10MB + 64MB = 74MB per upload, 10 concurrent = 740MB < 1GB
+      S3PROXY_THROTTLING_REQUESTS_MAX: "10"
       S3PROXY_NO_TLS: "true"
       S3PROXY_LOG_LEVEL: WARNING  # Reduce log noise during benchmarks
       S3PROXY_REDIS_URL: redis://redis:6379/0
@@ -82,8 +82,8 @@ services:
     # Required for py-spy profiling
     cap_add:
       - SYS_PTRACE
-    mem_limit: 512m
-    memswap_limit: 512m
+    mem_limit: 1g
+    memswap_limit: 1g
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4433/readyz"]
       interval: 2s

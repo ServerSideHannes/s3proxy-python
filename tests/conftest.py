@@ -543,7 +543,7 @@ def mock_s3_client(mock_s3, settings, credentials):
 @pytest.fixture
 def multipart_manager():
     """Create a multipart state manager."""
-    return MultipartStateManager(max_concurrent=10)
+    return MultipartStateManager()
 
 
 # ============================================================================

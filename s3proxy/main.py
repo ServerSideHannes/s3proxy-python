@@ -304,20 +304,20 @@ async def _handle_object_operation(
 # Throttling Middleware
 # ============================================================================
 def throttle(app: FastAPI, max_requests: int):
-    """Wrap app with throttling middleware."""
+    """Wrap app with throttling middleware.
+
+    Limits concurrent requests to max_requests. When limit is reached,
+    additional requests wait in queue instead of being rejected.
+    This provides memory-bounded execution with graceful backpressure.
+    """
     semaphore = asyncio.Semaphore(max_requests)
 
     async def middleware(scope, receive, send):
         if scope["type"] != "http":
             return await app(scope, receive, send)
 
-        # Atomic acquire - no TOCTOU race
-        try:
-            semaphore.acquire_nowait()
-        except ValueError:
-            from fastapi.responses import Response
-            response = Response("Too Many Requests", status_code=429)
-            return await response(scope, receive, send)
+        # Wait for slot to become available (queues requests)
+        await semaphore.acquire()
 
         try:
             await app(scope, receive, send)
@@ -337,7 +337,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Load credentials and initialize components
     credentials_store = load_credentials()
     multipart_manager = MultipartStateManager(
-        max_concurrent=settings.max_concurrent_uploads,
         ttl_seconds=settings.redis_upload_ttl_seconds,
     )
     verifier = SigV4Verifier(credentials_store)

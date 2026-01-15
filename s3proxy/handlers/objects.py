@@ -264,11 +264,13 @@ class ObjectHandlerMixin(BaseHandler):
         if needs_chunked_decode:
             body = decode_aws_chunked(body)
 
-        if self.settings.auto_multipart_bytes > 0 and len(body) > self.settings.auto_multipart_bytes:
-            return await self._put_multipart(client, bucket, key, body, content_type)
+        # Reject if exceeds max upload size
+        if len(body) > self.settings.max_upload_size_bytes:
+            raise HTTPException(413, f"Max upload size: {self.settings.max_upload_size_mb}MB")
 
-        if len(body) > self.settings.max_single_encrypted_bytes:
-            raise HTTPException(413, f"Max size: {self.settings.max_single_encrypted_mb}MB")
+        # Auto-use multipart for files >16MB to split encryption into parts
+        if len(body) > crypto.PART_SIZE:
+            return await self._put_multipart(client, bucket, key, body, content_type)
 
         encrypted = crypto.encrypt_object(body, self.settings.kek)
         etag = hashlib.md5(body).hexdigest()
@@ -385,10 +387,11 @@ class ObjectHandlerMixin(BaseHandler):
                 total_plaintext_size += len(chunk)
 
                 # Upload when buffer reaches PART_SIZE
+                # Process immediately without intermediate variable to reduce memory
                 while len(buffer) >= crypto.PART_SIZE:
-                    part_data = bytes(buffer[:crypto.PART_SIZE])
+                    # Extract, upload, then clear - minimizes peak memory
+                    await upload_part(bytes(buffer[:crypto.PART_SIZE]))
                     del buffer[:crypto.PART_SIZE]
-                    await upload_part(part_data)
 
             # Upload remaining data
             if buffer:

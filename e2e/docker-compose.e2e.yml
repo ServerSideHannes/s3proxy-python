@@ -37,35 +37,23 @@ services:
     ports:
       - "8080:4433"
     environment:
-      # S3 backend configuration
       S3PROXY_HOST: http://minio:9000
       S3PROXY_REGION: us-east-1
-
-      # Encryption key (32 bytes for AES-256)
       S3PROXY_ENCRYPT_KEY: test-key-for-e2e-testing-32bytes
-
-      # AWS credentials for MinIO access
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
-
-      # Concurrency limits
-      S3PROXY_MAX_CONCURRENT_UPLOADS: "5"
-      S3PROXY_MAX_CONCURRENT_DOWNLOADS: "5"
-
-      # Server configuration
       S3PROXY_NO_TLS: "true"
       S3PROXY_LOG_LEVEL: INFO
-
-      # Redis configuration
       S3PROXY_REDIS_URL: redis://redis:6379/0
+      S3PROXY_THROTTLING_REQUESTS_MAX: "10"
+      S3PROXY_MAX_UPLOAD_SIZE_MB: "45"
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
     depends_on:
       minio:
         condition: service_healthy
       redis:
         condition: service_healthy
-    # Hard memory limit (same as Kubernetes)
-    mem_limit: 512m
-    memswap_limit: 512m  # Same as mem_limit = no swap = hard OOM kill
+    mem_limit: 1280m
+    memswap_limit: 1280m
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4433/readyz"]
       interval: 5s

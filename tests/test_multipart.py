@@ -98,25 +98,6 @@ class TestMultipartStateManager:
 
         assert await manager.get_upload("bucket", "key", "upload-123") is None
 
-    @pytest.mark.asyncio
-    async def test_semaphore_limits_concurrent_uploads(self):
-        """Test semaphore limits concurrent uploads."""
-        manager = MultipartStateManager(max_concurrent=2)
-
-        # Acquire two slots
-        await manager.acquire_slot()
-        await manager.acquire_slot()
-
-        # Third should timeout
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(manager.acquire_slot(), timeout=0.01)
-
-        # Release one
-        manager.release_slot()
-
-        # Now we can acquire again
-        await asyncio.wait_for(manager.acquire_slot(), timeout=0.1)
-
 
 class TestMetadataEncoding:
     """Test metadata encoding/decoding."""

@@ -1,6 +1,5 @@
 """Multipart upload state management."""
 
-import asyncio
 import base64
 import contextlib
 import gzip
@@ -163,14 +162,12 @@ def _deserialize_upload_state(data: bytes) -> MultipartUploadState:
 class MultipartStateManager:
     """Manages multipart upload state in Redis."""
 
-    def __init__(self, max_concurrent: int = 10, ttl_seconds: int = 86400):
+    def __init__(self, ttl_seconds: int = 86400):
         """Initialize state manager.
 
         Args:
-            max_concurrent: Max concurrent uploads (per-pod limit)
             ttl_seconds: TTL for upload state in Redis (default 24h)
         """
-        self._semaphore = asyncio.Semaphore(max_concurrent)
         self._ttl = ttl_seconds
 
     def _redis_key(self, bucket: str, key: str, upload_id: str) -> str:
@@ -271,14 +268,6 @@ class MultipartStateManager:
         redis_client = get_redis()
         rk = self._redis_key(bucket, key, upload_id)
         await redis_client.delete(rk)
-
-    async def acquire_slot(self) -> None:
-        """Acquire an upload slot (per-pod limit)."""
-        await self._semaphore.acquire()
-
-    def release_slot(self) -> None:
-        """Release an upload slot."""
-        self._semaphore.release()
 
 
 def encode_multipart_metadata(meta: MultipartMetadata) -> str:
