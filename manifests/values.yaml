@@ -112,8 +112,8 @@ resources:
     cpu: "100m"
     memory: "512Mi"
   limits:
-    cpu: "1000m"
-    memory: "1Gi"
+    cpu: "100m"
+    memory: "512Mi"
 
 service:
   type: ClusterIP

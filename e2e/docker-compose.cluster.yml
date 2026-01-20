@@ -93,7 +93,12 @@ services:
         echo "✓ Ingress Controller installed"
 
         echo "=== Building s3proxy image ==="
-        docker build -t s3proxy:latest /app
+        # Skip if image already exists (pre-built in CI)
+        if docker image inspect s3proxy:latest >/dev/null 2>&1; then
+          echo "Image already exists, skipping build"
+        else
+          docker build -t s3proxy:latest /app
+        fi
 
         echo "=== Loading image into kind ==="
         kind load docker-image s3proxy:latest --name s3proxy-test
@@ -116,6 +121,10 @@ services:
           --set secrets.encryptKey="$$ENCRYPT_KEY" \
           --set gateway.enabled=true \
           --set ingress.enabled=true \
+          --set resources.limits.cpu=500m \
+          --set resources.requests.cpu=500m \
+          --set minio.resources.limits.cpu=2000m \
+          --set minio.resources.requests.cpu=500m \
           --set redis-ha.persistentVolume.enabled=false \
           --set redis-ha.hardAntiAffinity=false \
           --set redis-ha.affinity=null \

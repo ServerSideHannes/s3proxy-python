@@ -1,0 +1,58 @@
+name: Cluster Test
+
+on:
+  pull_request:
+    paths:
+      - 'manifests/**'
+      - 'src/**'
+      - 'Dockerfile'
+      - 'e2e/**'
+  workflow_dispatch:
+
+jobs:
+  cluster-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ hashFiles('Dockerfile', 'pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Pre-build s3proxy image (cached)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: s3proxy:latest
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+      - name: Pre-pull Kind node image
+        run: docker pull kindest/node:v1.29.2
+
+      - name: Cache Helm dependencies
+        uses: actions/cache@v4
+        with:
+          path: manifests/charts
+          key: ${{ runner.os }}-helm-deps-${{ hashFiles('manifests/Chart.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-helm-deps-
+
+      - name: Run cluster test
+        run: make cluster-test
+
+      # Avoid cache growing unbounded
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache

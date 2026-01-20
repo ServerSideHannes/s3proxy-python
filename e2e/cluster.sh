@@ -1,11 +1,11 @@
 #!/bin/bash
 set -e
 
-COMPOSE_FILE="e2e/docker-compose.helm-test.yml"
+COMPOSE_FILE="e2e/docker-compose.cluster.yml"
 
 case "${1:-run}" in
   run)
-    echo "Starting containerized Helm test..."
+    echo "Starting cluster test..."
     echo ""
     # Start and follow logs until cluster is ready
     docker compose -f $COMPOSE_FILE up --build -d
@@ -19,8 +19,8 @@ case "${1:-run}" in
     echo ""
     echo "=========================================="
     echo "Cluster is running in background."
-    echo "Use 'make helm-shell' to interact."
-    echo "Use 'make helm-cleanup' when done."
+    echo "Use './e2e/cluster.sh shell' to interact."
+    echo "Use 'make clean' when done."
     echo "=========================================="
     ;;
   shell)
@@ -110,10 +110,67 @@ case "${1:-run}" in
           cat /tmp/orig.md5
           echo \"\"
           if [ \"\$ORIG_SUMS\" = \"\$DOWN_SUMS\" ]; then
-            echo \"All checksums match - encryption/decryption working!\"
+            echo \"✓ Checksums match - round-trip successful\"
           else
             echo \"Checksum mismatch!\"
             exit 1
+          fi
+
+          # Verify encryption by reading raw data from MinIO directly
+          echo \"\"
+          echo \"=== Verifying encryption (reading raw from MinIO) ===\"
+
+          # Create a small test file with known content
+          echo \"Creating 100KB test file...\"
+          dd if=/dev/urandom of=/tmp/encrypt-test.bin bs=1K count=100 2>/dev/null
+          ORIG_SIZE=\$(stat -c%s /tmp/encrypt-test.bin 2>/dev/null || stat -f%z /tmp/encrypt-test.bin)
+          ORIG_MD5=\$(md5sum /tmp/encrypt-test.bin | cut -d' ' -f1)
+          echo \"Original: \${ORIG_SIZE} bytes, MD5: \$ORIG_MD5\"
+
+          # Upload through s3proxy (gets encrypted)
+          aws --endpoint-url http://s3-gateway.s3proxy s3 cp /tmp/encrypt-test.bin s3://load-test-bucket/encrypt-test.bin
+
+          # Download raw from MinIO directly (bypassing s3proxy decryption)
+          echo \"Downloading raw encrypted data from MinIO...\"
+          mkdir -p /tmp/raw
+          aws --endpoint-url http://s3proxy-python-minio:9000 s3 cp s3://load-test-bucket/encrypt-test.bin /tmp/raw/encrypt-test.bin 2>/dev/null || true
+
+          if [ -f /tmp/raw/encrypt-test.bin ]; then
+            RAW_SIZE=\$(stat -c%s /tmp/raw/encrypt-test.bin 2>/dev/null || stat -f%z /tmp/raw/encrypt-test.bin)
+            RAW_MD5=\$(md5sum /tmp/raw/encrypt-test.bin | cut -d' ' -f1)
+            echo \"Raw:      \${RAW_SIZE} bytes, MD5: \$RAW_MD5\"
+
+            # AES-256-GCM adds exactly 28 bytes: 12-byte nonce + 16-byte auth tag
+            EXPECTED_SIZE=\$((ORIG_SIZE + 28))
+
+            if [ \"\$RAW_SIZE\" = \"\$EXPECTED_SIZE\" ] && [ \"\$ORIG_MD5\" != \"\$RAW_MD5\" ]; then
+              echo \"✓ ENCRYPTION VERIFIED:\"
+              echo \"  - Size increased by 28 bytes (12B nonce + 16B GCM tag)\"
+              echo \"  - Content differs from original\"
+
+              # Also verify decryption works
+              aws --endpoint-url http://s3-gateway.s3proxy s3 cp s3://load-test-bucket/encrypt-test.bin /tmp/decrypted.bin
+              DEC_SIZE=\$(stat -c%s /tmp/decrypted.bin 2>/dev/null || stat -f%z /tmp/decrypted.bin)
+              DEC_MD5=\$(md5sum /tmp/decrypted.bin | cut -d' ' -f1)
+              echo \"Decrypted: \${DEC_SIZE} bytes, MD5: \$DEC_MD5\"
+
+              if [ \"\$ORIG_SIZE\" = \"\$DEC_SIZE\" ] && [ \"\$ORIG_MD5\" = \"\$DEC_MD5\" ]; then
+                echo \"✓ DECRYPTION VERIFIED - Size and content match original\"
+              else
+                echo \"✗ Decryption failed - data corrupted\"
+                exit 1
+              fi
+            elif [ \"\$RAW_SIZE\" != \"\$EXPECTED_SIZE\" ]; then
+              echo \"✗ ENCRYPTION FAILED - Expected \$EXPECTED_SIZE bytes, got \$RAW_SIZE\"
+              echo \"  (Should be original + 28 bytes for AES-GCM overhead)\"
+              exit 1
+            else
+              echo \"✗ ENCRYPTION FAILED - Raw data matches original\"
+              exit 1
+            fi
+          else
+            echo \"Could not read raw data from MinIO (bucket may have different name)\"
+            echo \"Skipping raw encryption verification\"
           fi
         "
 
@@ -205,15 +262,13 @@ case "${1:-run}" in
     echo "Usage: $0 <command>"
     echo ""
     echo "Commands:"
-    echo "  run        - Deploy Kind cluster and Helm chart"
-    echo "  status     - Show deployment status"
-    echo "  pods       - Show pod details and resources"
-    echo "  logs       - Stream s3proxy logs"
-    echo "  load-test  - Run 1.5GB concurrent upload test + verify load balancing"
-    echo "  redis      - Inspect Redis keys and memory"
-    echo "  watch      - Live pod CPU/memory (installs metrics-server)"
-    echo "  shell      - Interactive kubectl shell"
-    echo "  cleanup    - Delete cluster and clean up"
+    echo "  run       - Deploy Kind cluster and s3proxy"
+    echo "  load-test - Run 1.5GB upload test + verify load balancing"
+    echo "  status    - Show deployment status"
+    echo "  pods      - Show pod details and resources"
+    echo "  logs      - Stream s3proxy logs"
+    echo "  shell     - Interactive kubectl shell"
+    echo "  cleanup   - Delete cluster and clean up"
     exit 1
     ;;
 esac

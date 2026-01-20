@@ -2,7 +2,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMPOSE_FILE="e2e/docker-compose.helm-test.yml"
+COMPOSE_FILE="e2e/docker-compose.cluster.yml"
 
 cleanup() {
     echo ""
@@ -31,7 +31,7 @@ echo ""
 echo "Running load test..."
 echo ""
 
-$SCRIPT_DIR/test-helm.sh load-test
+$SCRIPT_DIR/cluster.sh load-test
 
 echo ""
 echo "✓ Tests passed!"
