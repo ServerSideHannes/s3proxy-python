@@ -448,6 +448,148 @@ class MockS3Client:
             "StorageClass": "STANDARD",
         }
 
+    async def list_buckets(self) -> dict:
+        """List all buckets."""
+        self.call_history.append(("list_buckets", {}))
+        buckets = [
+            {"Name": name, "CreationDate": info["CreationDate"]}
+            for name, info in self.buckets.items()
+        ]
+        return {
+            "Owner": {"ID": "owner-id-123", "DisplayName": "test-owner"},
+            "Buckets": buckets,
+        }
+
+    async def list_objects_v1(
+        self,
+        bucket: str,
+        prefix: str | None = None,
+        marker: str | None = None,
+        delimiter: str | None = None,
+        max_keys: int = 1000,
+    ) -> dict:
+        """List objects in bucket using V1 API."""
+        self.call_history.append(("list_objects_v1", {"bucket": bucket, "prefix": prefix, "marker": marker}))
+        contents = []
+        common_prefixes = set()
+        prefix = prefix or ""
+
+        for obj_key, obj in sorted(self.objects.items()):
+            b, k = obj_key.split("/", 1)
+            if b != bucket or not k.startswith(prefix):
+                continue
+            if marker and k <= marker:
+                continue
+
+            # Handle delimiter for grouping
+            if delimiter:
+                suffix = k[len(prefix):]
+                if delimiter in suffix:
+                    common_prefix = prefix + suffix[:suffix.index(delimiter) + len(delimiter)]
+                    common_prefixes.add(common_prefix)
+                    continue
+
+            contents.append({
+                "Key": k,
+                "Size": obj["ContentLength"],
+                "ETag": obj["ETag"],
+                "LastModified": obj["LastModified"],
+                "StorageClass": "STANDARD",
+            })
+
+        is_truncated = len(contents) > max_keys
+        contents = contents[:max_keys]
+        next_marker = contents[-1]["Key"] if is_truncated and contents else None
+
+        return {
+            "Contents": contents,
+            "CommonPrefixes": [{"Prefix": cp} for cp in sorted(common_prefixes)],
+            "IsTruncated": is_truncated,
+            "NextMarker": next_marker,
+        }
+
+    async def get_object_tagging(self, bucket: str, key: str) -> dict:
+        """Get object tags."""
+        self.call_history.append(("get_object_tagging", {"bucket": bucket, "key": key}))
+        obj_key = self._key(bucket, key)
+        if obj_key not in self.objects:
+            raise self._not_found_error(key)
+
+        obj = self.objects[obj_key]
+        return {"TagSet": obj.get("Tags", [])}
+
+    async def put_object_tagging(
+        self, bucket: str, key: str, tags: list[dict[str, str]]
+    ) -> dict:
+        """Set object tags."""
+        self.call_history.append(("put_object_tagging", {"bucket": bucket, "key": key, "tags": tags}))
+        obj_key = self._key(bucket, key)
+        if obj_key not in self.objects:
+            raise self._not_found_error(key)
+
+        self.objects[obj_key]["Tags"] = tags
+        return {}
+
+    async def delete_object_tagging(self, bucket: str, key: str) -> dict:
+        """Delete object tags."""
+        self.call_history.append(("delete_object_tagging", {"bucket": bucket, "key": key}))
+        obj_key = self._key(bucket, key)
+        if obj_key not in self.objects:
+            raise self._not_found_error(key)
+
+        self.objects[obj_key]["Tags"] = []
+        return {}
+
+    async def upload_part_copy(
+        self,
+        bucket: str,
+        key: str,
+        upload_id: str,
+        part_number: int,
+        copy_source: str,
+        copy_source_range: str | None = None,
+    ) -> dict:
+        """Copy a part from another object."""
+        self.call_history.append(("upload_part_copy", {
+            "bucket": bucket, "key": key, "upload_id": upload_id,
+            "part_number": part_number, "copy_source": copy_source,
+        }))
+        if upload_id not in self.multipart_uploads:
+            raise self._not_found_error(f"upload {upload_id}")
+
+        # Parse source
+        source = copy_source.lstrip("/")
+        src_bucket, src_key = source.split("/", 1)
+        src_obj_key = self._key(src_bucket, src_key)
+
+        if src_obj_key not in self.objects:
+            raise self._not_found_error(src_key)
+
+        src_obj = self.objects[src_obj_key]
+        body = src_obj["Body"]
+
+        # Handle range if specified
+        if copy_source_range:
+            range_spec = copy_source_range.replace("bytes=", "")
+            start, end = range_spec.split("-")
+            start = int(start)
+            end = int(end)
+            body = body[start:end + 1]
+
+        etag = hashlib.md5(body).hexdigest()
+        self.multipart_uploads[upload_id]["Parts"][part_number] = {
+            "Body": body,
+            "ETag": etag,
+            "Size": len(body),
+            "LastModified": datetime.now(UTC),
+        }
+        return {
+            "CopyPartResult": {
+                "ETag": f'"{etag}"',
+                "LastModified": datetime.now(UTC),
+            }
+        }
+
     def _not_found_error(self, key: str):
         """Create a NoSuchKey error."""
         error = Exception(f"NoSuchKey: {key}")
@@ -531,6 +673,24 @@ def mock_s3_client(mock_s3, settings, credentials):
 
         async def list_parts(self, *args, **kwargs):
             return await self._mock.list_parts(*args, **kwargs)
+
+        async def list_buckets(self, *args, **kwargs):
+            return await self._mock.list_buckets(*args, **kwargs)
+
+        async def list_objects_v1(self, *args, **kwargs):
+            return await self._mock.list_objects_v1(*args, **kwargs)
+
+        async def get_object_tagging(self, *args, **kwargs):
+            return await self._mock.get_object_tagging(*args, **kwargs)
+
+        async def put_object_tagging(self, *args, **kwargs):
+            return await self._mock.put_object_tagging(*args, **kwargs)
+
+        async def delete_object_tagging(self, *args, **kwargs):
+            return await self._mock.delete_object_tagging(*args, **kwargs)
+
+        async def upload_part_copy(self, *args, **kwargs):
+            return await self._mock.upload_part_copy(*args, **kwargs)
 
     return PatchedS3Client(mock_s3)
 

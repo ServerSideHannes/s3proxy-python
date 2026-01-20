@@ -124,7 +124,7 @@ case "${1:-run}" in
           echo \"Creating 100KB test file...\"
           dd if=/dev/urandom of=/tmp/encrypt-test.bin bs=1K count=100 2>/dev/null
           ORIG_SIZE=\$(stat -c%s /tmp/encrypt-test.bin 2>/dev/null || stat -f%z /tmp/encrypt-test.bin)
-          ORIG_MD5=\$(md5sum /tmp/encrypt-test.bin | cut -d' ' -f1)
+          ORIG_MD5=\$(md5sum /tmp/encrypt-test.bin | cut -c1-32)
           echo \"Original: \${ORIG_SIZE} bytes, MD5: \$ORIG_MD5\"
 
           # Upload through s3proxy (gets encrypted)
@@ -137,7 +137,7 @@ case "${1:-run}" in
 
           if [ -f /tmp/raw/encrypt-test.bin ]; then
             RAW_SIZE=\$(stat -c%s /tmp/raw/encrypt-test.bin 2>/dev/null || stat -f%z /tmp/raw/encrypt-test.bin)
-            RAW_MD5=\$(md5sum /tmp/raw/encrypt-test.bin | cut -d' ' -f1)
+            RAW_MD5=\$(md5sum /tmp/raw/encrypt-test.bin | cut -c1-32)
             echo \"Raw:      \${RAW_SIZE} bytes, MD5: \$RAW_MD5\"
 
             # AES-256-GCM adds exactly 28 bytes: 12-byte nonce + 16-byte auth tag
@@ -151,7 +151,7 @@ case "${1:-run}" in
               # Also verify decryption works
               aws --endpoint-url http://s3-gateway.s3proxy s3 cp s3://load-test-bucket/encrypt-test.bin /tmp/decrypted.bin
               DEC_SIZE=\$(stat -c%s /tmp/decrypted.bin 2>/dev/null || stat -f%z /tmp/decrypted.bin)
-              DEC_MD5=\$(md5sum /tmp/decrypted.bin | cut -d' ' -f1)
+              DEC_MD5=\$(md5sum /tmp/decrypted.bin | cut -c1-32)
               echo \"Decrypted: \${DEC_SIZE} bytes, MD5: \$DEC_MD5\"
 
               if [ \"\$ORIG_SIZE\" = \"\$DEC_SIZE\" ] && [ \"\$ORIG_MD5\" = \"\$DEC_MD5\" ]; then

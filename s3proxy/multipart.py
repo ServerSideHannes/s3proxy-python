@@ -40,9 +40,11 @@ from .s3client import S3Client
 
 logger = structlog.get_logger()
 
-# Metadata suffix for multipart uploads
-META_SUFFIX = ".s3proxy-meta"
-UPLOAD_STATE_SUFFIX = ".s3proxy-upload-"
+# Internal prefix for all s3proxy metadata (hidden from list operations)
+INTERNAL_PREFIX = ".s3proxy-internal/"
+
+# Legacy suffix for backwards compatibility detection
+META_SUFFIX_LEGACY = ".s3proxy-meta"
 
 # Redis key prefix for upload state
 REDIS_KEY_PREFIX = "s3proxy:upload:"
@@ -318,6 +320,16 @@ def decode_multipart_metadata(encoded: str) -> MultipartMetadata:
     )
 
 
+def _internal_upload_key(key: str, upload_id: str) -> str:
+    """Get internal key for upload state."""
+    return f"{INTERNAL_PREFIX}{key}.upload-{upload_id}"
+
+
+def _internal_meta_key(key: str) -> str:
+    """Get internal key for multipart metadata."""
+    return f"{INTERNAL_PREFIX}{key}.meta"
+
+
 async def persist_upload_state(
     s3_client: S3Client,
     bucket: str,
@@ -326,7 +338,7 @@ async def persist_upload_state(
     wrapped_dek: bytes,
 ) -> None:
     """Persist DEK to S3 during upload."""
-    state_key = f"{key}{UPLOAD_STATE_SUFFIX}{upload_id}"
+    state_key = _internal_upload_key(key, upload_id)
     data = {"dek": base64.b64encode(wrapped_dek).decode()}
 
     await s3_client.put_object(
@@ -345,7 +357,7 @@ async def load_upload_state(
     kek: bytes,
 ) -> bytes | None:
     """Load DEK from S3 for resumed upload."""
-    state_key = f"{key}{UPLOAD_STATE_SUFFIX}{upload_id}"
+    state_key = _internal_upload_key(key, upload_id)
 
     try:
         response = await s3_client.get_object(bucket, state_key)
@@ -365,7 +377,7 @@ async def delete_upload_state(
     upload_id: str,
 ) -> None:
     """Delete persisted upload state."""
-    state_key = f"{key}{UPLOAD_STATE_SUFFIX}{upload_id}"
+    state_key = _internal_upload_key(key, upload_id)
     with contextlib.suppress(Exception):
         await s3_client.delete_object(bucket, state_key)
 
@@ -377,7 +389,7 @@ async def save_multipart_metadata(
     meta: MultipartMetadata,
 ) -> None:
     """Save multipart metadata to S3."""
-    meta_key = f"{key}{META_SUFFIX}"
+    meta_key = _internal_meta_key(key)
     encoded = encode_multipart_metadata(meta)
 
     await s3_client.put_object(
@@ -393,11 +405,24 @@ async def load_multipart_metadata(
     bucket: str,
     key: str,
 ) -> MultipartMetadata | None:
-    """Load multipart metadata from S3."""
-    meta_key = f"{key}{META_SUFFIX}"
+    """Load multipart metadata from S3.
 
+    Checks the new internal prefix first, then falls back to legacy location.
+    """
+    # Try new location first
+    meta_key = _internal_meta_key(key)
     try:
         response = await s3_client.get_object(bucket, meta_key)
+        body = await response["Body"].read()
+        encoded = body.decode()
+        return decode_multipart_metadata(encoded)
+    except Exception:
+        pass
+
+    # Fall back to legacy location for backwards compatibility
+    legacy_key = f"{key}{META_SUFFIX_LEGACY}"
+    try:
+        response = await s3_client.get_object(bucket, legacy_key)
         body = await response["Body"].read()
         encoded = body.decode()
         return decode_multipart_metadata(encoded)
@@ -410,10 +435,16 @@ async def delete_multipart_metadata(
     bucket: str,
     key: str,
 ) -> None:
-    """Delete multipart metadata from S3."""
-    meta_key = f"{key}{META_SUFFIX}"
+    """Delete multipart metadata from S3 (both new and legacy locations)."""
+    # Delete from new location
+    meta_key = _internal_meta_key(key)
     with contextlib.suppress(Exception):
         await s3_client.delete_object(bucket, meta_key)
+
+    # Also delete legacy location if it exists
+    legacy_key = f"{key}{META_SUFFIX_LEGACY}"
+    with contextlib.suppress(Exception):
+        await s3_client.delete_object(bucket, legacy_key)
 
 
 def calculate_part_range(

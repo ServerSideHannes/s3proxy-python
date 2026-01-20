@@ -233,3 +233,121 @@ def list_parts(
     <IsTruncated>{str(is_truncated).lower()}</IsTruncated>
     <StorageClass>{storage_class}</StorageClass>{parts_xml}
 </ListPartsResult>"""
+
+
+def list_buckets(owner: dict, buckets: list[dict]) -> str:
+    """Build ListAllMyBucketsResult XML.
+
+    Args:
+        owner: Owner dict with ID and DisplayName
+        buckets: List of bucket dicts with Name and CreationDate
+    """
+    buckets_xml = ""
+    for b in buckets:
+        creation_date = b.get("CreationDate", "")
+        if hasattr(creation_date, "isoformat"):
+            creation_date = creation_date.isoformat()
+        buckets_xml += f"""
+        <Bucket>
+            <Name>{escape(b.get("Name", ""))}</Name>
+            <CreationDate>{creation_date}</CreationDate>
+        </Bucket>"""
+
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+    <Owner>
+        <ID>{escape(owner.get("ID", ""))}</ID>
+        <DisplayName>{escape(owner.get("DisplayName", ""))}</DisplayName>
+    </Owner>
+    <Buckets>{buckets_xml}
+    </Buckets>
+</ListAllMyBucketsResult>"""
+
+
+def list_objects_v1(
+    bucket: str,
+    prefix: str,
+    marker: str | None,
+    delimiter: str | None,
+    max_keys: int,
+    is_truncated: bool,
+    next_marker: str | None,
+    objects: list[dict],
+    common_prefixes: list[str] | None = None,
+) -> str:
+    """Build ListBucketResult XML for V1 API.
+
+    Args:
+        bucket: Bucket name
+        prefix: Prefix filter
+        marker: Marker from request
+        delimiter: Delimiter for grouping
+        max_keys: Max keys requested
+        is_truncated: Whether there are more results
+        next_marker: Next marker for pagination
+        objects: List of object dicts
+        common_prefixes: List of common prefix strings
+    """
+    objects_xml = ""
+    for obj in objects:
+        objects_xml += f"""
+    <Contents>
+        <Key>{escape(obj["key"])}</Key>
+        <LastModified>{obj["last_modified"]}</LastModified>
+        <ETag>"{obj["etag"]}"</ETag>
+        <Size>{obj["size"]}</Size>
+        <StorageClass>{obj.get("storage_class", "STANDARD")}</StorageClass>
+    </Contents>"""
+
+    marker_xml = f"<Marker>{escape(marker or '')}</Marker>"
+    next_marker_xml = f"<NextMarker>{escape(next_marker or '')}</NextMarker>" if next_marker else ""
+    delimiter_xml = f"<Delimiter>{escape(delimiter)}</Delimiter>" if delimiter else ""
+
+    prefixes_xml = ""
+    if common_prefixes:
+        for cp in common_prefixes:
+            prefixes_xml += f"""
+    <CommonPrefixes>
+        <Prefix>{escape(cp)}</Prefix>
+    </CommonPrefixes>"""
+
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+    <Name>{bucket}</Name>
+    <Prefix>{escape(prefix)}</Prefix>
+    {marker_xml}
+    {delimiter_xml}
+    <MaxKeys>{max_keys}</MaxKeys>
+    <IsTruncated>{str(is_truncated).lower()}</IsTruncated>
+    {next_marker_xml}{objects_xml}{prefixes_xml}
+</ListBucketResult>"""
+
+
+def get_tagging(tags: list[dict]) -> str:
+    """Build GetObjectTaggingResult XML.
+
+    Args:
+        tags: List of tag dicts with Key and Value
+    """
+    tags_xml = ""
+    for tag in tags:
+        tags_xml += f"""
+        <Tag>
+            <Key>{escape(tag.get("Key", ""))}</Key>
+            <Value>{escape(tag.get("Value", ""))}</Value>
+        </Tag>"""
+
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<Tagging xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+    <TagSet>{tags_xml}
+    </TagSet>
+</Tagging>"""
+
+
+def upload_part_copy_result(etag: str, last_modified: str) -> str:
+    """Build CopyPartResult XML."""
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<CopyPartResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+    <ETag>"{etag}"</ETag>
+    <LastModified>{last_modified}</LastModified>
+</CopyPartResult>"""

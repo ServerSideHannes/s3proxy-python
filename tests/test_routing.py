@@ -13,6 +13,7 @@ from s3proxy.main import (
     QUERY_LIST_TYPE,
     QUERY_LOCATION,
     QUERY_PART_NUMBER,
+    QUERY_TAGGING,
     QUERY_UPLOAD_ID,
     QUERY_UPLOADS,
     _handle_bucket_operation,
@@ -92,6 +93,10 @@ class TestQueryConstants:
     def test_delete_constant(self):
         """Test delete query constant."""
         assert QUERY_DELETE == "delete"
+
+    def test_tagging_constant(self):
+        """Test tagging query constant."""
+        assert QUERY_TAGGING == "tagging"
 
 
 class TestHeaderConstants:
@@ -180,6 +185,37 @@ class TestRoutingDecisions:
         method = METHOD_PUT
         assert HEADER_COPY_SOURCE in headers and method == METHOD_PUT
 
+    def test_get_object_tagging_detected(self):
+        """Test get object tagging is detected."""
+        query = "tagging"
+        method = METHOD_GET
+        assert QUERY_TAGGING in query and method == METHOD_GET
+
+    def test_put_object_tagging_detected(self):
+        """Test put object tagging is detected."""
+        query = "tagging"
+        method = METHOD_PUT
+        assert QUERY_TAGGING in query and method == METHOD_PUT
+
+    def test_delete_object_tagging_detected(self):
+        """Test delete object tagging is detected."""
+        query = "tagging"
+        method = METHOD_DELETE
+        assert QUERY_TAGGING in query and method == METHOD_DELETE
+
+    def test_upload_part_copy_detected(self):
+        """Test upload part copy is detected."""
+        query = "uploadId=abc123&partNumber=1"
+        headers = {"x-amz-copy-source": "source-bucket/source-key"}
+        method = METHOD_PUT
+        # UploadPartCopy: PUT with uploadId AND x-amz-copy-source
+        is_upload_part_copy = (
+            QUERY_UPLOAD_ID in query
+            and method == METHOD_PUT
+            and HEADER_COPY_SOURCE in headers
+        )
+        assert is_upload_part_copy is True
+
 
 class TestPathParsing:
     """Test path parsing for bucket and key extraction."""
@@ -235,11 +271,14 @@ class TestQueryStringRouting:
         assert QUERY_UPLOADS not in query
         assert QUERY_UPLOAD_ID not in query
 
-    def test_tagging_query_forwarded(self):
-        """Test ?tagging is forwarded to backend."""
+    def test_tagging_query_handled(self):
+        """Test ?tagging is handled by tagging handlers."""
         query = "tagging"
-        # This should not match any special handlers
+        # Tagging is now handled by our implementation
+        assert QUERY_TAGGING in query
+        # Should not match multipart handlers
         assert QUERY_UPLOADS not in query
+        assert QUERY_UPLOAD_ID not in query
 
     def test_combined_query_params(self):
         """Test combined query parameters are handled."""

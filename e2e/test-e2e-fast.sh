@@ -577,16 +577,24 @@ test_8_list_filtering() {
     aws s3 cp "$TEST_DIR/manifest.txt" "s3://$bucket/backups/manifest" --endpoint-url $PROXY_URL >/dev/null
     aws s3 cp "$TEST_DIR/size-1048576.bin" "s3://$bucket/backups/large.bin" --endpoint-url $PROXY_URL >/dev/null
 
-    # Inject .s3proxy-meta directly
-    print_step "Injecting metadata file directly to MinIO..."
+    # Inject legacy .s3proxy-meta directly
+    print_step "Injecting legacy metadata file directly to MinIO..."
     echo "meta" > "$TEST_DIR/meta.txt"
     aws s3 cp "$TEST_DIR/meta.txt" "s3://$bucket/backups/injected.s3proxy-meta" --endpoint-url $MINIO_URL >/dev/null
 
+    # Inject new internal prefix metadata
+    print_step "Injecting internal prefix metadata file directly to MinIO..."
+    aws s3 cp "$TEST_DIR/meta.txt" "s3://$bucket/.s3proxy-internal/backups/test.meta" --endpoint-url $MINIO_URL >/dev/null
+
     # Check filtering
     print_step "Verifying metadata files are hidden..."
-    local proxy_listing=$(aws s3 ls "s3://$bucket/backups/" --endpoint-url $PROXY_URL 2>/dev/null || echo "")
-    if echo "$proxy_listing" | grep -q "\.s3proxy-meta"; then
-        print_error ".s3proxy-meta visible through proxy!"
+    local proxy_listing=$(aws s3 ls "s3://$bucket/" --recursive --endpoint-url $PROXY_URL 2>/dev/null || echo "")
+    local has_legacy=$(echo "$proxy_listing" | grep -q "\.s3proxy-meta" && echo "yes" || echo "no")
+    local has_internal=$(echo "$proxy_listing" | grep -q "\.s3proxy-internal" && echo "yes" || echo "no")
+
+    if [ "$has_legacy" = "yes" ] || [ "$has_internal" = "yes" ]; then
+        [ "$has_legacy" = "yes" ] && print_error ".s3proxy-meta visible through proxy!"
+        [ "$has_internal" = "yes" ] && print_error ".s3proxy-internal/ visible through proxy!"
         echo "FAIL" > "$RESULT_DIR/test8"
         end_test "8" "FAIL"
     else
