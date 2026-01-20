@@ -118,3 +118,25 @@ resources:
 service:
   type: ClusterIP
   port: 4433
+
+# Gateway + Ingress for request-level load balancing
+# Internal: gateway.enabled=true, ingress.enabled=true -> http://s3-gateway.<namespace>
+# External: gateway.enabled=false, ingress.enabled=true, hosts=[...] -> http://your-domain.com
+gateway:
+  enabled: false
+  serviceName: s3-gateway
+  ingressService: ingress-nginx-controller.ingress-nginx.svc.cluster.local
+
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/upstream-keepalive-connections: "100"
+  tls: []
+  hosts: []

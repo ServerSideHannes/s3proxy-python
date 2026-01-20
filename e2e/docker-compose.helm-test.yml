@@ -79,6 +79,19 @@ services:
         done
         kubectl get nodes
 
+        echo "=== Installing NGINX Ingress Controller ==="
+        helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+        helm repo update
+
+        # Install NGINX Controller with settings optimized for Kind
+        helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+          --namespace ingress-nginx --create-namespace \
+          --set controller.service.type=ClusterIP \
+          --set controller.admissionWebhooks.enabled=false \
+          --wait --timeout 300s
+
+        echo "✓ Ingress Controller installed"
+
         echo "=== Building s3proxy image ==="
         docker build -t s3proxy:latest /app
 
@@ -101,6 +114,8 @@ services:
           --set image.repository=s3proxy \
           --set image.pullPolicy=IfNotPresent \
           --set secrets.encryptKey="$$ENCRYPT_KEY" \
+          --set gateway.enabled=true \
+          --set ingress.enabled=true \
           --set redis-ha.persistentVolume.enabled=false \
           --set redis-ha.hardAntiAffinity=false \
           --set redis-ha.affinity=null \

@@ -38,6 +38,17 @@ case "${1:-run}" in
   load-test)
     echo "Running S3 load test (3 concurrent 512MB uploads)..."
     docker compose -f $COMPOSE_FILE exec helm-test sh -c '
+      # Get pod names for load balancing verification
+      PODS=$(kubectl get pods -n s3proxy -l app=s3proxy-python -o jsonpath="{.items[*].metadata.name}")
+      POD_COUNT=$(echo $PODS | wc -w)
+      echo "Found $POD_COUNT s3proxy pods: $PODS"
+
+      # Save current log line counts
+      mkdir -p /tmp/lb-test
+      for pod in $PODS; do
+        kubectl logs $pod -n s3proxy 2>/dev/null | wc -l > /tmp/lb-test/$pod.start
+      done
+
       echo "=== Creating test pod with AWS CLI ==="
       kubectl run s3-load-test -n s3proxy --rm -it --restart=Never \
         --image=amazon/aws-cli:latest \
@@ -47,7 +58,7 @@ case "${1:-run}" in
         --command -- /bin/sh -c "
           # Create test bucket
           echo \"Creating test bucket...\"
-          aws --endpoint-url http://s3proxy-python:4433 s3 mb s3://load-test-bucket 2>/dev/null || true
+          aws --endpoint-url http://s3-gateway.s3proxy s3 mb s3://load-test-bucket 2>/dev/null || true
 
           # Generate 3 random 512MB files
           echo \"Generating 512MB test files...\"
@@ -65,7 +76,7 @@ case "${1:-run}" in
           START=\$(date +%s)
 
           for i in 1 2 3; do
-            aws --endpoint-url http://s3proxy-python:4433 s3 cp /tmp/testfiles/file-\$i.bin s3://load-test-bucket/file-\$i.bin &
+            aws --endpoint-url http://s3-gateway.s3proxy s3 cp /tmp/testfiles/file-\$i.bin s3://load-test-bucket/file-\$i.bin &
           done
           wait
 
@@ -77,14 +88,14 @@ case "${1:-run}" in
           # Verify uploads
           echo \"\"
           echo \"=== Listing uploaded files ===\"
-          aws --endpoint-url http://s3proxy-python:4433 s3 ls s3://load-test-bucket/
+          aws --endpoint-url http://s3-gateway.s3proxy s3 ls s3://load-test-bucket/
 
           # Download and verify
           echo \"\"
           echo \"=== Downloading files to verify ===\"
           mkdir -p /tmp/downloads
           for i in 1 2 3; do
-            aws --endpoint-url http://s3proxy-python:4433 s3 cp s3://load-test-bucket/file-\$i.bin /tmp/downloads/file-\$i.bin &
+            aws --endpoint-url http://s3-gateway.s3proxy s3 cp s3://load-test-bucket/file-\$i.bin /tmp/downloads/file-\$i.bin &
           done
           wait
 
@@ -105,6 +116,29 @@ case "${1:-run}" in
             exit 1
           fi
         "
+
+      # Verify load balancing
+      echo ""
+      echo "=== Checking load balancing ==="
+      sleep 2
+      PODS_HIT=0
+      for pod in $PODS; do
+        START_LINE=$(cat /tmp/lb-test/$pod.start 2>/dev/null || echo "0")
+        REQUEST_COUNT=$(kubectl logs $pod -n s3proxy 2>/dev/null | tail -n +$((START_LINE + 1)) | grep -c -E "GET|POST|PUT|HEAD" || echo "0")
+        if [ "$REQUEST_COUNT" -gt 0 ]; then
+          PODS_HIT=$((PODS_HIT + 1))
+          echo "✓ Pod $pod: received $REQUEST_COUNT requests"
+        else
+          echo "  Pod $pod: received 0 requests"
+        fi
+      done
+      rm -rf /tmp/lb-test
+
+      if [ "$PODS_HIT" -ge 2 ]; then
+        echo "✓ Load balancing verified - traffic distributed across $PODS_HIT pods"
+      else
+        echo "⚠ Traffic went to only $PODS_HIT pod(s)"
+      fi
     '
     ;;
   watch)
@@ -175,7 +209,7 @@ case "${1:-run}" in
     echo "  status     - Show deployment status"
     echo "  pods       - Show pod details and resources"
     echo "  logs       - Stream s3proxy logs"
-    echo "  load-test  - Run 1.5GB concurrent upload test"
+    echo "  load-test  - Run 1.5GB concurrent upload test + verify load balancing"
     echo "  redis      - Inspect Redis keys and memory"
     echo "  watch      - Live pod CPU/memory (installs metrics-server)"
     echo "  shell      - Interactive kubectl shell"
