@@ -3,11 +3,11 @@
 replicaCount: 3
 
 image:
-  repository: ghcr.io/YOUR_USERNAME/sseproxy-python
+  repository: ghcr.io/ServerSideHannes/sseproxy-python
   tag: latest
   pullPolicy: IfNotPresent
 
-# S3 configuration (used when minio.enabled=false)
+# S3 backend configuration
 s3:
   host: "s3.amazonaws.com"
   region: "us-east-1"
@@ -19,23 +19,6 @@ server:
 performance:
   throttlingRequestsMax: 10
   maxUploadSizeMb: 45
-
-# Embedded MinIO (set enabled: false to use external S3)
-minio:
-  enabled: true
-  image:
-    repository: minio/minio
-    tag: latest
-    pullPolicy: IfNotPresent
-  rootUser: "minioadmin"
-  rootPassword: "minioadmin"
-  resources:
-    requests:
-      cpu: "50m"
-      memory: "128Mi"
-    limits:
-      cpu: "500m"
-      memory: "512Mi"
 
 # External Redis (for managed services)
 externalRedis:

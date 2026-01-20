@@ -5,11 +5,7 @@ metadata:
   labels:
     app.kubernetes.io/name: {{ .Chart.Name }}
 data:
-  {{- if .Values.minio.enabled }}
-  S3PROXY_HOST: "http://{{ .Chart.Name }}-minio:9000"
-  {{- else }}
   S3PROXY_HOST: {{ .Values.s3.host | quote }}
-  {{- end }}
   S3PROXY_REGION: {{ .Values.s3.region | quote }}
   S3PROXY_IP: "0.0.0.0"
   S3PROXY_PORT: {{ .Values.server.port | quote }}

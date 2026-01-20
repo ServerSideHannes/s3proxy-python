@@ -133,7 +133,7 @@ case "${1:-run}" in
           # Download raw from MinIO directly (bypassing s3proxy decryption)
           echo \"Downloading raw encrypted data from MinIO...\"
           mkdir -p /tmp/raw
-          aws --endpoint-url http://s3proxy-python-minio:9000 s3 cp s3://load-test-bucket/encrypt-test.bin /tmp/raw/encrypt-test.bin 2>/dev/null || true
+          aws --endpoint-url http://minio:9000 s3 cp s3://load-test-bucket/encrypt-test.bin /tmp/raw/encrypt-test.bin 2>/dev/null || true
 
           if [ -f /tmp/raw/encrypt-test.bin ]; then
             RAW_SIZE=\$(stat -c%s /tmp/raw/encrypt-test.bin 2>/dev/null || stat -f%z /tmp/raw/encrypt-test.bin)

@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  Drop-in S3 proxy that encrypts everything on the fly with military-grade AES-256-GCM.<br/>
+  Drop-in S3 proxy that encrypts everything on the fly with AES-256-GCM.<br/>
   Your apps talk to S3Proxy. S3Proxy talks to S3. Your data stays yours.
 </p>
 
@@ -45,7 +45,7 @@ S3's server-side encryption is great, but your cloud provider still holds the ke
 
 🔄 **100% S3 Compatible** — Works with any S3 client, SDK, or CLI. No code changes.
 
-⚡ **Blazing Fast** — Async Python with HTTP/2, uvloop, and streaming I/O
+⚡ **Streaming I/O** — Async Python with streaming encryption, no memory buffering
 
 📦 **Multipart Support** — Large file uploads just work, encrypted seamlessly
 
@@ -153,30 +153,15 @@ The Helm chart includes:
 ## 🧪 Testing
 
 ```bash
-# Run all tests
-pytest
+# Unit tests
+make test
 
-# With coverage
-pytest --cov=s3proxy
+# E2E tests (Docker Compose)
+make e2e
 
-# E2E tests (requires Docker)
-./e2e/test-e2e-fast.sh
+# Full cluster test (Kind + Helm + load test)
+make cluster-test
 ```
-
----
-
-## 📊 Performance
-
-![Benchmark](benchmarks/results/benchmark.png)
-
-*64KB objects, 10 concurrent connections, 3×30s runs. ~60% overhead is primarily from the extra network hop (Client→Proxy→S3) plus encryption.*
-
-S3Proxy is built for throughput:
-
-- **Streaming I/O** — Large files never buffer in memory
-- **HTTP/2** — Connection multiplexing & pooling
-- **uvloop** — 2-4x faster than default asyncio
-- **Horizontal scaling** — Redis-backed state, run N replicas
 
 ---
 
@@ -200,7 +185,7 @@ PRs welcome! Please include tests for new functionality.
 uv sync
 
 # Run tests before submitting
-pytest
+make test
 ```
 
 ---
@@ -214,4 +199,3 @@ MIT
 <p align="center">
   <sub>Built with 🔐 by engineers who believe encryption should be easy.</sub>
 </p>
-# s3proxy-python

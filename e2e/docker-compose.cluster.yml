@@ -103,6 +103,52 @@ services:
         echo "=== Loading image into kind ==="
         kind load docker-image s3proxy:latest --name s3proxy-test
 
+        echo "=== Deploying MinIO for testing ==="
+        kubectl create namespace s3proxy 2>/dev/null || true
+        cat <<MINIOEOF | kubectl apply -n s3proxy -f -
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: minio
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: minio
+          template:
+            metadata:
+              labels:
+                app: minio
+            spec:
+              containers:
+              - name: minio
+                image: minio/minio:latest
+                args: ["server", "/data", "--console-address", ":9001"]
+                env:
+                - name: MINIO_ROOT_USER
+                  value: minioadmin
+                - name: MINIO_ROOT_PASSWORD
+                  value: minioadmin
+                ports:
+                - containerPort: 9000
+                - containerPort: 9001
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: minio
+        spec:
+          selector:
+            app: minio
+          ports:
+          - name: api
+            port: 9000
+          - name: console
+            port: 9001
+        MINIOEOF
+        kubectl wait --for=condition=ready pod -l app=minio -n s3proxy --timeout=120s
+        echo "✓ MinIO deployed"
+
         echo "=== Installing Helm chart ==="
         # Add Helm repositories
         helm repo add dandydeveloper https://dandydeveloper.github.io/charts
@@ -113,18 +159,19 @@ services:
 
         # Generate encryption key for testing
         ENCRYPT_KEY=$$(openssl rand -base64 32)
-        echo "Installing Helm chart (this may take a few minutes)..."
+        echo "Installing Helm chart..."
         helm upgrade --install s3proxy /app/manifests \
-          -n s3proxy --create-namespace --wait --timeout 1200s \
+          -n s3proxy --wait --timeout 1200s \
           --set image.repository=s3proxy \
           --set image.pullPolicy=IfNotPresent \
+          --set s3.host="http://minio:9000" \
           --set secrets.encryptKey="$$ENCRYPT_KEY" \
+          --set secrets.awsAccessKeyId="minioadmin" \
+          --set secrets.awsSecretAccessKey="minioadmin" \
           --set gateway.enabled=true \
           --set ingress.enabled=true \
           --set resources.limits.cpu=500m \
           --set resources.requests.cpu=500m \
-          --set minio.resources.limits.cpu=2000m \
-          --set minio.resources.requests.cpu=500m \
           --set redis-ha.persistentVolume.enabled=false \
           --set redis-ha.hardAntiAffinity=false \
           --set redis-ha.affinity=null \
@@ -137,7 +184,6 @@ services:
         echo "=== Waiting for pods to be ready ==="
         kubectl wait --for=condition=ready pod -l app=s3proxy-python -n s3proxy --timeout=120s || true
         kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=redis-ha -n s3proxy --timeout=120s || true
-        kubectl wait --for=condition=ready pod -l app=minio -n s3proxy --timeout=120s || true
 
         echo "=== Pod Logs ==="
         kubectl logs -l app=s3proxy-python -n s3proxy --tail=20 || true
