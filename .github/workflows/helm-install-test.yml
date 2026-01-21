@@ -1,0 +1,166 @@
+name: Helm Install Test
+
+on:
+  schedule:
+    # Run daily at 6 AM UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  helm-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1
+        with:
+          node_image: kindest/node:v1.29.2
+          cluster_name: helm-test
+
+      - name: Deploy MinIO as S3 backend
+        run: |
+          kubectl create namespace s3proxy
+          cat <<EOF | kubectl apply -n s3proxy -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: minio
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: minio
+            template:
+              metadata:
+                labels:
+                  app: minio
+              spec:
+                containers:
+                - name: minio
+                  image: minio/minio:latest
+                  args: ["server", "/data"]
+                  env:
+                  - name: MINIO_ROOT_USER
+                    value: minioadmin
+                  - name: MINIO_ROOT_PASSWORD
+                    value: minioadmin
+                  ports:
+                  - containerPort: 9000
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: minio
+          spec:
+            selector:
+              app: minio
+            ports:
+            - port: 9000
+          EOF
+          kubectl wait --for=condition=ready pod -l app=minio -n s3proxy --timeout=120s
+
+      - name: Add Helm repos
+        run: |
+          helm repo add dandydev https://dandydeveloper.github.io/charts
+          helm repo update
+
+      - name: Build Helm dependencies
+        run: helm dependency build manifests/
+
+      - name: Install chart from GHCR image
+        run: |
+          helm install s3proxy manifests/ \
+            --namespace s3proxy \
+            --set image.repository=ghcr.io/serversidehannes/sseproxy-python \
+            --set image.tag=latest \
+            --set image.pullPolicy=Always \
+            --set s3.host="http://minio:9000" \
+            --set secrets.encryptKey=test-encryption-key-for-ci \
+            --set secrets.awsAccessKeyId=minioadmin \
+            --set secrets.awsSecretAccessKey=minioadmin \
+            --set redis-ha.enabled=false \
+            --set replicaCount=1 \
+            --wait \
+            --timeout 5m
+
+      - name: Verify pods are running
+        run: |
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=s3proxy-python -n s3proxy --timeout=120s
+          kubectl get pods -n s3proxy
+
+      - name: Check health endpoint
+        run: |
+          kubectl port-forward svc/s3proxy-python 4433:4433 -n s3proxy &
+          sleep 3
+          curl -sf http://localhost:4433/healthz && echo "Health check passed"
+
+      - name: Run S3 smoke test
+        run: |
+          kubectl run s3-smoke-test -n s3proxy --rm -i --restart=Never \
+            --image=amazon/aws-cli:latest \
+            --env="AWS_ACCESS_KEY_ID=minioadmin" \
+            --env="AWS_SECRET_ACCESS_KEY=minioadmin" \
+            --env="AWS_DEFAULT_REGION=us-east-1" \
+            --command -- /bin/sh -c '
+              set -e
+              ENDPOINT="http://s3proxy-python:4433"
+
+              echo "=== Creating test bucket ==="
+              aws --endpoint-url $ENDPOINT s3 mb s3://smoke-test-bucket
+
+              echo "=== Uploading test file ==="
+              echo "Hello from CI smoke test - $(date)" > /tmp/test.txt
+              ORIG_MD5=$(md5sum /tmp/test.txt | cut -c1-32)
+              aws --endpoint-url $ENDPOINT s3 cp /tmp/test.txt s3://smoke-test-bucket/test.txt
+
+              echo "=== Listing bucket ==="
+              aws --endpoint-url $ENDPOINT s3 ls s3://smoke-test-bucket/
+
+              echo "=== Downloading and verifying ==="
+              aws --endpoint-url $ENDPOINT s3 cp s3://smoke-test-bucket/test.txt /tmp/downloaded.txt
+              DOWN_MD5=$(md5sum /tmp/downloaded.txt | cut -c1-32)
+
+              if [ "$ORIG_MD5" = "$DOWN_MD5" ]; then
+                echo "✓ Round-trip successful - checksums match"
+              else
+                echo "✗ Checksum mismatch!"
+                exit 1
+              fi
+
+              echo "=== Verifying encryption (raw read from MinIO) ==="
+              aws --endpoint-url http://minio:9000 s3 cp s3://smoke-test-bucket/test.txt /tmp/raw.txt 2>/dev/null || true
+              if [ -f /tmp/raw.txt ]; then
+                RAW_MD5=$(md5sum /tmp/raw.txt | cut -c1-32)
+                if [ "$ORIG_MD5" != "$RAW_MD5" ]; then
+                  echo "✓ Data is encrypted - raw content differs from original"
+                else
+                  echo "✗ Data NOT encrypted - raw matches original!"
+                  exit 1
+                fi
+              fi
+
+              echo "=== Cleanup ==="
+              aws --endpoint-url $ENDPOINT s3 rm s3://smoke-test-bucket/test.txt
+              aws --endpoint-url $ENDPOINT s3 rb s3://smoke-test-bucket
+
+              echo ""
+              echo "✓ All smoke tests passed!"
+            '
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          echo "=== Pod Status ==="
+          kubectl get pods -n s3proxy -o wide
+          echo ""
+          echo "=== S3Proxy Logs ==="
+          kubectl logs -l app.kubernetes.io/name=s3proxy-python -n s3proxy --tail=100
+          echo ""
+          echo "=== MinIO Logs ==="
+          kubectl logs -l app=minio -n s3proxy --tail=50
+          echo ""
+          echo "=== Events ==="
+          kubectl get events -n s3proxy --sort-by=.lastTimestamp

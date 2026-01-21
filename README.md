@@ -1,4 +1,10 @@
 <p align="center">
+  <a href="https://github.com/ServerSideHannes/s3proxy-python/actions/workflows/helm-install-test.yml">
+    <img src="https://github.com/ServerSideHannes/s3proxy-python/actions/workflows/helm-install-test.yml/badge.svg" alt="Helm Install">
+  </a>
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-00d4aa?style=for-the-badge" alt="AES-256-GCM">
   <img src="https://img.shields.io/badge/python-3.13+-3776ab?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white" alt="FastAPI">
