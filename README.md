@@ -237,6 +237,21 @@ helm install s3proxy ./manifests \
   --set secrets.existingSecrets.name=s3proxy-secrets
 ```
 
+#### Accessing the Proxy
+
+Once deployed, point your S3 clients at the proxy endpoint:
+
+```bash
+# From within the cluster (default service)
+aws s3 --endpoint-url http://s3proxy-python.<namespace>:4433 cp file.txt s3://bucket/
+
+# With gateway enabled (internal DNS alias)
+aws s3 --endpoint-url http://s3-gateway.<namespace> cp file.txt s3://bucket/
+
+# With ingress (external access)
+aws s3 --endpoint-url https://s3proxy.example.com cp file.txt s3://bucket/
+```
+
 #### Configuration Reference
 
 **Core Settings:**
