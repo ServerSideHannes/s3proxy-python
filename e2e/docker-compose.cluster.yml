@@ -161,7 +161,7 @@ services:
         ENCRYPT_KEY=$$(openssl rand -base64 32)
         echo "Installing Helm chart..."
         helm upgrade --install s3proxy /app/manifests \
-          -n s3proxy --wait --timeout 1200s \
+          -n s3proxy --wait --timeout 2400s \
           --set image.repository=s3proxy \
           --set image.pullPolicy=IfNotPresent \
           --set s3.host="http://minio:9000" \
