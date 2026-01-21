@@ -1,6 +1,6 @@
 <p align="center">
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-00d4aa?style=for-the-badge" alt="AES-256-GCM">
-  <img src="https://img.shields.io/badge/python-3.11+-3776ab?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/python-3.13+-3776ab?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white" alt="FastAPI">
   <img src="https://img.shields.io/badge/S3-compatible-ff9900?style=for-the-badge&logo=amazons3&logoColor=white" alt="S3 Compatible">
 </p>
@@ -131,11 +131,9 @@ This breaks the original signature. To forward the request to S3, the proxy must
 └──────────────┘                 └──────────────┘                └──────────────┘
 ```
 
----
+### Encryption
 
-## 🏛️ Architecture
-
-S3Proxy uses a **layered key architecture** for maximum security:
+S3Proxy uses a **layered key architecture**:
 
 | Layer | Key | Purpose |
 |-------|-----|---------|
@@ -147,14 +145,7 @@ Your master key never touches S3. DEKs are wrapped and stored as object metadata
 
 ### Multipart Uploads
 
-Large files are automatically handled via S3 multipart upload:
-
-1. Each part is encrypted independently with its own nonce
-2. Part metadata is tracked in Redis for distributed consistency
-3. On completion, parts are assembled server-side by S3
-4. The final object's metadata contains all part encryption info
-
-This enables streaming uploads of arbitrary size without buffering entire files in memory.
+Large files are handled via S3 multipart upload. Each part is encrypted independently with its own nonce, and part metadata is tracked in Redis (or in-memory for single-instance). This enables streaming uploads of arbitrary size without buffering entire files in memory.
 
 ---
 
