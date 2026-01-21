@@ -269,20 +269,19 @@ helm install s3proxy ./manifests \
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `ingress.enabled` | `false` | Enable ingress for external access |
+| `ingress.enabled` | `false` | Enable ingress for load balancing |
 | `ingress.className` | `nginx` | Ingress class |
 | `ingress.hosts` | `[]` | Hostnames for external access |
-| `gateway.enabled` | `false` | Enable gateway for request-level load balancing |
+| `gateway.enabled` | `false` | Create internal DNS alias (`s3-gateway.<namespace>`) |
 
 **Configuration options:**
 
-| gateway | ingress | Access | Load Balancing |
-|---------|---------|--------|----------------|
-| `true` | `false` | Internal (`s3-gateway.<namespace>`) | Request-level |
-| `false` | `true` | External (`your-domain.com`) | Connection-level |
-| `true` | `true` | External with gateway (recommended) | Request-level |
+| gateway | ingress | Use case |
+|---------|---------|----------|
+| `false` | `true` | External access via custom hostname (requires DNS setup) |
+| `true` | `true` | Internal access via `s3-gateway.<namespace>` (no DNS setup needed) |
 
-> **Why use the gateway?** S3 clients often reuse connections (HTTP keep-alive). Standard ingress does connection-level load balancing, which can cause uneven traffic distribution. The gateway provides request-level balancing for more even distribution across pods.
+> **When to use gateway?** If you only need internal cluster access and don't want to configure DNS for a custom hostname, enable the gateway. It creates a Kubernetes service name that works automatically within the cluster.
 
 #### Example: External Access with Ingress
 

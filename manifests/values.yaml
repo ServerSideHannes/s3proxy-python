@@ -102,9 +102,9 @@ service:
   type: ClusterIP
   port: 4433
 
-# Gateway + Ingress for request-level load balancing
-# Internal: gateway.enabled=true, ingress.enabled=true -> http://s3-gateway.<namespace>
-# External: gateway.enabled=false, ingress.enabled=true, hosts=[...] -> http://your-domain.com
+# Gateway creates internal DNS alias (no external DNS setup needed)
+# Internal: gateway.enabled=true, ingress.enabled=true -> s3-gateway.<namespace>
+# External: gateway.enabled=false, ingress.enabled=true, hosts=[...] -> your-domain.com (requires DNS)
 gateway:
   enabled: false
   serviceName: s3-gateway
