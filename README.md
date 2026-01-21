@@ -246,6 +246,8 @@ aws s3 --endpoint-url https://s3proxy.example.com cp file.txt s3://bucket/
 | `false` | `true` | External access via custom hostname (requires DNS setup) |
 | `true` | `true` | Internal access via `s3-gateway.<namespace>` (no DNS setup needed) |
 
+> **Recommended:** Enable both `gateway.enabled=true` and `ingress.enabled=true`. This routes traffic through the ingress controller for proper load balancing across pods, while providing a convenient internal DNS name (`s3-gateway.<namespace>`) without external DNS configuration.
+
 #### Example: External Access with Ingress
 
 ```yaml
