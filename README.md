@@ -151,44 +151,27 @@ Large files are handled via S3 multipart upload. Each part is encrypted independ
 
 ## ⚙️ Configuration
 
-All settings are configured via environment variables with the `S3PROXY_` prefix.
+Configure via environment variables (Docker) or Helm values (Kubernetes).
 
-### Required
+| Setting | Environment Variable | Helm Value | Default |
+|---------|---------------------|------------|---------|
+| **Encryption key** | `S3PROXY_ENCRYPT_KEY` | `secrets.encryptKey` | — |
+| **AWS Access Key** | `AWS_ACCESS_KEY_ID` | `secrets.awsAccessKeyId` | — |
+| **AWS Secret Key** | `AWS_SECRET_ACCESS_KEY` | `secrets.awsSecretAccessKey` | — |
+| S3 endpoint | `S3PROXY_HOST` | `s3.host` | `s3.amazonaws.com` |
+| AWS region | `S3PROXY_REGION` | `s3.region` | `us-east-1` |
+| Listen port | `S3PROXY_PORT` | `server.port` | `4433` |
+| Disable TLS | `S3PROXY_NO_TLS` | `server.noTls` | `false` |
+| Log level | `S3PROXY_LOG_LEVEL` | `server.logLevel` | `INFO` |
+| Redis URL | `S3PROXY_REDIS_URL` | `externalRedis.url` | *(empty)* |
+| Max concurrent requests | `S3PROXY_THROTTLING_REQUESTS_MAX` | `performance.throttlingRequestsMax` | `10` |
+| Max upload size (MB) | `S3PROXY_MAX_UPLOAD_SIZE_MB` | `performance.maxUploadSizeMb` | `45` |
 
-| Variable | Description |
-|----------|-------------|
-| `S3PROXY_ENCRYPT_KEY` | Master encryption key (32 bytes recommended) |
-| `AWS_ACCESS_KEY_ID` | AWS credentials—used to verify client requests AND sign upstream requests |
-| `AWS_SECRET_ACCESS_KEY` | AWS credentials—clients must use these same credentials |
+> **Credentials:** Clients must use the same `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` configured on the proxy. See [How It Works](#-how-it-works).
 
-> **Important:** Clients must authenticate using the same `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` configured on the proxy. The proxy verifies incoming signatures and re-signs requests before forwarding to S3. See [How It Works](#-how-it-works) for details.
+> **S3-compatible:** Works with AWS S3, MinIO, Cloudflare R2, DigitalOcean Spaces, etc.
 
-### S3 Connection
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `S3PROXY_HOST` | `s3.amazonaws.com` | Upstream S3 endpoint |
-| `S3PROXY_REGION` | `us-east-1` | AWS region for signing |
-
-> Works with any S3-compatible storage: AWS S3, MinIO, Cloudflare R2, DigitalOcean Spaces, etc.
-
-### Server
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `S3PROXY_PORT` | `4433` | Listen port |
-| `S3PROXY_NO_TLS` | `false` | Disable TLS (for local development) |
-| `S3PROXY_LOG_LEVEL` | `INFO` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
-
-### State & Performance
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `S3PROXY_REDIS_URL` | *(empty)* | Redis URL for HA mode (omit for single-instance in-memory storage) |
-| `S3PROXY_THROTTLING_REQUESTS_MAX` | `10` | Max concurrent requests (0 = unlimited) |
-| `S3PROXY_MAX_UPLOAD_SIZE_MB` | `45` | Max single-request upload size in MB |
-
-> **Note:** Redis is only required for multi-instance (HA) deployments where multipart upload state needs to be shared across replicas. For single-instance deployments, the proxy uses in-memory storage.
+> **Redis:** Only required for multi-instance (HA) deployments. Single-instance uses in-memory storage.
 
 ---
 
@@ -230,64 +213,38 @@ helm install s3proxy ./manifests \
 
 #### Accessing the Proxy
 
-Once deployed, point your S3 clients at the proxy endpoint:
+Point your S3 clients at the proxy endpoint:
 
 ```bash
 # From within the cluster (default service)
 aws s3 --endpoint-url http://s3proxy-python.<namespace>:4433 cp file.txt s3://bucket/
 
-# With gateway enabled (recommended for internal access, see Configuration below)
+# With gateway enabled (recommended for internal access)
 aws s3 --endpoint-url http://s3-gateway.<namespace> cp file.txt s3://bucket/
 
 # With ingress (external access)
 aws s3 --endpoint-url https://s3proxy.example.com cp file.txt s3://bucket/
 ```
 
-#### Configuration Reference
+#### Kubernetes-Specific Settings
 
-**Core Settings:**
-
-| Option | Default | Description |
-|--------|---------|-------------|
+| Helm Value | Default | Description |
+|------------|---------|-------------|
 | `replicaCount` | `3` | Number of proxy replicas |
-| `s3.host` | `s3.amazonaws.com` | S3 endpoint (or S3-compatible) |
-| `s3.region` | `us-east-1` | AWS region for signing |
-| `server.port` | `4433` | Proxy listen port |
-| `server.noTls` | `true` | Disable TLS (terminate at ingress) |
-
-**Redis (choose one):**
-
-| Option | Default | Description |
-|--------|---------|-------------|
 | `redis-ha.enabled` | `true` | Deploy embedded Redis HA with Sentinel |
-| `externalRedis.url` | `""` | Use external Redis (e.g., ElastiCache) |
-
-**Performance:**
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `performance.throttlingRequestsMax` | `10` | Max concurrent requests per pod |
-| `performance.maxUploadSizeMb` | `45` | Max single-request upload size |
 | `resources.requests.memory` | `512Mi` | Memory request per pod |
 | `resources.limits.memory` | `512Mi` | Memory limit per pod |
-
-**Ingress & Gateway:**
-
-| Option | Default | Description |
-|--------|---------|-------------|
 | `ingress.enabled` | `false` | Enable ingress for load balancing |
 | `ingress.className` | `nginx` | Ingress class |
 | `ingress.hosts` | `[]` | Hostnames for external access |
 | `gateway.enabled` | `false` | Create internal DNS alias (`s3-gateway.<namespace>`) |
 
-**Configuration options:**
+**Gateway vs Ingress:**
 
 | gateway | ingress | Use case |
 |---------|---------|----------|
 | `false` | `true` | External access via custom hostname (requires DNS setup) |
 | `true` | `true` | Internal access via `s3-gateway.<namespace>` (no DNS setup needed) |
-
-> **When to use gateway?** If you only need internal cluster access and don't want to configure DNS for a custom hostname, enable the gateway. It creates a Kubernetes service name that works automatically within the cluster.
 
 #### Example: External Access with Ingress
 
