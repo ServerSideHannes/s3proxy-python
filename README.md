@@ -265,19 +265,31 @@ helm install s3proxy ./manifests \
 | `resources.requests.memory` | `512Mi` | Memory request per pod |
 | `resources.limits.memory` | `512Mi` | Memory limit per pod |
 
-**Ingress:**
+**Ingress & Gateway:**
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `ingress.enabled` | `false` | Enable ingress |
+| `ingress.enabled` | `false` | Enable ingress for external access |
 | `ingress.className` | `nginx` | Ingress class |
 | `ingress.hosts` | `[]` | Hostnames for external access |
-| `gateway.enabled` | `false` | Enable internal gateway service |
+| `gateway.enabled` | `false` | Enable gateway for request-level load balancing |
+
+**Configuration options:**
+
+| Setup | Access | Load Balancing |
+|-------|--------|----------------|
+| `gateway.enabled=true` | Internal only (`s3-gateway.<namespace>`) | Request-level (recommended) |
+| `ingress.enabled=true` | External (`your-domain.com`) | Connection-level |
+| Both enabled | External with gateway | Request-level (recommended) |
+
+> **Why use the gateway?** S3 clients often reuse connections (HTTP keep-alive). Standard ingress does connection-level load balancing, which can cause uneven traffic distribution. The gateway provides request-level balancing for more even distribution across pods.
 
 #### Example: External Access with Ingress
 
 ```yaml
 # values-prod.yaml
+gateway:
+  enabled: true
 ingress:
   enabled: true
   className: nginx
