@@ -19,11 +19,12 @@ jobs:
       - name: Determine tags
         id: tags
         run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             VERSION=${GITHUB_REF#refs/tags/v}
-            echo "tags=ghcr.io/serversidehannes/s3proxy-python:${VERSION}" >> $GITHUB_OUTPUT
+            echo "tags=ghcr.io/${OWNER}/s3proxy-python:${VERSION}" >> $GITHUB_OUTPUT
           else
-            echo "tags=ghcr.io/serversidehannes/s3proxy-python:latest" >> $GITHUB_OUTPUT
+            echo "tags=ghcr.io/${OWNER}/s3proxy-python:latest" >> $GITHUB_OUTPUT
           fi
 
       - name: Set up Docker Buildx
@@ -33,7 +34,7 @@ jobs:
         uses: docker/login-action@v3.6.0
         with:
           registry: ghcr.io
-          username: serversidehannes
+          username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push Docker image

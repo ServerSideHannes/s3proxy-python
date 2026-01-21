@@ -72,9 +72,10 @@ jobs:
 
       - name: Install chart from GHCR image
         run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           helm install s3proxy manifests/ \
             --namespace s3proxy \
-            --set image.repository=ghcr.io/serversidehannes/sseproxy-python \
+            --set image.repository=ghcr.io/${OWNER}/s3proxy-python \
             --set image.tag=latest \
             --set image.pullPolicy=Always \
             --set s3.host="http://minio:9000" \

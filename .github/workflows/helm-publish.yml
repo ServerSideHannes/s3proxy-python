@@ -53,4 +53,5 @@ jobs:
 
       - name: Push Helm chart to OCI registry
         run: |
-          helm push s3proxy-python-${{ steps.version.outputs.version }}.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          helm push s3proxy-python-${{ steps.version.outputs.version }}.tgz oci://ghcr.io/${OWNER}/charts
