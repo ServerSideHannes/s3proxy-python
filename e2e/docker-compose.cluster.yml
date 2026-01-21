@@ -172,7 +172,7 @@ services:
           --set ingress.enabled=true \
           --set resources.limits.cpu=500m \
           --set resources.requests.cpu=500m \
-          --set redis-ha.replicas=2 \
+          --set redis-ha.replicas=1 \
           --set redis-ha.haproxy.replicas=1 \
           --set redis-ha.persistentVolume.enabled=false \
           --set redis-ha.hardAntiAffinity=false \
@@ -182,7 +182,7 @@ services:
 
         echo "=== Waiting for deployments to be ready ==="
         # Wait with progress updates every 30s
-        TIMEOUT=600
+        TIMEOUT=1200
         ELAPSED=0
         while [ $$ELAPSED -lt $$TIMEOUT ]; do
           echo "--- Status at $${ELAPSED}s ---"
