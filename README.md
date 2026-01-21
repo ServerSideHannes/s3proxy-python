@@ -276,11 +276,11 @@ helm install s3proxy ./manifests \
 
 **Configuration options:**
 
-| Setup | Access | Load Balancing |
-|-------|--------|----------------|
-| `gateway.enabled=true` | Internal only (`s3-gateway.<namespace>`) | Request-level (recommended) |
-| `ingress.enabled=true` | External (`your-domain.com`) | Connection-level |
-| Both enabled | External with gateway | Request-level (recommended) |
+| gateway | ingress | Access | Load Balancing |
+|---------|---------|--------|----------------|
+| `true` | `false` | Internal (`s3-gateway.<namespace>`) | Request-level |
+| `false` | `true` | External (`your-domain.com`) | Connection-level |
+| `true` | `true` | External with gateway (recommended) | Request-level |
 
 > **Why use the gateway?** S3 clients often reuse connections (HTTP keep-alive). Standard ingress does connection-level load balancing, which can cause uneven traffic distribution. The gateway provides request-level balancing for more even distribution across pods.
 
