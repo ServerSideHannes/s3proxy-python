@@ -245,7 +245,7 @@ Once deployed, point your S3 clients at the proxy endpoint:
 # From within the cluster (default service)
 aws s3 --endpoint-url http://s3proxy-python.<namespace>:4433 cp file.txt s3://bucket/
 
-# With gateway enabled (internal DNS alias)
+# With gateway enabled (recommended for internal access, see Configuration below)
 aws s3 --endpoint-url http://s3-gateway.<namespace> cp file.txt s3://bucket/
 
 # With ingress (external access)
