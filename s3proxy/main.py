@@ -111,10 +111,10 @@ def create_lifespan(settings: Settings) -> "AsyncIterator[None]":
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> "AsyncIterator[None]":
         logger.info("Starting", endpoint=settings.s3_endpoint, port=settings.port)
-        # Initialize Redis connection
-        await init_redis(settings.redis_url)
+        # Initialize Redis if configured (for HA), otherwise use in-memory storage
+        await init_redis(settings.redis_url or None)
         yield
-        # Close Redis connection
+        # Close Redis connection if active
         await close_redis()
         # Close all S3 client pools
         for pool in list(S3ClientPool._instances.values()):

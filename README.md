@@ -57,38 +57,78 @@ S3's server-side encryption is great, but your cloud provider still holds the ke
 
 ## 🚀 Quick Start
 
-### One-liner with Docker
+### 1. Start the proxy
 
 ```bash
 docker run -p 4433:4433 \
-  -e S3PROXY_ENCRYPT_KEY="your-super-secret-key" \
+  -e S3PROXY_ENCRYPT_KEY="your-32-byte-encryption-key-here" \
+  -e S3PROXY_NO_TLS=true \
   -e AWS_ACCESS_KEY_ID="AKIA..." \
-  -e AWS_SECRET_ACCESS_KEY="..." \
-  ghcr.io/<owner>/sseproxy-python:latest
+  -e AWS_SECRET_ACCESS_KEY="wJalr..." \
+  s3proxy:latest
 ```
 
-### Or run locally
+### 2. Configure your client with the same credentials
+
+The client must use the **same credentials** that the proxy is configured with:
 
 ```bash
-# Install
-pip install -e .
-
-# Configure
-export S3PROXY_ENCRYPT_KEY="your-super-secret-key"
-export AWS_ACCESS_KEY_ID="AKIA..."
-export AWS_SECRET_ACCESS_KEY="..."
-
-# Run
-python -m s3proxy.main --no-tls
+export AWS_ACCESS_KEY_ID="AKIA..."        # Same as proxy
+export AWS_SECRET_ACCESS_KEY="wJalr..."   # Same as proxy
 ```
 
-### Point your app at it
+### 3. Point your application at the proxy
 
 ```bash
-# Instead of s3.amazonaws.com, use localhost:4433
+# Upload through S3Proxy - data is encrypted before reaching S3
 aws s3 --endpoint-url http://localhost:4433 cp secret.pdf s3://my-bucket/
 
-# That's it. Your file is now encrypted in S3.
+# Download through S3Proxy - data is decrypted automatically
+aws s3 --endpoint-url http://localhost:4433 cp s3://my-bucket/secret.pdf ./
+
+# Works with any S3 client/SDK - just change the endpoint URL
+```
+
+Your file is now encrypted at rest with AES-256-GCM. The encryption is transparent—your application code doesn't change, only the endpoint URL.
+
+> **Note:** The proxy supports any bucket accessible with the configured credentials. You don't configure a specific bucket—just point any S3 request at the proxy and it forwards to the appropriate bucket.
+
+---
+
+## 🔍 How It Works
+
+S3Proxy sits between your application and S3, transparently encrypting all data before it reaches storage.
+
+### Request Flow
+
+```
+1. Client signs request with credentials (same credentials configured on proxy)
+2. Proxy receives request and verifies SigV4 signature
+3. Proxy encrypts the payload with AES-256-GCM
+4. Proxy re-signs the request (encryption changes the body, invalidating original signature)
+5. Proxy forwards to S3
+6. S3 stores the encrypted data
+```
+
+### Why Does the Proxy Need My Credentials?
+
+**Short answer:** Because encryption changes the request body, which invalidates the client's signature. The proxy must re-sign requests, and re-signing requires the secret key.
+
+With S3's SigV4 authentication, clients sign requests using their secret key but only send the signature—never the key itself. When S3Proxy encrypts your data, it modifies:
+- The request body (now ciphertext instead of plaintext)
+- The `Content-Length` header
+- The `Content-MD5` / `x-amz-content-sha256` headers
+
+This breaks the original signature. To forward the request to S3, the proxy must create a new valid signature, which requires having the secret key.
+
+**The proxy acts as a trusted intermediary**, not a transparent passthrough. You configure credentials once on the proxy, and all clients use those same credentials to authenticate.
+
+```
+┌──────────────┐  SigV4 signed   ┌──────────────┐  Re-signed     ┌──────────────┐
+│              │  (credentials   │              │  (same         │              │
+│    Client    │ ─────────────▶  │   S3Proxy    │ ─────────────▶ │    AWS S3    │
+│              │   from proxy)   │              │  credentials)  │              │
+└──────────────┘                 └──────────────┘                └──────────────┘
 ```
 
 ---
@@ -105,97 +145,237 @@ S3Proxy uses a **layered key architecture** for maximum security:
 
 Your master key never touches S3. DEKs are wrapped and stored as object metadata. Even if someone accesses your bucket, they get nothing but ciphertext.
 
+### Multipart Uploads
+
+Large files are automatically handled via S3 multipart upload:
+
+1. Each part is encrypted independently with its own nonce
+2. Part metadata is tracked in Redis for distributed consistency
+3. On completion, parts are assembled server-side by S3
+4. The final object's metadata contains all part encryption info
+
+This enables streaming uploads of arbitrary size without buffering entire files in memory.
+
 ---
 
 ## ⚙️ Configuration
 
-All settings via environment variables (prefix: `S3PROXY_`):
+All settings are configured via environment variables with the `S3PROXY_` prefix.
+
+### Required
+
+| Variable | Description |
+|----------|-------------|
+| `S3PROXY_ENCRYPT_KEY` | Master encryption key (32 bytes recommended) |
+| `AWS_ACCESS_KEY_ID` | AWS credentials—used to verify client requests AND sign upstream requests |
+| `AWS_SECRET_ACCESS_KEY` | AWS credentials—clients must use these same credentials |
+
+> **Important:** Clients must authenticate using the same `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` configured on the proxy. The proxy verifies incoming signatures and re-signs requests before forwarding to S3. See [How It Works](#-how-it-works) for details.
+
+### S3 Connection
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ENCRYPT_KEY` | *required* | Your master encryption key |
-| `HOST` | `s3.amazonaws.com` | S3 endpoint |
-| `REGION` | `us-east-1` | AWS region |
-| `PORT` | `4433` | Listen port |
-| `NO_TLS` | `false` | Disable TLS |
-| `REDIS_URL` | `redis://localhost:6379/0` | Redis for multipart state |
-| `MAX_CONCURRENT_UPLOADS` | `10` | Parallel upload limit |
-| `MAX_CONCURRENT_DOWNLOADS` | `10` | Parallel download limit |
-| `LOG_LEVEL` | `INFO` | Logging verbosity |
+| `S3PROXY_HOST` | `s3.amazonaws.com` | Upstream S3 endpoint |
+| `S3PROXY_REGION` | `us-east-1` | AWS region for signing |
+
+> Works with any S3-compatible storage: AWS S3, MinIO, Cloudflare R2, DigitalOcean Spaces, etc.
+
+### Server
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `S3PROXY_PORT` | `4433` | Listen port |
+| `S3PROXY_NO_TLS` | `false` | Disable TLS (for local development) |
+| `S3PROXY_LOG_LEVEL` | `INFO` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+
+### State & Performance
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `S3PROXY_REDIS_URL` | *(empty)* | Redis URL for HA mode (omit for single-instance in-memory storage) |
+| `S3PROXY_THROTTLING_REQUESTS_MAX` | `10` | Max concurrent requests (0 = unlimited) |
+| `S3PROXY_MAX_UPLOAD_SIZE_MB` | `45` | Max single-request upload size in MB |
+
+> **Note:** Redis is only required for multi-instance (HA) deployments where multipart upload state needs to be shared across replicas. For single-instance deployments, the proxy uses in-memory storage.
 
 ---
 
-## 🐳 Deploy to Production
-
-### Docker Compose (with Redis)
-
-```bash
-docker-compose -f e2e/docker-compose.e2e.yml up
-```
+## ☸️ Production Deployment
 
 ### Kubernetes with Helm
 
+The Helm chart is in `manifests/` and includes Redis HA with Sentinel for distributed state.
+
+#### Quick Start
+
 ```bash
-# Pull from GitHub Container Registry (OCI)
-helm install s3proxy oci://ghcr.io/<owner>/charts/s3proxy-python \
-  --set config.encryptKey="your-key" \
-  --set redis.enabled=true
+# Install Helm dependencies (redis-ha)
+cd manifests && helm dependency update && cd ..
+
+# Install with inline secrets (dev/test only)
+helm install s3proxy ./manifests \
+  --set secrets.encryptKey="your-32-byte-encryption-key" \
+  --set secrets.awsAccessKeyId="AKIA..." \
+  --set secrets.awsSecretAccessKey="wJalr..."
 ```
 
-The Helm chart includes:
-- 3 replicas by default
-- Redis HA with Sentinel
-- Health checks & readiness probes
-- Configurable resource limits
+#### Production Setup
+
+For production, use Kubernetes secrets instead of inline values:
+
+```bash
+# Create secret manually
+kubectl create secret generic s3proxy-secrets \
+  --from-literal=S3PROXY_ENCRYPT_KEY="your-32-byte-encryption-key" \
+  --from-literal=AWS_ACCESS_KEY_ID="AKIA..." \
+  --from-literal=AWS_SECRET_ACCESS_KEY="wJalr..."
+
+# Install referencing the existing secret
+helm install s3proxy ./manifests \
+  --set secrets.existingSecrets.enabled=true \
+  --set secrets.existingSecrets.name=s3proxy-secrets
+```
+
+#### Configuration Reference
+
+**Core Settings:**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `replicaCount` | `3` | Number of proxy replicas |
+| `s3.host` | `s3.amazonaws.com` | S3 endpoint (or S3-compatible) |
+| `s3.region` | `us-east-1` | AWS region for signing |
+| `server.port` | `4433` | Proxy listen port |
+| `server.noTls` | `true` | Disable TLS (terminate at ingress) |
+
+**Redis (choose one):**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `redis-ha.enabled` | `true` | Deploy embedded Redis HA with Sentinel |
+| `externalRedis.url` | `""` | Use external Redis (e.g., ElastiCache) |
+
+**Performance:**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `performance.throttlingRequestsMax` | `10` | Max concurrent requests per pod |
+| `performance.maxUploadSizeMb` | `45` | Max single-request upload size |
+| `resources.requests.memory` | `512Mi` | Memory request per pod |
+| `resources.limits.memory` | `512Mi` | Memory limit per pod |
+
+**Ingress:**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `ingress.enabled` | `false` | Enable ingress |
+| `ingress.className` | `nginx` | Ingress class |
+| `ingress.hosts` | `[]` | Hostnames for external access |
+| `gateway.enabled` | `false` | Enable internal gateway service |
+
+#### Example: External Access with Ingress
+
+```yaml
+# values-prod.yaml
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - s3proxy.example.com
+  tls:
+    - secretName: s3proxy-tls
+      hosts:
+        - s3proxy.example.com
+```
+
+```bash
+helm install s3proxy ./manifests -f values-prod.yaml \
+  --set secrets.existingSecrets.enabled=true \
+  --set secrets.existingSecrets.name=s3proxy-secrets
+```
+
+#### Example: Using External Redis (ElastiCache, etc.)
+
+```bash
+helm install s3proxy ./manifests \
+  --set redis-ha.enabled=false \
+  --set externalRedis.url="redis://my-elasticache.xxx.cache.amazonaws.com:6379/0" \
+  --set secrets.existingSecrets.enabled=true \
+  --set secrets.existingSecrets.name=s3proxy-secrets
+```
+
+### Health Checks
+
+The proxy exposes health endpoints for Kubernetes probes:
+- `GET /healthz` — Liveness probe
+- `GET /readyz` — Readiness probe
+
+### Security Considerations
+
+- **TLS Termination**: The chart defaults to `noTls=true`, expecting TLS termination at the ingress/load balancer
+- **Secrets**: Always use `secrets.existingSecrets` in production—never commit secrets to values files
+- **Network Policy**: Consider restricting pod-to-pod traffic to only allow proxy → Redis
+- **Encryption Key**: Back up your encryption key securely. Losing it means losing access to all encrypted data
+
+### Resource Recommendations
+
+| Workload | Memory | CPU | Concurrency | Notes |
+|----------|--------|-----|-------------|-------|
+| Standard | 512Mi | 100m | 10 | Default settings |
+| Heavy | 1Gi+ | 500m | 20+ | Large files, high concurrency |
+
+Memory scales with concurrent uploads. Use `performance.throttlingRequestsMax` to bound memory usage
 
 ---
 
 ## 🧪 Testing
 
 ```bash
-# Unit tests
-make test
-
-# E2E tests (Docker Compose)
-make e2e
-
-# Full cluster test (Kind + Helm + load test)
-make cluster-test
+make test           # Unit tests
+make cluster-test   # Full Kubernetes cluster test
 ```
 
 ---
 
-## 🛡️ Security Model
+## ❓ FAQ
 
-| Threat | Mitigation |
-|--------|------------|
-| S3 bucket breach | All data encrypted with AES-256-GCM |
-| Key extraction from S3 | DEKs wrapped with KEK, KEK never stored |
-| Request tampering | Full AWS SigV4 signature verification |
-| Replay attacks | Nonce uniqueness per object |
+**Why can't I use my own AWS credentials with the proxy?**
+
+The proxy must re-sign requests after encryption (see [How It Works](#-how-it-works)). Re-signing requires the secret key, but S3's SigV4 protocol only sends signatures—never the secret key itself. So the proxy must already have the credentials configured. All clients share the same credentials configured on the proxy.
+
+**Can I use different credentials for different clients?**
+
+Not currently. The proxy supports one credential pair. If you need per-client credentials, you would deploy multiple proxy instances or implement a credential lookup mechanism.
+
+**Can I use this with existing unencrypted data?**
+
+Yes. S3Proxy only encrypts data written through it. Existing objects remain readable—S3Proxy detects unencrypted objects and returns them as-is. To migrate, simply copy objects through S3Proxy:
+
+```bash
+aws s3 cp --endpoint-url http://localhost:4433 s3://bucket/file.txt s3://bucket/file.txt
+```
+
+**What happens if I lose my encryption key?**
+
+Your data is unrecoverable. The KEK is never stored—it exists only in your environment variables. Back up your key securely.
+
+**Can I rotate encryption keys?**
+
+Not currently. Key rotation would require re-encrypting all objects. This is on the roadmap.
+
+**Does S3Proxy support SSE-C or SSE-KMS?**
+
+No. S3Proxy implements its own client-side encryption. Server-side encryption options are orthogonal—you can enable both if desired.
 
 ---
 
 ## 🤝 Contributing
 
-PRs welcome! Please include tests for new functionality.
-
-```bash
-# Setup dev environment
-uv sync
-
-# Run tests before submitting
-make test
-```
+Contributions are welcome.
 
 ---
 
 ## 📄 License
 
 MIT
-
----
-
-<p align="center">
-  <sub>Built with 🔐 by engineers who believe encryption should be easy.</sub>
-</p>

@@ -33,8 +33,8 @@ class Settings(BaseSettings):
     throttling_requests_max: int = Field(default=10, description="Max concurrent requests (0=unlimited)")
     max_upload_size_mb: int = Field(default=45, description="Max single-request upload size (MB)")
 
-    # Redis settings (for distributed state)
-    redis_url: str = Field(default="redis://localhost:6379/0", description="Redis connection URL")
+    # Redis settings (for distributed state in HA deployments)
+    redis_url: str = Field(default="", description="Redis URL for HA mode (empty = in-memory single-instance)")
     redis_upload_ttl_hours: int = Field(default=24, description="TTL for upload state in Redis (hours)")
 
     # Logging

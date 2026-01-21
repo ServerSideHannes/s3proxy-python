@@ -52,14 +52,31 @@ REDIS_KEY_PREFIX = "s3proxy:upload:"
 # Module-level Redis client (initialized by init_redis)
 _redis_client: "Redis | None" = None
 
+# Flag to track if we're using Redis or in-memory storage
+_use_redis: bool = False
 
-async def init_redis(redis_url: str) -> "Redis":
-    """Initialize Redis connection pool."""
-    global _redis_client
+
+async def init_redis(redis_url: str | None) -> "Redis | None":
+    """Initialize Redis connection pool if URL is provided.
+
+    Args:
+        redis_url: Redis URL or None/empty to use in-memory storage
+
+    Returns:
+        Redis client if connected, None if using in-memory storage
+    """
+    global _redis_client, _use_redis
+
+    if not redis_url:
+        logger.info("Redis URL not configured, using in-memory storage (single-instance mode)")
+        _use_redis = False
+        return None
+
     _redis_client = redis.from_url(redis_url, decode_responses=False)
     # Test connection
     await _redis_client.ping()
-    logger.info("Redis connected", url=redis_url)
+    _use_redis = True
+    logger.info("Redis connected (HA mode)", url=redis_url)
     return _redis_client
 
 
@@ -77,6 +94,11 @@ def get_redis() -> "Redis":
     if _redis_client is None:
         raise RuntimeError("Redis not initialized. Call init_redis() first.")
     return _redis_client
+
+
+def is_using_redis() -> bool:
+    """Check if we're using Redis or in-memory storage."""
+    return _use_redis
 
 
 @dataclass(slots=True)
@@ -162,7 +184,11 @@ def _deserialize_upload_state(data: bytes) -> MultipartUploadState:
 
 
 class MultipartStateManager:
-    """Manages multipart upload state in Redis."""
+    """Manages multipart upload state in Redis or in-memory.
+
+    Uses Redis when configured (for HA/multi-instance deployments).
+    Falls back to in-memory storage for single-instance deployments.
+    """
 
     def __init__(self, ttl_seconds: int = 86400):
         """Initialize state manager.
@@ -171,9 +197,11 @@ class MultipartStateManager:
             ttl_seconds: TTL for upload state in Redis (default 24h)
         """
         self._ttl = ttl_seconds
+        # In-memory storage for single-instance mode
+        self._memory_store: dict[str, MultipartUploadState] = {}
 
-    def _redis_key(self, bucket: str, key: str, upload_id: str) -> str:
-        """Generate Redis key for upload state."""
+    def _storage_key(self, bucket: str, key: str, upload_id: str) -> str:
+        """Generate storage key for upload state."""
         return f"{REDIS_KEY_PREFIX}{bucket}:{key}:{upload_id}"
 
     async def create_upload(
@@ -183,7 +211,7 @@ class MultipartStateManager:
         upload_id: str,
         dek: bytes,
     ) -> MultipartUploadState:
-        """Create new upload state in Redis."""
+        """Create new upload state."""
         state = MultipartUploadState(
             dek=dek,
             bucket=bucket,
@@ -191,22 +219,30 @@ class MultipartStateManager:
             upload_id=upload_id,
         )
 
-        redis_client = get_redis()
-        rk = self._redis_key(bucket, key, upload_id)
-        await redis_client.set(rk, _serialize_upload_state(state), ex=self._ttl)
+        sk = self._storage_key(bucket, key, upload_id)
+
+        if is_using_redis():
+            redis_client = get_redis()
+            await redis_client.set(sk, _serialize_upload_state(state), ex=self._ttl)
+        else:
+            self._memory_store[sk] = state
 
         return state
 
     async def get_upload(
         self, bucket: str, key: str, upload_id: str
     ) -> MultipartUploadState | None:
-        """Get upload state from Redis."""
-        redis_client = get_redis()
-        rk = self._redis_key(bucket, key, upload_id)
-        data = await redis_client.get(rk)
-        if data is None:
-            return None
-        return _deserialize_upload_state(data)
+        """Get upload state."""
+        sk = self._storage_key(bucket, key, upload_id)
+
+        if is_using_redis():
+            redis_client = get_redis()
+            data = await redis_client.get(sk)
+            if data is None:
+                return None
+            return _deserialize_upload_state(data)
+        else:
+            return self._memory_store.get(sk)
 
     async def add_part(
         self,
@@ -215,61 +251,74 @@ class MultipartStateManager:
         upload_id: str,
         part: PartMetadata,
     ) -> None:
-        """Add part to upload state in Redis."""
-        redis_client = get_redis()
-        rk = self._redis_key(bucket, key, upload_id)
+        """Add part to upload state."""
+        sk = self._storage_key(bucket, key, upload_id)
 
-        # Use WATCH/MULTI for atomic update
-        async with redis_client.pipeline(transaction=True) as pipe:
-            try:
-                await pipe.watch(rk)
-                data = await redis_client.get(rk)
-                if data is None:
-                    await pipe.unwatch()
-                    return
+        if is_using_redis():
+            redis_client = get_redis()
+            # Use WATCH/MULTI for atomic update
+            async with redis_client.pipeline(transaction=True) as pipe:
+                try:
+                    await pipe.watch(sk)
+                    data = await redis_client.get(sk)
+                    if data is None:
+                        await pipe.unwatch()
+                        return
 
-                state = _deserialize_upload_state(data)
+                    state = _deserialize_upload_state(data)
+                    state.parts[part.part_number] = part
+                    state.total_plaintext_size += part.plaintext_size
+
+                    pipe.multi()
+                    pipe.set(sk, _serialize_upload_state(state), ex=self._ttl)
+                    await pipe.execute()
+                except redis.WatchError:
+                    # Retry on concurrent modification
+                    logger.warning("Redis watch error, retrying add_part", key=sk)
+                    await self.add_part(bucket, key, upload_id, part)
+        else:
+            state = self._memory_store.get(sk)
+            if state is not None:
                 state.parts[part.part_number] = part
                 state.total_plaintext_size += part.plaintext_size
-
-                pipe.multi()
-                pipe.set(rk, _serialize_upload_state(state), ex=self._ttl)
-                await pipe.execute()
-            except redis.WatchError:
-                # Retry on concurrent modification
-                logger.warning("Redis watch error, retrying add_part", key=rk)
-                await self.add_part(bucket, key, upload_id, part)
 
     async def complete_upload(
         self, bucket: str, key: str, upload_id: str
     ) -> MultipartUploadState | None:
-        """Remove and return upload state from Redis on completion."""
-        redis_client = get_redis()
-        rk = self._redis_key(bucket, key, upload_id)
+        """Remove and return upload state on completion."""
+        sk = self._storage_key(bucket, key, upload_id)
 
-        # Get and delete atomically
-        async with redis_client.pipeline(transaction=True) as pipe:
-            try:
-                await pipe.watch(rk)
-                data = await redis_client.get(rk)
-                if data is None:
-                    await pipe.unwatch()
-                    return None
+        if is_using_redis():
+            redis_client = get_redis()
+            # Get and delete atomically
+            async with redis_client.pipeline(transaction=True) as pipe:
+                try:
+                    await pipe.watch(sk)
+                    data = await redis_client.get(sk)
+                    if data is None:
+                        await pipe.unwatch()
+                        return None
 
-                state = _deserialize_upload_state(data)
-                pipe.multi()
-                pipe.delete(rk)
-                await pipe.execute()
-                return state
-            except redis.WatchError:
-                logger.warning("Redis watch error, retrying complete_upload", key=rk)
-                return await self.complete_upload(bucket, key, upload_id)
+                    state = _deserialize_upload_state(data)
+                    pipe.multi()
+                    pipe.delete(sk)
+                    await pipe.execute()
+                    return state
+                except redis.WatchError:
+                    logger.warning("Redis watch error, retrying complete_upload", key=sk)
+                    return await self.complete_upload(bucket, key, upload_id)
+        else:
+            return self._memory_store.pop(sk, None)
 
     async def abort_upload(self, bucket: str, key: str, upload_id: str) -> None:
-        """Remove upload state from Redis on abort."""
-        redis_client = get_redis()
-        rk = self._redis_key(bucket, key, upload_id)
-        await redis_client.delete(rk)
+        """Remove upload state on abort."""
+        sk = self._storage_key(bucket, key, upload_id)
+
+        if is_using_redis():
+            redis_client = get_redis()
+            await redis_client.delete(sk)
+        else:
+            self._memory_store.pop(sk, None)
 
 
 def encode_multipart_metadata(meta: MultipartMetadata) -> str:
