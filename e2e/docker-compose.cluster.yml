@@ -9,6 +9,7 @@ services:
     working_dir: /app
     environment:
       - KUBECONFIG=/root/.kube/config
+      - CI=${CI:-false}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -211,8 +212,8 @@ services:
             --set secrets.awsSecretAccessKey="minioadmin" \
             --set gateway.enabled=true \
             --set ingress.enabled=true \
-            --set resources.limits.cpu=500m \
-            --set resources.requests.cpu=500m \
+            --set resources.limits.cpu=100m \
+            --set resources.requests.cpu=50m \
             --set redis-ha.enabled=false \
             --set externalRedis.url="redis://redis:6379/0"
 
