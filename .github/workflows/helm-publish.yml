@@ -2,8 +2,8 @@ name: Package and Push Helm Chart
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
 
 jobs:
   helm-publish:
@@ -32,10 +32,14 @@ jobs:
         run: |
           helm dependency update manifests/
 
-      - name: Get version from tag
+      - name: Get version
         id: version
         run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+          else
+            VERSION="0.0.0-latest"
+          fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Update chart version
