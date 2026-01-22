@@ -36,7 +36,7 @@ case "${1:-run}" in
     docker compose -f $COMPOSE_FILE exec helm-test kubectl get all -n s3proxy
     ;;
   load-test)
-    echo "Running S3 load test (3 concurrent 512MB uploads)..."
+    echo "Running S3 load test (3 concurrent 10MB uploads)..."
     docker compose -f $COMPOSE_FILE exec helm-test sh -c '
       # Get pod names for load balancing verification
       PODS=$(kubectl get pods -n s3proxy -l app=s3proxy-python -o jsonpath="{.items[*].metadata.name}")
@@ -60,11 +60,11 @@ case "${1:-run}" in
           echo \"Creating test bucket...\"
           aws --endpoint-url http://s3-gateway.s3proxy s3 mb s3://load-test-bucket 2>/dev/null || true
 
-          # Generate 3 random 512MB files
-          echo \"Generating 512MB test files...\"
+          # Generate 3 random 10MB files (small for CI, still tests full flow)
+          echo \"Generating 10MB test files...\"
           mkdir -p /tmp/testfiles
           for i in 1 2 3; do
-            dd if=/dev/urandom of=/tmp/testfiles/file-\$i.bin bs=1M count=512 2>/dev/null &
+            dd if=/dev/urandom of=/tmp/testfiles/file-\$i.bin bs=1M count=10 2>/dev/null &
           done
           wait
           echo \"Files generated\"
@@ -269,7 +269,7 @@ case "${1:-run}" in
     echo ""
     echo "Commands:"
     echo "  run       - Deploy Kind cluster and s3proxy"
-    echo "  load-test - Run 1.5GB upload test + verify load balancing"
+    echo "  load-test - Run 30MB upload test + verify load balancing"
     echo "  status    - Show deployment status"
     echo "  pods      - Show pod details and resources"
     echo "  logs      - Stream s3proxy logs"
