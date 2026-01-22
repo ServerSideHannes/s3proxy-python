@@ -6,6 +6,7 @@ on:
     - cron: '0 6 * * *'
   workflow_dispatch:
 
+# Explicit permissions are required for GITHUB_TOKEN to pull from GHCR
 permissions:
   contents: read
   packages: read
@@ -109,14 +110,19 @@ jobs:
           EOF
           kubectl wait --for=condition=ready pod -l app=redis -n s3proxy --timeout=120s
 
-      - name: Create K8s Image Pull Secret
+      - name: Create K8s Image Pull Secret & Patch Namespace
         run: |
+          # 1. Create the secret using the workflow token
           kubectl create secret docker-registry ghcr-login \
             --docker-server=ghcr.io \
             --docker-username=${{ github.actor }} \
             --docker-password=${{ secrets.GITHUB_TOKEN }} \
             --namespace s3proxy \
             --dry-run=client -o yaml | kubectl apply -f -
+          
+          # 2. Patch the default service account to automatically use this secret
+          # This acts as a fail-safe if the Helm 'imagePullSecrets' set doesn't propagate
+          kubectl patch serviceaccount default -n s3proxy -p '{"imagePullSecrets": [{"name": "ghcr-login"}]}'
 
       - name: Install chart from GHCR
         run: |
@@ -144,7 +150,6 @@ jobs:
         run: |
           kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=s3proxy-python -n s3proxy --timeout=120s
           kubectl get pods -n s3proxy
-          # Verify we have 3 s3proxy pods
           POD_COUNT=$(kubectl get pods -n s3proxy -l app.kubernetes.io/name=s3proxy-python --no-headers | grep Running | wc -l)
           if [ "$POD_COUNT" -lt 3 ]; then
             echo "Expected 3 s3proxy pods, got $POD_COUNT"
@@ -155,7 +160,7 @@ jobs:
       - name: Check health endpoint
         run: |
           kubectl port-forward svc/s3proxy-python 4433:4433 -n s3proxy &
-          sleep 3
+          sleep 5
           curl -sf http://localhost:4433/healthz && echo "Health check passed"
 
       - name: Run S3 smoke test
@@ -216,6 +221,9 @@ jobs:
         run: |
           echo "=== Pod Status ==="
           kubectl get pods -n s3proxy -o wide
+          echo ""
+          echo "=== Describe Failed Pods ==="
+          kubectl describe pods -n s3proxy -l app.kubernetes.io/name=s3proxy-python
           echo ""
           echo "=== S3Proxy Logs ==="
           kubectl logs -l app.kubernetes.io/name=s3proxy-python -n s3proxy --tail=100
