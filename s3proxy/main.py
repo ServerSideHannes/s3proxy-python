@@ -47,6 +47,7 @@ QUERY_PART_NUMBER = "partNumber"
 QUERY_LIST_TYPE = "list-type"
 QUERY_LOCATION = "location"
 QUERY_DELETE = "delete"
+QUERY_TAGGING = "tagging"
 
 # Headers
 HEADER_COPY_SOURCE = "x-amz-copy-source"
@@ -110,10 +111,10 @@ def create_lifespan(settings: Settings) -> "AsyncIterator[None]":
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> "AsyncIterator[None]":
         logger.info("Starting", endpoint=settings.s3_endpoint, port=settings.port)
-        # Initialize Redis connection
-        await init_redis(settings.redis_url)
+        # Initialize Redis if configured (for HA), otherwise use in-memory storage
+        await init_redis(settings.redis_url or None)
         yield
-        # Close Redis connection
+        # Close Redis connection if active
         await close_redis()
         # Close all S3 client pools
         for pool in list(S3ClientPool._instances.values()):
@@ -192,9 +193,9 @@ async def route_request(
     path = request.url.path
     headers = {k.lower(): v for k, v in request.headers.items()}
 
-    # Root path - list buckets or location query
+    # Root path - list buckets
     if path.strip("/") == "":
-        return await handler.forward_request(request, creds)
+        return await handler.handle_list_buckets(request, creds)
 
     # Batch delete operation (POST /?delete) - check before other bucket ops
     if QUERY_DELETE in query and method == METHOD_POST:
@@ -210,7 +211,7 @@ async def route_request(
 
     # Multipart part operations (uploadId in query)
     if QUERY_UPLOAD_ID in query:
-        return await _handle_multipart_operation(request, creds, handler, method, query)
+        return await _handle_multipart_operation(request, creds, handler, method, query, headers)
 
     # Bucket-only operations
     if _is_bucket_only_path(path):
@@ -219,15 +220,20 @@ async def route_request(
             return result
 
     # List objects (bucket-only GET or explicit list-type)
-    if QUERY_LIST_TYPE in query or (_is_bucket_only_path(path) and method == METHOD_GET):
-        return await handler.handle_list_objects(request, creds)
+    if _is_bucket_only_path(path) and method == METHOD_GET:
+        # V2 uses list-type=2, V1 uses no list-type or list-type=1
+        query_params = parse_qs(query, keep_blank_values=True)
+        list_type = query_params.get("list-type", ["1"])[0]
+        if list_type == "2":
+            return await handler.handle_list_objects(request, creds)
+        return await handler.handle_list_objects_v1(request, creds)
 
     # Copy object (PUT with x-amz-copy-source header)
     if method == METHOD_PUT and HEADER_COPY_SOURCE in headers:
         return await handler.handle_copy_object(request, creds)
 
     # Standard object operations
-    return await _handle_object_operation(request, creds, handler, method)
+    return await _handle_object_operation(request, creds, handler, method, query)
 
 
 async def _handle_multipart_operation(
@@ -236,12 +242,16 @@ async def _handle_multipart_operation(
     handler: S3ProxyHandler,
     method: str,
     query: str,
+    headers: dict[str, str],
 ) -> "PlainTextResponse":
     """Handle multipart upload operations."""
     # ListParts: GET with uploadId but no partNumber
     if method == METHOD_GET and QUERY_PART_NUMBER not in query:
         return await handler.handle_list_parts(request, creds)
     if method == METHOD_PUT:
+        # UploadPartCopy: PUT with uploadId and x-amz-copy-source
+        if HEADER_COPY_SOURCE in headers:
+            return await handler.handle_upload_part_copy(request, creds)
         return await handler.handle_upload_part(request, creds)
     if method == METHOD_POST:
         return await handler.handle_complete_multipart_upload(request, creds)
@@ -287,8 +297,18 @@ async def _handle_object_operation(
     creds: S3Credentials,
     handler: S3ProxyHandler,
     method: str,
+    query: str,
 ) -> "PlainTextResponse":
     """Handle standard object operations."""
+    # Object tagging operations
+    if QUERY_TAGGING in query:
+        if method == METHOD_GET:
+            return await handler.handle_get_object_tagging(request, creds)
+        if method == METHOD_PUT:
+            return await handler.handle_put_object_tagging(request, creds)
+        if method == METHOD_DELETE:
+            return await handler.handle_delete_object_tagging(request, creds)
+
     if method == METHOD_GET:
         return await handler.handle_get_object(request, creds)
     if method == METHOD_PUT:
@@ -304,20 +324,20 @@ async def _handle_object_operation(
 # Throttling Middleware
 # ============================================================================
 def throttle(app: FastAPI, max_requests: int):
-    """Wrap app with throttling middleware."""
+    """Wrap app with throttling middleware.
+
+    Limits concurrent requests to max_requests. When limit is reached,
+    additional requests wait in queue instead of being rejected.
+    This provides memory-bounded execution with graceful backpressure.
+    """
     semaphore = asyncio.Semaphore(max_requests)
 
     async def middleware(scope, receive, send):
         if scope["type"] != "http":
             return await app(scope, receive, send)
 
-        # Atomic acquire - no TOCTOU race
-        try:
-            semaphore.acquire_nowait()
-        except ValueError:
-            from fastapi.responses import Response
-            response = Response("Too Many Requests", status_code=429)
-            return await response(scope, receive, send)
+        # Wait for slot to become available (queues requests)
+        await semaphore.acquire()
 
         try:
             await app(scope, receive, send)
@@ -337,7 +357,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Load credentials and initialize components
     credentials_store = load_credentials()
     multipart_manager = MultipartStateManager(
-        max_concurrent=settings.max_concurrent_uploads,
         ttl_seconds=settings.redis_upload_ttl_seconds,
     )
     verifier = SigV4Verifier(credentials_store)

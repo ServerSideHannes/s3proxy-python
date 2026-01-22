@@ -7,11 +7,14 @@ from urllib.parse import parse_qs
 
 from fastapi import HTTPException, Request, Response
 
+import base64
+
 from .. import crypto, xml_responses
 from ..multipart import (
     MultipartMetadata,
     PartMetadata,
     delete_upload_state,
+    load_multipart_metadata,
     load_upload_state,
     persist_upload_state,
     save_multipart_metadata,
@@ -204,5 +207,128 @@ class MultipartHandlerMixin(BaseHandler):
                 is_truncated=resp.get("IsTruncated", False),
                 storage_class=resp.get("StorageClass", "STANDARD"),
             ),
+            media_type="application/xml",
+        )
+
+    async def handle_upload_part_copy(
+        self, request: Request, creds: S3Credentials
+    ) -> Response:
+        """Handle UploadPartCopy request (PUT with x-amz-copy-source and uploadId).
+
+        Copies data from a source object to a part of a multipart upload.
+        For encrypted sources, decrypts and re-encrypts with the upload's DEK.
+        """
+        from urllib.parse import unquote
+        from datetime import UTC, datetime
+
+        bucket, key = self._parse_path(request.url.path)
+        client = self._client(creds)
+        query = parse_qs(request.url.query)
+        upload_id = query.get("uploadId", [""])[0]
+        part_num = int(query.get("partNumber", ["0"])[0])
+
+        # Get copy source header
+        copy_source = request.headers.get("x-amz-copy-source", "")
+        copy_source_range = request.headers.get("x-amz-copy-source-range")
+
+        # Parse copy source: can be "bucket/key" or "/bucket/key" or URL-encoded
+        copy_source = unquote(copy_source).lstrip("/")
+        if "/" not in copy_source:
+            raise HTTPException(400, "Invalid x-amz-copy-source format")
+
+        src_bucket, src_key = copy_source.split("/", 1)
+
+        # Get upload state for destination DEK
+        state = await self.multipart_manager.get_upload(bucket, key, upload_id)
+        if not state:
+            dek = await load_upload_state(client, bucket, key, upload_id, self.settings.kek)
+            if not dek:
+                raise HTTPException(404, "Upload not found")
+            state = await self.multipart_manager.create_upload(bucket, key, upload_id, dek)
+
+        # Check if source is encrypted
+        try:
+            head_resp = await client.head_object(src_bucket, src_key)
+        except Exception as e:
+            raise HTTPException(404, f"Source object not found: {e}") from e
+
+        src_metadata = head_resp.get("Metadata", {})
+        src_wrapped_dek = src_metadata.get(self.settings.dektag_name)
+        src_multipart_meta = await load_multipart_metadata(client, src_bucket, src_key)
+
+        if not src_wrapped_dek and not src_multipart_meta:
+            # Source not encrypted - get the raw data
+            resp = await client.get_object(src_bucket, src_key, range_header=copy_source_range)
+            plaintext = await resp["Body"].read()
+        elif src_multipart_meta:
+            # Source is multipart encrypted - download and decrypt
+            src_dek = crypto.unwrap_key(src_multipart_meta.wrapped_dek, self.settings.kek)
+            sorted_parts = sorted(src_multipart_meta.parts, key=lambda p: p.part_number)
+
+            # For range request, we need to compute which parts and offsets
+            if copy_source_range:
+                # Parse range: bytes=start-end
+                range_str = copy_source_range.replace("bytes=", "")
+                range_start, range_end = map(int, range_str.split("-"))
+            else:
+                range_start = 0
+                range_end = src_multipart_meta.total_plaintext_size - 1
+
+            plaintext_chunks = []
+            plaintext_offset = 0
+            ct_offset = 0
+
+            for part in sorted_parts:
+                part_pt_end = plaintext_offset + part.plaintext_size - 1
+
+                # Check if this part overlaps with requested range
+                if part_pt_end >= range_start and plaintext_offset <= range_end:
+                    ct_end = ct_offset + part.ciphertext_size - 1
+                    resp = await client.get_object(src_bucket, src_key, f"bytes={ct_offset}-{ct_end}")
+                    ciphertext = await resp["Body"].read()
+                    part_plaintext = crypto.decrypt(ciphertext, src_dek)
+
+                    # Trim to requested range
+                    trim_start = max(0, range_start - plaintext_offset)
+                    trim_end = min(part.plaintext_size, range_end - plaintext_offset + 1)
+                    plaintext_chunks.append(part_plaintext[trim_start:trim_end])
+
+                plaintext_offset = part_pt_end + 1
+                ct_offset += part.ciphertext_size
+
+            plaintext = b"".join(plaintext_chunks)
+        else:
+            # Source is single-part encrypted
+            resp = await client.get_object(src_bucket, src_key)
+            ciphertext = await resp["Body"].read()
+            wrapped_dek = base64.b64decode(src_wrapped_dek)
+            full_plaintext = crypto.decrypt_object(ciphertext, wrapped_dek, self.settings.kek)
+
+            # Handle range if specified
+            if copy_source_range:
+                range_str = copy_source_range.replace("bytes=", "")
+                range_start, range_end = map(int, range_str.split("-"))
+                plaintext = full_plaintext[range_start:range_end + 1]
+            else:
+                plaintext = full_plaintext
+
+        # Encrypt with upload's DEK
+        ciphertext = crypto.encrypt_part(plaintext, state.dek, upload_id, part_num)
+
+        # Upload the encrypted part
+        resp = await client.upload_part(bucket, key, upload_id, part_num, ciphertext)
+
+        # Record the part
+        body_md5 = hashlib.md5(plaintext).hexdigest()
+        await self.multipart_manager.add_part(bucket, key, upload_id, PartMetadata(
+            part_num, len(plaintext), len(ciphertext),
+            resp["ETag"].strip('"'), body_md5
+        ))
+
+        # Return CopyPartResult
+        last_modified = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        return Response(
+            content=xml_responses.upload_part_copy_result(resp["ETag"].strip('"'), last_modified),
             media_type="application/xml",
         )

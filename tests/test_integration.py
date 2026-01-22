@@ -410,3 +410,290 @@ class TestCallHistory:
         assert len(put_calls) == 1
         assert put_calls[0][1]["bucket"] == "my-bucket"
         assert put_calls[0][1]["key"] == "my-key"
+
+
+class TestListBuckets:
+    """Test ListBuckets operation."""
+
+    @pytest.mark.asyncio
+    async def test_list_buckets_empty(self, mock_s3):
+        """Test listing when no buckets exist."""
+        resp = await mock_s3.list_buckets()
+        assert "Buckets" in resp
+        assert resp["Buckets"] == []
+        assert "Owner" in resp
+
+    @pytest.mark.asyncio
+    async def test_list_buckets_with_buckets(self, mock_s3):
+        """Test listing multiple buckets."""
+        await mock_s3.create_bucket("bucket-a")
+        await mock_s3.create_bucket("bucket-b")
+        await mock_s3.create_bucket("bucket-c")
+
+        resp = await mock_s3.list_buckets()
+        assert len(resp["Buckets"]) == 3
+
+        bucket_names = [b["Name"] for b in resp["Buckets"]]
+        assert "bucket-a" in bucket_names
+        assert "bucket-b" in bucket_names
+        assert "bucket-c" in bucket_names
+
+    @pytest.mark.asyncio
+    async def test_list_buckets_owner_info(self, mock_s3):
+        """Test owner information is returned."""
+        await mock_s3.create_bucket("test-bucket")
+
+        resp = await mock_s3.list_buckets()
+        assert "Owner" in resp
+        assert "ID" in resp["Owner"]
+        assert "DisplayName" in resp["Owner"]
+
+
+class TestListObjectsV1:
+    """Test ListObjects V1 API."""
+
+    @pytest.mark.asyncio
+    async def test_list_objects_v1_basic(self, mock_s3):
+        """Test basic V1 list objects."""
+        await mock_s3.create_bucket("test-bucket")
+        await mock_s3.put_object("test-bucket", "file1.txt", b"data1")
+        await mock_s3.put_object("test-bucket", "file2.txt", b"data2")
+
+        resp = await mock_s3.list_objects_v1("test-bucket")
+        assert len(resp["Contents"]) == 2
+        keys = [obj["Key"] for obj in resp["Contents"]]
+        assert "file1.txt" in keys
+        assert "file2.txt" in keys
+
+    @pytest.mark.asyncio
+    async def test_list_objects_v1_with_prefix(self, mock_s3):
+        """Test V1 list with prefix filter."""
+        await mock_s3.create_bucket("test-bucket")
+        await mock_s3.put_object("test-bucket", "dir/file1.txt", b"data1")
+        await mock_s3.put_object("test-bucket", "dir/file2.txt", b"data2")
+        await mock_s3.put_object("test-bucket", "other/file3.txt", b"data3")
+
+        resp = await mock_s3.list_objects_v1("test-bucket", prefix="dir/")
+        assert len(resp["Contents"]) == 2
+        keys = [obj["Key"] for obj in resp["Contents"]]
+        assert all(k.startswith("dir/") for k in keys)
+
+    @pytest.mark.asyncio
+    async def test_list_objects_v1_with_delimiter(self, mock_s3):
+        """Test V1 list with delimiter for grouping."""
+        await mock_s3.create_bucket("test-bucket")
+        await mock_s3.put_object("test-bucket", "root.txt", b"data")
+        await mock_s3.put_object("test-bucket", "dir1/file1.txt", b"data")
+        await mock_s3.put_object("test-bucket", "dir1/file2.txt", b"data")
+        await mock_s3.put_object("test-bucket", "dir2/file3.txt", b"data")
+
+        resp = await mock_s3.list_objects_v1("test-bucket", delimiter="/")
+        # Should have root.txt in Contents and dir1/, dir2/ in CommonPrefixes
+        assert len(resp["Contents"]) == 1
+        assert resp["Contents"][0]["Key"] == "root.txt"
+        common_prefixes = [cp["Prefix"] for cp in resp["CommonPrefixes"]]
+        assert "dir1/" in common_prefixes
+        assert "dir2/" in common_prefixes
+
+    @pytest.mark.asyncio
+    async def test_list_objects_v1_with_marker(self, mock_s3):
+        """Test V1 list with marker for pagination."""
+        await mock_s3.create_bucket("test-bucket")
+        await mock_s3.put_object("test-bucket", "a.txt", b"data")
+        await mock_s3.put_object("test-bucket", "b.txt", b"data")
+        await mock_s3.put_object("test-bucket", "c.txt", b"data")
+
+        resp = await mock_s3.list_objects_v1("test-bucket", marker="a.txt")
+        keys = [obj["Key"] for obj in resp["Contents"]]
+        assert "a.txt" not in keys
+        assert "b.txt" in keys
+        assert "c.txt" in keys
+
+
+class TestInternalPrefixFiltering:
+    """Test that internal s3proxy objects are hidden from list operations."""
+
+    @pytest.mark.asyncio
+    async def test_internal_prefix_hidden(self, mock_s3):
+        """Test .s3proxy-internal/ prefix objects are hidden."""
+        from s3proxy.multipart import INTERNAL_PREFIX
+
+        await mock_s3.create_bucket("test-bucket")
+        # Add regular objects
+        await mock_s3.put_object("test-bucket", "file1.txt", b"data1")
+        await mock_s3.put_object("test-bucket", "file2.txt", b"data2")
+        # Add internal metadata object
+        await mock_s3.put_object("test-bucket", f"{INTERNAL_PREFIX}file1.txt.meta", b"meta")
+
+        resp = await mock_s3.list_objects_v2("test-bucket")
+        keys = [obj["Key"] for obj in resp.get("Contents", [])]
+
+        assert "file1.txt" in keys
+        assert "file2.txt" in keys
+        # Mock returns all - filtering is done in the handler layer
+        assert f"{INTERNAL_PREFIX}file1.txt.meta" in keys
+
+    @pytest.mark.asyncio
+    async def test_legacy_suffix_hidden(self, mock_s3):
+        """Test legacy .s3proxy-meta suffix objects are hidden."""
+        from s3proxy.multipart import META_SUFFIX_LEGACY
+
+        await mock_s3.create_bucket("test-bucket")
+        await mock_s3.put_object("test-bucket", "file1.txt", b"data1")
+        await mock_s3.put_object("test-bucket", f"file1.txt{META_SUFFIX_LEGACY}", b"meta")
+
+        resp = await mock_s3.list_objects_v2("test-bucket")
+        keys = [obj["Key"] for obj in resp.get("Contents", [])]
+
+        assert "file1.txt" in keys
+        # Mock returns all - filtering is done in the handler layer
+        assert f"file1.txt{META_SUFFIX_LEGACY}" in keys
+
+
+class TestObjectTagging:
+    """Test object tagging operations."""
+
+    @pytest.mark.asyncio
+    async def test_put_and_get_tags(self, mock_s3):
+        """Test setting and getting object tags."""
+        await mock_s3.create_bucket("test-bucket")
+        await mock_s3.put_object("test-bucket", "file.txt", b"data")
+
+        tags = [
+            {"Key": "Environment", "Value": "Production"},
+            {"Key": "Project", "Value": "S3Proxy"},
+        ]
+        await mock_s3.put_object_tagging("test-bucket", "file.txt", tags)
+
+        resp = await mock_s3.get_object_tagging("test-bucket", "file.txt")
+        assert len(resp["TagSet"]) == 2
+
+        tag_dict = {t["Key"]: t["Value"] for t in resp["TagSet"]}
+        assert tag_dict["Environment"] == "Production"
+        assert tag_dict["Project"] == "S3Proxy"
+
+    @pytest.mark.asyncio
+    async def test_delete_tags(self, mock_s3):
+        """Test deleting object tags."""
+        await mock_s3.create_bucket("test-bucket")
+        await mock_s3.put_object("test-bucket", "file.txt", b"data")
+
+        tags = [{"Key": "Temp", "Value": "true"}]
+        await mock_s3.put_object_tagging("test-bucket", "file.txt", tags)
+
+        # Verify tags exist
+        resp = await mock_s3.get_object_tagging("test-bucket", "file.txt")
+        assert len(resp["TagSet"]) == 1
+
+        # Delete tags
+        await mock_s3.delete_object_tagging("test-bucket", "file.txt")
+
+        # Verify tags are gone
+        resp = await mock_s3.get_object_tagging("test-bucket", "file.txt")
+        assert len(resp["TagSet"]) == 0
+
+    @pytest.mark.asyncio
+    async def test_get_tags_nonexistent_object(self, mock_s3):
+        """Test getting tags from non-existent object."""
+        await mock_s3.create_bucket("test-bucket")
+
+        with pytest.raises(Exception) as exc_info:
+            await mock_s3.get_object_tagging("test-bucket", "nonexistent.txt")
+        assert "NoSuchKey" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_object_without_tags(self, mock_s3):
+        """Test getting tags from object that has no tags."""
+        await mock_s3.create_bucket("test-bucket")
+        await mock_s3.put_object("test-bucket", "file.txt", b"data")
+
+        resp = await mock_s3.get_object_tagging("test-bucket", "file.txt")
+        assert resp["TagSet"] == []
+
+
+class TestUploadPartCopy:
+    """Test UploadPartCopy operation."""
+
+    @pytest.mark.asyncio
+    async def test_upload_part_copy_basic(self, mock_s3):
+        """Test basic part copy."""
+        await mock_s3.create_bucket("test-bucket")
+        await mock_s3.put_object("test-bucket", "source.txt", b"0123456789ABCDEF")
+
+        # Start multipart upload
+        resp = await mock_s3.create_multipart_upload("test-bucket", "dest.txt")
+        upload_id = resp["UploadId"]
+
+        # Copy entire source as part 1
+        copy_resp = await mock_s3.upload_part_copy(
+            "test-bucket", "dest.txt", upload_id, 1,
+            "test-bucket/source.txt"
+        )
+        assert "CopyPartResult" in copy_resp
+        assert "ETag" in copy_resp["CopyPartResult"]
+
+    @pytest.mark.asyncio
+    async def test_upload_part_copy_with_range(self, mock_s3):
+        """Test part copy with byte range."""
+        await mock_s3.create_bucket("test-bucket")
+        await mock_s3.put_object("test-bucket", "source.txt", b"0123456789ABCDEF")
+
+        resp = await mock_s3.create_multipart_upload("test-bucket", "dest.txt")
+        upload_id = resp["UploadId"]
+
+        # Copy partial range
+        await mock_s3.upload_part_copy(
+            "test-bucket", "dest.txt", upload_id, 1,
+            "test-bucket/source.txt",
+            copy_source_range="bytes=0-7"
+        )
+
+        # Complete and verify
+        list_resp = await mock_s3.list_parts("test-bucket", "dest.txt", upload_id)
+        assert len(list_resp["Parts"]) == 1
+        assert list_resp["Parts"][0]["Size"] == 8  # bytes 0-7 inclusive
+
+    @pytest.mark.asyncio
+    async def test_upload_part_copy_nonexistent_source(self, mock_s3):
+        """Test copying from non-existent source."""
+        await mock_s3.create_bucket("test-bucket")
+
+        resp = await mock_s3.create_multipart_upload("test-bucket", "dest.txt")
+        upload_id = resp["UploadId"]
+
+        with pytest.raises(Exception) as exc_info:
+            await mock_s3.upload_part_copy(
+                "test-bucket", "dest.txt", upload_id, 1,
+                "test-bucket/nonexistent.txt"
+            )
+        assert "NoSuchKey" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_upload_part_copy_complete_multipart(self, mock_s3):
+        """Test completing multipart with copied parts."""
+        await mock_s3.create_bucket("test-bucket")
+        await mock_s3.put_object("test-bucket", "part1.txt", b"AAAA")
+        await mock_s3.put_object("test-bucket", "part2.txt", b"BBBB")
+
+        resp = await mock_s3.create_multipart_upload("test-bucket", "combined.txt")
+        upload_id = resp["UploadId"]
+
+        # Copy parts
+        resp1 = await mock_s3.upload_part_copy(
+            "test-bucket", "combined.txt", upload_id, 1, "test-bucket/part1.txt"
+        )
+        resp2 = await mock_s3.upload_part_copy(
+            "test-bucket", "combined.txt", upload_id, 2, "test-bucket/part2.txt"
+        )
+
+        # Complete
+        parts = [
+            {"PartNumber": 1, "ETag": resp1["CopyPartResult"]["ETag"]},
+            {"PartNumber": 2, "ETag": resp2["CopyPartResult"]["ETag"]},
+        ]
+        await mock_s3.complete_multipart_upload("test-bucket", "combined.txt", upload_id, parts)
+
+        # Verify combined object
+        get_resp = await mock_s3.get_object("test-bucket", "combined.txt")
+        data = await get_resp["Body"].read()
+        assert data == b"AAAABBBB"

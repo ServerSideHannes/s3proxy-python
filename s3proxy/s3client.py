@@ -662,3 +662,85 @@ class S3Client:
         if part_number_marker:
             kwargs["PartNumberMarker"] = part_number_marker
         return await client.list_parts(**kwargs)
+
+    async def list_buckets(self) -> dict[str, Any]:
+        """List all buckets owned by the authenticated user."""
+        client = await self._client()
+        return await client.list_buckets()
+
+    async def list_objects_v1(
+        self,
+        bucket: str,
+        prefix: str | None = None,
+        marker: str | None = None,
+        delimiter: str | None = None,
+        max_keys: int = 1000,
+    ) -> dict[str, Any]:
+        """List objects in bucket using V1 API.
+
+        Args:
+            bucket: Bucket name
+            prefix: Filter by key prefix
+            marker: Key to start listing after
+            delimiter: Delimiter for grouping keys
+            max_keys: Maximum keys to return
+        """
+        client = await self._client()
+        kwargs: dict[str, Any] = {"Bucket": bucket, "MaxKeys": max_keys}
+        if prefix:
+            kwargs["Prefix"] = prefix
+        if marker:
+            kwargs["Marker"] = marker
+        if delimiter:
+            kwargs["Delimiter"] = delimiter
+        return await client.list_objects(**kwargs)
+
+    async def get_object_tagging(self, bucket: str, key: str) -> dict[str, Any]:
+        """Get object tags."""
+        client = await self._client()
+        return await client.get_object_tagging(Bucket=bucket, Key=key)
+
+    async def put_object_tagging(
+        self, bucket: str, key: str, tags: list[dict[str, str]]
+    ) -> dict[str, Any]:
+        """Set object tags."""
+        client = await self._client()
+        return await client.put_object_tagging(
+            Bucket=bucket, Key=key, Tagging={"TagSet": tags}
+        )
+
+    async def delete_object_tagging(self, bucket: str, key: str) -> dict[str, Any]:
+        """Delete object tags."""
+        client = await self._client()
+        return await client.delete_object_tagging(Bucket=bucket, Key=key)
+
+    async def upload_part_copy(
+        self,
+        bucket: str,
+        key: str,
+        upload_id: str,
+        part_number: int,
+        copy_source: str,
+        copy_source_range: str | None = None,
+    ) -> dict[str, Any]:
+        """Copy a part from another object.
+
+        Args:
+            bucket: Destination bucket
+            key: Destination key
+            upload_id: Multipart upload ID
+            part_number: Part number
+            copy_source: Source in format "bucket/key"
+            copy_source_range: Optional byte range (e.g., "bytes=0-999")
+        """
+        client = await self._client()
+        kwargs: dict[str, Any] = {
+            "Bucket": bucket,
+            "Key": key,
+            "UploadId": upload_id,
+            "PartNumber": part_number,
+            "CopySource": copy_source,
+        }
+        if copy_source_range:
+            kwargs["CopySourceRange"] = copy_source_range
+        return await client.upload_part_copy(**kwargs)

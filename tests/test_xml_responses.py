@@ -366,3 +366,201 @@ class TestListParts:
         root = ET.fromstring(xml)
         ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
         assert root.find(f"{ns}Key").text == "path/to/file<>&.txt"
+
+
+class TestListBuckets:
+    """Test ListAllMyBucketsResult XML."""
+
+    def test_empty_buckets(self):
+        """Test listing no buckets."""
+        xml = xml_responses.list_buckets(
+            owner={"ID": "owner-123", "DisplayName": "test-user"},
+            buckets=[],
+        )
+
+        root = ET.fromstring(xml)
+        ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+        assert root.find(f"{ns}Owner/{ns}ID").text == "owner-123"
+        assert root.find(f"{ns}Owner/{ns}DisplayName").text == "test-user"
+        assert len(root.findall(f"{ns}Buckets/{ns}Bucket")) == 0
+
+    def test_with_buckets(self):
+        """Test listing multiple buckets."""
+        buckets = [
+            {"Name": "bucket-a", "CreationDate": "2024-01-15T10:00:00Z"},
+            {"Name": "bucket-b", "CreationDate": "2024-01-16T10:00:00Z"},
+        ]
+        xml = xml_responses.list_buckets(
+            owner={"ID": "owner-123", "DisplayName": "test-user"},
+            buckets=buckets,
+        )
+
+        root = ET.fromstring(xml)
+        ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+        bucket_elements = root.findall(f"{ns}Buckets/{ns}Bucket")
+        assert len(bucket_elements) == 2
+
+        names = [b.find(f"{ns}Name").text for b in bucket_elements]
+        assert "bucket-a" in names
+        assert "bucket-b" in names
+
+    def test_bucket_with_datetime(self):
+        """Test bucket with datetime object for CreationDate."""
+        from datetime import datetime, UTC
+        buckets = [{"Name": "test", "CreationDate": datetime(2024, 1, 15, 10, 0, 0, tzinfo=UTC)}]
+        xml = xml_responses.list_buckets(
+            owner={"ID": "id", "DisplayName": "name"},
+            buckets=buckets,
+        )
+
+        # Should parse without error
+        root = ET.fromstring(xml)
+        ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+        assert root.find(f"{ns}Buckets/{ns}Bucket/{ns}Name").text == "test"
+
+
+class TestListObjectsV1:
+    """Test ListBucketResult XML for V1 API."""
+
+    def test_empty_bucket(self):
+        """Test empty bucket response."""
+        xml = xml_responses.list_objects_v1(
+            bucket="my-bucket",
+            prefix="",
+            marker=None,
+            delimiter=None,
+            max_keys=1000,
+            is_truncated=False,
+            next_marker=None,
+            objects=[],
+        )
+
+        root = ET.fromstring(xml)
+        ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+        assert root.find(f"{ns}Name").text == "my-bucket"
+        assert root.find(f"{ns}IsTruncated").text == "false"
+        assert len(root.findall(f"{ns}Contents")) == 0
+
+    def test_with_objects(self):
+        """Test V1 list with objects."""
+        objects = [
+            {"key": "file1.txt", "last_modified": "2024-01-15T10:00:00Z", "etag": "abc", "size": 100},
+            {"key": "file2.txt", "last_modified": "2024-01-15T11:00:00Z", "etag": "def", "size": 200},
+        ]
+        xml = xml_responses.list_objects_v1(
+            bucket="my-bucket",
+            prefix="",
+            marker=None,
+            delimiter=None,
+            max_keys=1000,
+            is_truncated=False,
+            next_marker=None,
+            objects=objects,
+        )
+
+        root = ET.fromstring(xml)
+        ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+        contents = root.findall(f"{ns}Contents")
+        assert len(contents) == 2
+
+    def test_with_marker(self):
+        """Test V1 list with marker."""
+        xml = xml_responses.list_objects_v1(
+            bucket="my-bucket",
+            prefix="",
+            marker="start-key",
+            delimiter=None,
+            max_keys=100,
+            is_truncated=True,
+            next_marker="next-key",
+            objects=[{"key": "file.txt", "last_modified": "2024-01-15T10:00:00Z", "etag": "abc", "size": 100}],
+        )
+
+        root = ET.fromstring(xml)
+        ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+        assert root.find(f"{ns}Marker").text == "start-key"
+        assert root.find(f"{ns}NextMarker").text == "next-key"
+        assert root.find(f"{ns}IsTruncated").text == "true"
+
+    def test_with_delimiter_and_prefixes(self):
+        """Test V1 list with delimiter and common prefixes."""
+        xml = xml_responses.list_objects_v1(
+            bucket="my-bucket",
+            prefix="",
+            marker=None,
+            delimiter="/",
+            max_keys=1000,
+            is_truncated=False,
+            next_marker=None,
+            objects=[{"key": "root.txt", "last_modified": "2024-01-15T10:00:00Z", "etag": "abc", "size": 100}],
+            common_prefixes=["dir1/", "dir2/"],
+        )
+
+        root = ET.fromstring(xml)
+        ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+        assert root.find(f"{ns}Delimiter").text == "/"
+        prefixes = root.findall(f"{ns}CommonPrefixes/{ns}Prefix")
+        assert len(prefixes) == 2
+        prefix_values = [p.text for p in prefixes]
+        assert "dir1/" in prefix_values
+        assert "dir2/" in prefix_values
+
+
+class TestGetTagging:
+    """Test GetObjectTaggingResult XML."""
+
+    def test_empty_tags(self):
+        """Test empty tag set."""
+        xml = xml_responses.get_tagging(tags=[])
+
+        root = ET.fromstring(xml)
+        ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+        assert len(root.findall(f"{ns}TagSet/{ns}Tag")) == 0
+
+    def test_with_tags(self):
+        """Test with multiple tags."""
+        tags = [
+            {"Key": "Environment", "Value": "Production"},
+            {"Key": "Project", "Value": "S3Proxy"},
+        ]
+        xml = xml_responses.get_tagging(tags=tags)
+
+        root = ET.fromstring(xml)
+        ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+        tag_elements = root.findall(f"{ns}TagSet/{ns}Tag")
+        assert len(tag_elements) == 2
+
+        # Check tag values
+        tag_dict = {}
+        for tag in tag_elements:
+            key = tag.find(f"{ns}Key").text
+            value = tag.find(f"{ns}Value").text
+            tag_dict[key] = value
+
+        assert tag_dict["Environment"] == "Production"
+        assert tag_dict["Project"] == "S3Proxy"
+
+    def test_special_characters_escaped(self):
+        """Test special characters in tags are escaped."""
+        tags = [{"Key": "key<>&", "Value": "value<>&"}]
+        xml = xml_responses.get_tagging(tags=tags)
+
+        # Should parse without error
+        root = ET.fromstring(xml)
+        ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+        tag = root.find(f"{ns}TagSet/{ns}Tag")
+        assert tag.find(f"{ns}Key").text == "key<>&"
+        assert tag.find(f"{ns}Value").text == "value<>&"
+
+
+class TestUploadPartCopyResult:
+    """Test CopyPartResult XML."""
+
+    def test_basic_response(self):
+        """Test basic copy part result."""
+        xml = xml_responses.upload_part_copy_result("abc123", "2024-01-15T10:30:00.000Z")
+
+        root = ET.fromstring(xml)
+        ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+        assert '"abc123"' in root.find(f"{ns}ETag").text
+        assert root.find(f"{ns}LastModified").text == "2024-01-15T10:30:00.000Z"

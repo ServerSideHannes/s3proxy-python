@@ -1,94 +1,41 @@
 # S3Proxy Helm Chart Values
 
-# Deployment settings
 replicaCount: 3
 
-# Container image
 image:
-  # IMPORTANT: Change to your image registry
-  # Example: ghcr.io/myorg/sseproxy-python or your private registry
-  repository: ghcr.io/YOUR_USERNAME/sseproxy-python
-  # IMPORTANT: Never use 'latest' in production - use specific version tags
-  # Example: "v0.1.0", "v0.2.0", etc.
+  repository: ghcr.io/ServerSideHannes/sseproxy-python
   tag: latest
   pullPolicy: IfNotPresent
 
-# S3 configuration (used only when minio.enabled=false)
-# Ignored if MinIO is enabled - MinIO will be used as the S3 backend
+# S3 backend configuration
 s3:
-  # S3-compatible endpoint: AWS S3, DigitalOcean Spaces, etc.
-  # Examples:
-  #   - "s3.amazonaws.com" (AWS S3)
-  #   - "s3.us-west-2.amazonaws.com" (AWS S3 specific region)
-  #   - "nyc3.digitaloceanspaces.com" (DigitalOcean Spaces)
   host: "s3.amazonaws.com"
-  # AWS region (ignored for non-AWS S3 services)
   region: "us-east-1"
 
-# Server settings
 server:
-  port: 4433  # Listen port (should match service.port)
-  noTls: true  # TLS termination handled by Ingress or Load Balancer
+  port: 4433
+  noTls: true
 
-# Performance tuning settings
 performance:
-  maxConcurrentUploads: 10  # Max concurrent upload operations
-  maxConcurrentDownloads: 10  # Max concurrent download operations
-  autoMultipartMb: 16  # Chunk size in MB for multipart uploads
+  throttlingRequestsMax: 10
+  maxUploadSizeMb: 45
 
-# MinIO configuration (embedded S3 backend)
-# Set enabled: false to use external S3 (AWS, DigitalOcean Spaces, etc.)
-# When disabled, configure s3.host and set secrets.awsAccessKeyId/awsSecretAccessKey
-minio:
-  enabled: true  # For production, consider external S3 service
-  image:
-    repository: minio/minio
-    tag: latest  # Specify version for production, e.g., "RELEASE.2024-01-16T16-07-38Z"
-    pullPolicy: IfNotPresent
-  # IMPORTANT: Change credentials in production!
-  # Default credentials below are for development only
-  rootUser: "minioadmin"
-  rootPassword: "minioadmin"
-  resources:
-    requests:
-      cpu: "50m"
-      memory: "128Mi"
-    limits:
-      cpu: "500m"
-      memory: "512Mi"
-
-# Redis cache for upload state management
-# Choose one: redis-ha (for HA) or externalRedis (for managed services)
+# External Redis (for managed services)
 externalRedis:
-  # Use this for managed Redis: AWS ElastiCache, Azure Cache, Redis Cloud, etc.
-  # Leave empty to use redis-ha instead
-  # Format: redis://host:port/db or redis://:password@host:port/db
-  url: ""  # e.g., "redis://my-elasticache.abc123.cache.amazonaws.com:6379/0"
-  # Include password in URL if needed: redis://:mypassword@host:port/db
-  # TTL for upload state in hours
+  url: ""
   uploadTtlHours: 24
 
-# Redis HA configuration (embedded high-availability Redis)
-# Uses dandydev/redis-ha chart with Sentinel for automatic failover
-# Set enabled: false if using externalRedis instead
+# Redis HA (embedded)
 redis-ha:
-  enabled: true  # Disable if using managed Redis service
-  # Number of Redis replicas (1 master + N-1 replicas)
+  enabled: true
   replicas: 3
+  existingSecret: ""
 
-  # Use existing secret for Redis password (RECOMMENDED for production)
-  # If provided, auth and authKey below are ignored
-  # Create with: kubectl create secret generic redis-password --from-literal=redis-password="your-password"
-  existingSecret: ""  # Name of existing secret with key "redis-password"
-
-  # Persistence configuration
   persistentVolume:
     enabled: true
     size: 10Gi
-    storageClass: ""  # Use default storage class, or specify e.g., "gp3", "standard"
+    storageClass: ""
 
-  # HAProxy for single-endpoint access (recommended)
-  # This allows standard redis:// URLs without sentinel-aware client code
   haproxy:
     enabled: true
     replicas: 2
@@ -100,7 +47,6 @@ redis-ha:
         cpu: "200m"
         memory: "128Mi"
 
-  # Sentinel configuration
   sentinel:
     port: 26379
     quorum: 2
@@ -109,7 +55,6 @@ redis-ha:
       failover-timeout: 180000
       parallel-syncs: 5
 
-  # Redis configuration
   redis:
     port: 6379
     config:
@@ -117,14 +62,10 @@ redis-ha:
       min-replicas-to-write: 1
       min-replicas-max-lag: 5
 
-  # Security - Redis password authentication (ignored if existingSecret is set above)
-  auth: false  # Set to true to enable password protection
-  authKey: ""  # Redis password (required if auth=true and no existingSecret, generate with: openssl rand -base64 32)
-
-  # Pod anti-affinity for HA (spread across nodes)
+  auth: false
+  authKey: ""
   hardAntiAffinity: true
 
-  # Resource limits for Redis pods
   resources:
     requests:
       cpu: "100m"
@@ -133,54 +74,77 @@ redis-ha:
       cpu: "500m"
       memory: "512Mi"
 
-# Secret Configuration
-# IMPORTANT: Never commit actual secrets to git!
-# Priority: existingSecrets > create static secret
-
+# Secrets (use existing secret in production)
 secrets:
-  # Option 1: Use existing Secret (RECOMMENDED for production)
-  # Reference an existing Kubernetes secret and optionally map its keys
-  # If using default key names, just set the secret name:
-  #   kubectl create secret generic my-s3-secrets \
-  #     --from-literal=S3PROXY_ENCRYPT_KEY="$(openssl rand -base64 32)" \
-  #     --from-literal=AWS_ACCESS_KEY_ID="AKIA..." \
-  #     --from-literal=AWS_SECRET_ACCESS_KEY="..."
   existingSecrets:
     enabled: false
-    name: ""  # Name of existing Kubernetes secret
-    # Optional: Map secret keys if using different key names
+    name: ""
     keys:
-      encryptKey: "S3PROXY_ENCRYPT_KEY"  # Secret key name for encryption key
-      awsAccessKeyId: "AWS_ACCESS_KEY_ID"  # Secret key name for access key
-      awsSecretAccessKey: "AWS_SECRET_ACCESS_KEY"  # Secret key name for secret key
+      encryptKey: "S3PROXY_ENCRYPT_KEY"
+      awsAccessKeyId: "AWS_ACCESS_KEY_ID"
+      awsSecretAccessKey: "AWS_SECRET_ACCESS_KEY"
 
-  # Option 2: Create new secret from values (use only for development)
-  # For production, use existingSecrets with a pre-created secret
-  # Provide values via helm --set or secure values file, never hardcode here
-
-  # S3PROXY_ENCRYPT_KEY: AES-256-GCM encryption key (base64-encoded 32 bytes)
-  # Generate with: openssl rand -base64 32
   encryptKey: ""
-
-  # AWS/S3 credentials (ignored if minio.enabled=true and using MinIO defaults)
-  # Only needed when: minio.enabled=false AND using external S3
   awsAccessKeyId: ""
   awsSecretAccessKey: ""
 
-# Logging
-logLevel: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR
+logLevel: "INFO"
 
-# Resource limits for s3proxy pods
-# Adjust based on your workload and cluster capacity
 resources:
   requests:
     cpu: "100m"
-    memory: "256Mi"
+    memory: "512Mi"
   limits:
-    cpu: "1000m"
+    cpu: "100m"
     memory: "512Mi"
 
-# Kubernetes Service configuration
 service:
-  type: ClusterIP  # Use LoadBalancer for external access, or configure Ingress
-  port: 4433  # Service port (container also runs on this port)
+  type: ClusterIP
+  port: 4433
+
+# Gateway creates internal DNS alias (no external DNS setup needed)
+# Internal: gateway.enabled=true, ingress.enabled=true -> s3-gateway.<namespace>
+# External: gateway.enabled=false, ingress.enabled=true, hosts=[...] -> your-domain.com (requires DNS)
+gateway:
+  enabled: false
+  serviceName: s3-gateway
+  ingressService: ingress-nginx-controller.ingress-nginx.svc.cluster.local
+
+# Pod scheduling
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+  # Example: prefer spreading across nodes
+  # podAntiAffinity:
+  #   preferredDuringSchedulingIgnoredDuringExecution:
+  #     - weight: 100
+  #       podAffinityTerm:
+  #         labelSelector:
+  #           matchLabels:
+  #             app: sseproxy-python
+  #         topologyKey: kubernetes.io/hostname
+
+topologySpreadConstraints: []
+  # Example: spread across zones
+  # - maxSkew: 1
+  #   topologyKey: topology.kubernetes.io/zone
+  #   whenUnsatisfiable: ScheduleAnyway
+  #   labelSelector:
+  #     matchLabels:
+  #       app: sseproxy-python
+
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/upstream-keepalive-connections: "100"
+  tls: []
+  hosts: []

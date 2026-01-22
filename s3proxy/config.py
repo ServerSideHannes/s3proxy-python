@@ -27,17 +27,14 @@ class Settings(BaseSettings):
     cert_path: str = Field(default="/etc/s3proxy/certs", description="TLS certificate directory")
 
     # Performance settings
-    throttling_requests_max: int = Field(default=0, description="Max concurrent requests")
-    max_single_encrypted_mb: int = Field(default=16, description="Max single-part object size (MB)")
-    auto_multipart_mb: int = Field(default=16, description="Auto-multipart threshold (MB)")
-    max_concurrent_uploads: int = Field(default=10, description="Max concurrent uploads")
-    max_concurrent_downloads: int = Field(default=10, description="Max concurrent downloads")
+    # Memory usage: file_size + ~64MB per concurrent upload
+    # For 1GB pod with 10MB files: ~13 concurrent safe, default 10 for margin
+    # Files >16MB automatically use multipart encryption
+    throttling_requests_max: int = Field(default=10, description="Max concurrent requests (0=unlimited)")
+    max_upload_size_mb: int = Field(default=45, description="Max single-request upload size (MB)")
 
-    # Feature flags
-    allow_multipart: bool = Field(default=False, description="Allow unencrypted multipart")
-
-    # Redis settings (for distributed state)
-    redis_url: str = Field(default="redis://localhost:6379/0", description="Redis connection URL")
+    # Redis settings (for distributed state in HA deployments)
+    redis_url: str = Field(default="", description="Redis URL for HA mode (empty = in-memory single-instance)")
     redis_upload_ttl_hours: int = Field(default=24, description="TTL for upload state in Redis (hours)")
 
     # Logging
@@ -55,14 +52,9 @@ class Settings(BaseSettings):
         return hashlib.sha256(self.encrypt_key.encode()).digest()
 
     @property
-    def max_single_encrypted_bytes(self) -> int:
-        """Max single encrypted object size in bytes."""
-        return self.max_single_encrypted_mb * 1024 * 1024
-
-    @property
-    def auto_multipart_bytes(self) -> int:
-        """Auto-multipart threshold in bytes."""
-        return self.auto_multipart_mb * 1024 * 1024
+    def max_upload_size_bytes(self) -> int:
+        """Max upload size in bytes."""
+        return self.max_upload_size_mb * 1024 * 1024
 
     @property
     def s3_endpoint(self) -> str:

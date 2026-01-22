@@ -108,8 +108,7 @@ class TestSettings:
 
     def test_size_calculations(self, settings):
         """Test size calculations."""
-        assert settings.max_single_encrypted_bytes == 16 * 1024 * 1024
-        assert settings.auto_multipart_bytes == 16 * 1024 * 1024
+        assert settings.max_upload_size_bytes == 45 * 1024 * 1024
 
 
 class TestRangeParsing:

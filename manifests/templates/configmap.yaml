@@ -5,18 +5,13 @@ metadata:
   labels:
     app.kubernetes.io/name: {{ .Chart.Name }}
 data:
-  {{- if .Values.minio.enabled }}
-  S3PROXY_HOST: "http://{{ .Chart.Name }}-minio:9000"
-  {{- else }}
   S3PROXY_HOST: {{ .Values.s3.host | quote }}
-  {{- end }}
   S3PROXY_REGION: {{ .Values.s3.region | quote }}
   S3PROXY_IP: "0.0.0.0"
   S3PROXY_PORT: {{ .Values.server.port | quote }}
   S3PROXY_NO_TLS: {{ .Values.server.noTls | quote }}
-  S3PROXY_MAX_CONCURRENT_UPLOADS: {{ .Values.performance.maxConcurrentUploads | quote }}
-  S3PROXY_MAX_CONCURRENT_DOWNLOADS: {{ .Values.performance.maxConcurrentDownloads | quote }}
-  S3PROXY_AUTO_MULTIPART_MB: {{ .Values.performance.autoMultipartMb | quote }}
+  S3PROXY_THROTTLING_REQUESTS_MAX: {{ .Values.performance.throttlingRequestsMax | quote }}
+  S3PROXY_MAX_UPLOAD_SIZE_MB: {{ .Values.performance.maxUploadSizeMb | quote }}
   {{- if index .Values "redis-ha" "enabled" }}
   S3PROXY_REDIS_URL: "redis://{{ .Release.Name }}-redis-ha-haproxy:6379/0"
   {{- else }}

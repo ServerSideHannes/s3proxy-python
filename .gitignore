@@ -47,3 +47,6 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Helm dependencies (downloaded via helm dependency build)
+manifests/charts/*.tgz

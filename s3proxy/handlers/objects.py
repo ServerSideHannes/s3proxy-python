@@ -264,11 +264,13 @@ class ObjectHandlerMixin(BaseHandler):
         if needs_chunked_decode:
             body = decode_aws_chunked(body)
 
-        if self.settings.auto_multipart_bytes > 0 and len(body) > self.settings.auto_multipart_bytes:
-            return await self._put_multipart(client, bucket, key, body, content_type)
+        # Reject if exceeds max upload size
+        if len(body) > self.settings.max_upload_size_bytes:
+            raise HTTPException(413, f"Max upload size: {self.settings.max_upload_size_mb}MB")
 
-        if len(body) > self.settings.max_single_encrypted_bytes:
-            raise HTTPException(413, f"Max size: {self.settings.max_single_encrypted_mb}MB")
+        # Auto-use multipart for files >16MB to split encryption into parts
+        if len(body) > crypto.PART_SIZE:
+            return await self._put_multipart(client, bucket, key, body, content_type)
 
         encrypted = crypto.encrypt_object(body, self.settings.kek)
         etag = hashlib.md5(body).hexdigest()
@@ -385,10 +387,11 @@ class ObjectHandlerMixin(BaseHandler):
                 total_plaintext_size += len(chunk)
 
                 # Upload when buffer reaches PART_SIZE
+                # Process immediately without intermediate variable to reduce memory
                 while len(buffer) >= crypto.PART_SIZE:
-                    part_data = bytes(buffer[:crypto.PART_SIZE])
+                    # Extract, upload, then clear - minimizes peak memory
+                    await upload_part(bytes(buffer[:crypto.PART_SIZE]))
                     del buffer[:crypto.PART_SIZE]
-                    await upload_part(part_data)
 
             # Upload remaining data
             if buffer:
@@ -556,3 +559,74 @@ class ObjectHandlerMixin(BaseHandler):
             content=xml_responses.copy_object_result(etag, last_modified),
             media_type="application/xml",
         )
+
+    async def handle_get_object_tagging(
+        self, request: Request, creds: S3Credentials
+    ) -> Response:
+        """Handle GetObjectTagging request (GET /bucket/key?tagging)."""
+        from .. import xml_responses
+
+        bucket, key = self._parse_path(request.url.path)
+        client = self._client(creds)
+
+        try:
+            resp = await client.get_object_tagging(bucket, key)
+            return Response(
+                content=xml_responses.get_tagging(resp.get("TagSet", [])),
+                media_type="application/xml",
+            )
+        except ClientError as e:
+            if e.response["Error"]["Code"] in ("NoSuchKey", "404"):
+                raise HTTPException(404, "Not found") from None
+            raise HTTPException(500, str(e)) from e
+
+    async def handle_put_object_tagging(
+        self, request: Request, creds: S3Credentials
+    ) -> Response:
+        """Handle PutObjectTagging request (PUT /bucket/key?tagging)."""
+        import xml.etree.ElementTree as ET
+
+        bucket, key = self._parse_path(request.url.path)
+        client = self._client(creds)
+
+        # Parse the XML body
+        body = await request.body()
+        try:
+            root = ET.fromstring(body.decode())
+        except ET.ParseError as e:
+            raise HTTPException(400, f"Invalid XML: {e}") from e
+
+        # Extract tags
+        ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+        tags = []
+        for tag_elem in root.findall(f".//{ns}Tag") or root.findall(".//Tag"):
+            key_elem = tag_elem.find(f"{ns}Key") or tag_elem.find("Key")
+            value_elem = tag_elem.find(f"{ns}Value") or tag_elem.find("Value")
+            if key_elem is not None and key_elem.text:
+                tags.append({
+                    "Key": key_elem.text,
+                    "Value": value_elem.text if value_elem is not None and value_elem.text else "",
+                })
+
+        try:
+            await client.put_object_tagging(bucket, key, tags)
+            return Response(status_code=200)
+        except ClientError as e:
+            if e.response["Error"]["Code"] in ("NoSuchKey", "404"):
+                raise HTTPException(404, "Not found") from None
+            raise HTTPException(500, str(e)) from e
+
+    async def handle_delete_object_tagging(
+        self, request: Request, creds: S3Credentials
+    ) -> Response:
+        """Handle DeleteObjectTagging request (DELETE /bucket/key?tagging)."""
+        bucket, key = self._parse_path(request.url.path)
+        client = self._client(creds)
+
+        try:
+            await client.delete_object_tagging(bucket, key)
+            return Response(status_code=204)
+        except ClientError as e:
+            if e.response["Error"]["Code"] in ("NoSuchKey", "404"):
+                raise HTTPException(404, "Not found") from None
+            raise HTTPException(500, str(e)) from e
