@@ -56,11 +56,12 @@ _redis_client: "Redis | None" = None
 _use_redis: bool = False
 
 
-async def init_redis(redis_url: str | None) -> "Redis | None":
+async def init_redis(redis_url: str | None, redis_password: str | None = None) -> "Redis | None":
     """Initialize Redis connection pool if URL is provided.
 
     Args:
         redis_url: Redis URL or None/empty to use in-memory storage
+        redis_password: Optional password (overrides any password in URL)
 
     Returns:
         Redis client if connected, None if using in-memory storage
@@ -72,7 +73,11 @@ async def init_redis(redis_url: str | None) -> "Redis | None":
         _use_redis = False
         return None
 
-    _redis_client = redis.from_url(redis_url, decode_responses=False)
+    # Pass password separately if provided (overrides URL password)
+    if redis_password:
+        _redis_client = redis.from_url(redis_url, password=redis_password, decode_responses=False)
+    else:
+        _redis_client = redis.from_url(redis_url, decode_responses=False)
     # Test connection
     await _redis_client.ping()
     _use_redis = True

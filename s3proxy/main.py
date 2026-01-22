@@ -112,7 +112,7 @@ def create_lifespan(settings: Settings) -> "AsyncIterator[None]":
     async def lifespan(_app: FastAPI) -> "AsyncIterator[None]":
         logger.info("Starting", endpoint=settings.s3_endpoint, port=settings.port)
         # Initialize Redis if configured (for HA), otherwise use in-memory storage
-        await init_redis(settings.redis_url or None)
+        await init_redis(settings.redis_url or None, settings.redis_password or None)
         yield
         # Close Redis connection if active
         await close_redis()

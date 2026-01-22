@@ -80,8 +80,13 @@ jobs:
           EOF
           kubectl wait --for=condition=ready pod -l app=minio -n s3proxy --timeout=120s
 
-      - name: Deploy Redis
+      - name: Deploy Redis with password
         run: |
+          # Create Redis password secret
+          kubectl create secret generic redis-secret \
+            --from-literal=redis-password=testredispassword123 \
+            -n s3proxy
+
           cat <<EOF | kubectl apply -n s3proxy -f -
           apiVersion: apps/v1
           kind: Deployment
@@ -100,6 +105,14 @@ jobs:
                 containers:
                 - name: redis
                   image: redis:7-alpine
+                  command: ["redis-server"]
+                  args: ["--requirepass", "\$(REDIS_PASSWORD)"]
+                  env:
+                  - name: REDIS_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: redis-secret
+                        key: redis-password
                   ports:
                   - containerPort: 6379
                   resources:
@@ -138,6 +151,8 @@ jobs:
             --set secrets.awsSecretAccessKey=minioadmin \
             --set redis-ha.enabled=false \
             --set externalRedis.url="redis://redis:6379/0" \
+            --set externalRedis.existingSecret=redis-secret \
+            --set externalRedis.passwordKey=redis-password \
             --set replicaCount=3 \
             --set resources.limits.cpu=100m \
             --set resources.requests.cpu=50m \
