@@ -3,7 +3,7 @@
 replicaCount: 3
 
 image:
-  repository: ghcr.io/ServerSideHannes/sseproxy-python
+  repository: ghcr.io/ServerSideHannes/s3proxy-python
   tag: latest
   pullPolicy: IfNotPresent
 
@@ -123,7 +123,7 @@ affinity: {}
   #       podAffinityTerm:
   #         labelSelector:
   #           matchLabels:
-  #             app: sseproxy-python
+  #             app: s3proxy-python
   #         topologyKey: kubernetes.io/hostname
 
 topologySpreadConstraints: []
@@ -133,7 +133,7 @@ topologySpreadConstraints: []
   #   whenUnsatisfiable: ScheduleAnyway
   #   labelSelector:
   #     matchLabels:
-  #       app: sseproxy-python
+  #       app: s3proxy-python
 
 ingress:
   enabled: false
