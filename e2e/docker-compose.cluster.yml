@@ -154,12 +154,16 @@ services:
         helm repo add dandydeveloper https://dandydeveloper.github.io/charts
         helm repo update
 
-        # Build helm dependencies (skip if redis-ha disabled)
-        helm dependency build /app/manifests || true
+        # Build helm dependencies
+        helm dependency build /app/manifests
 
-        # Deploy simple Redis for CI (much faster than redis-ha)
-        echo "Deploying simple Redis for CI..."
-        kubectl apply -n s3proxy -f - <<REDIS_EOF
+        # Generate encryption key for testing
+        ENCRYPT_KEY=$$(openssl rand -base64 32)
+
+        # CI uses simple Redis (fast), local uses redis-ha (complete)
+        if [ "$${CI:-false}" = "true" ]; then
+          echo "CI detected - deploying simple Redis for speed..."
+          kubectl apply -n s3proxy -f - <<REDIS_EOF
         apiVersion: apps/v1
         kind: Deployment
         metadata:
@@ -194,31 +198,49 @@ services:
           ports:
           - port: 6379
         REDIS_EOF
+          kubectl wait --for=condition=ready pod -l app=redis -n s3proxy --timeout=120s
 
-        echo "Waiting for Redis to be ready..."
-        kubectl wait --for=condition=ready pod -l app=redis -n s3proxy --timeout=120s
+          echo "Installing Helm chart (simple Redis)..."
+          helm upgrade --install s3proxy /app/manifests \
+            -n s3proxy \
+            --set image.repository=s3proxy \
+            --set image.pullPolicy=IfNotPresent \
+            --set s3.host="http://minio:9000" \
+            --set secrets.encryptKey="$$ENCRYPT_KEY" \
+            --set secrets.awsAccessKeyId="minioadmin" \
+            --set secrets.awsSecretAccessKey="minioadmin" \
+            --set gateway.enabled=true \
+            --set ingress.enabled=true \
+            --set resources.limits.cpu=500m \
+            --set resources.requests.cpu=500m \
+            --set redis-ha.enabled=false \
+            --set externalRedis.url="redis://redis:6379/0"
 
-        # Generate encryption key for testing
-        ENCRYPT_KEY=$$(openssl rand -base64 32)
-        echo "Installing Helm chart..."
-        helm upgrade --install s3proxy /app/manifests \
-          -n s3proxy \
-          --set image.repository=s3proxy \
-          --set image.pullPolicy=IfNotPresent \
-          --set s3.host="http://minio:9000" \
-          --set secrets.encryptKey="$$ENCRYPT_KEY" \
-          --set secrets.awsAccessKeyId="minioadmin" \
-          --set secrets.awsSecretAccessKey="minioadmin" \
-          --set gateway.enabled=true \
-          --set ingress.enabled=true \
-          --set resources.limits.cpu=500m \
-          --set resources.requests.cpu=500m \
-          --set redis-ha.enabled=false \
-          --set externalRedis.url="redis://redis:6379/0"
+          TIMEOUT=300
+        else
+          echo "Local environment - deploying full redis-ha..."
+          helm upgrade --install s3proxy /app/manifests \
+            -n s3proxy --wait --timeout 1800s \
+            --set image.repository=s3proxy \
+            --set image.pullPolicy=IfNotPresent \
+            --set s3.host="http://minio:9000" \
+            --set secrets.encryptKey="$$ENCRYPT_KEY" \
+            --set secrets.awsAccessKeyId="minioadmin" \
+            --set secrets.awsSecretAccessKey="minioadmin" \
+            --set gateway.enabled=true \
+            --set ingress.enabled=true \
+            --set resources.limits.cpu=500m \
+            --set resources.requests.cpu=500m \
+            --set redis-ha.persistentVolume.enabled=false \
+            --set redis-ha.hardAntiAffinity=false \
+            --set redis-ha.affinity=null \
+            --set redis-ha.haproxy.hardAntiAffinity=false \
+            --set redis-ha.haproxy.affinity=null
+
+          TIMEOUT=60
+        fi
 
         echo "=== Waiting for s3proxy to be ready ==="
-        # Wait with progress updates every 15s (5 min should be enough without redis-ha)
-        TIMEOUT=300
         ELAPSED=0
         while [ $$ELAPSED -lt $$TIMEOUT ]; do
           echo "--- Status at $${ELAPSED}s ---"
