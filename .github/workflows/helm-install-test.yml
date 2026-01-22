@@ -11,8 +11,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+      - name: Set up Helm
+        uses: azure/setup-helm@v4.3.1
+
+      - name: Log in to Container Registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Create Kind cluster
         uses: helm/kind-action@v1
@@ -101,13 +105,10 @@ jobs:
           EOF
           kubectl wait --for=condition=ready pod -l app=redis -n s3proxy --timeout=120s
 
-      - name: Build Helm dependencies
-        run: helm dependency build manifests/
-
-      - name: Install chart from GHCR image
+      - name: Install chart from GHCR
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          helm install s3proxy manifests/ \
+          helm install s3proxy oci://ghcr.io/${OWNER}/charts/s3proxy-python --version 0.0.0-latest \
             --namespace s3proxy \
             --set image.repository=ghcr.io/${OWNER}/s3proxy-python \
             --set image.tag=latest \
