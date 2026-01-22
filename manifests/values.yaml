@@ -22,14 +22,26 @@ performance:
 
 # External Redis (for managed services)
 externalRedis:
-  url: ""
+  url: ""  # e.g., "redis://host:6379/0" or "redis://:password@host:6379/0"
   uploadTtlHours: 24
+  # Password can be provided in one of two ways:
+  #   1. Embedded in URL above: redis://:password@host:6379/0
+  #   2. Via existingSecret (recommended - keeps password out of configmap)
+  existingSecret: ""
+  passwordKey: "redis-password"
 
 # Redis HA (embedded)
 redis-ha:
   enabled: true
   replicas: 3
+  # Redis authentication - when auth: true, you MUST provide one of:
+  #   existingSecret: name of a pre-existing secret (recommended for production)
+  #   redisPassword: password value (chart will create a secret)
+  # The secret key name is configured via authKey (default: "auth")
+  auth: false
+  redisPassword: ""
   existingSecret: ""
+  authKey: "auth"
 
   persistentVolume:
     enabled: true
@@ -62,8 +74,6 @@ redis-ha:
       min-replicas-to-write: 1
       min-replicas-max-lag: 5
 
-  auth: false
-  authKey: ""
   hardAntiAffinity: true
 
   resources:

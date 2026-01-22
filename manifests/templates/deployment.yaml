@@ -29,8 +29,13 @@ spec:
           {{- if not .Values.secrets.existingSecrets.enabled }}
             - secretRef:
                 name: {{ printf "%s-secrets" .Chart.Name }}
-          {{- else }}
+          {{- end }}
+          {{- /* Determine if we need env section */ -}}
+          {{- $needsEnv := or .Values.secrets.existingSecrets.enabled (and (index .Values "redis-ha" "enabled") (index .Values "redis-ha" "auth")) (and (not (index .Values "redis-ha" "enabled")) .Values.externalRedis.existingSecret) }}
+          {{- if $needsEnv }}
           env:
+            {{- /* App secrets from existing secret */ -}}
+            {{- if .Values.secrets.existingSecrets.enabled }}
             - name: S3PROXY_ENCRYPT_KEY
               valueFrom:
                 secretKeyRef:
@@ -46,6 +51,26 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secrets.existingSecrets.name }}
                   key: {{ .Values.secrets.existingSecrets.keys.awsSecretAccessKey }}
+            {{- end }}
+            {{- /* Redis password from redis-ha secret */ -}}
+            {{- if and (index .Values "redis-ha" "enabled") (index .Values "redis-ha" "auth") }}
+            - name: S3PROXY_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  {{- if index .Values "redis-ha" "existingSecret" }}
+                  name: {{ index .Values "redis-ha" "existingSecret" }}
+                  {{- else }}
+                  name: {{ .Release.Name }}-redis-ha
+                  {{- end }}
+                  key: {{ index .Values "redis-ha" "authKey" | default "auth" }}
+            {{- /* Redis password from external Redis secret */ -}}
+            {{- else if and (not (index .Values "redis-ha" "enabled")) .Values.externalRedis.existingSecret }}
+            - name: S3PROXY_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.externalRedis.existingSecret }}
+                  key: {{ .Values.externalRedis.passwordKey | default "redis-password" }}
+            {{- end }}
           {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
