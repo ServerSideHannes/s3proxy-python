@@ -12,7 +12,7 @@ on:
 jobs:
   cluster-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -20,39 +20,257 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Cache Docker layers
-        uses: actions/cache@v4
-        with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ hashFiles('Dockerfile', 'pyproject.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-buildx-
-
-      - name: Pre-build s3proxy image (cached)
+      - name: Build s3proxy image
         uses: docker/build-push-action@v6
         with:
           context: .
           load: true
           tags: s3proxy:latest
-          cache-from: type=local,src=/tmp/.buildx-cache
-          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
 
-      - name: Pre-pull Kind node image
-        run: docker pull kindest/node:v1.29.2
-
-      - name: Cache Helm dependencies
-        uses: actions/cache@v4
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1
         with:
-          path: manifests/charts
-          key: ${{ runner.os }}-helm-deps-${{ hashFiles('manifests/Chart.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-helm-deps-
+          node_image: kindest/node:v1.29.2
+          cluster_name: cluster-test
 
-      - name: Run cluster test
-        run: make cluster-test
+      - name: Load image into Kind
+        run: kind load docker-image s3proxy:latest --name cluster-test
 
-      # Avoid cache growing unbounded
-      - name: Move cache
+      - name: Create namespace
+        run: kubectl create namespace s3proxy
+
+      - name: Deploy MinIO
         run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+          cat <<EOF | kubectl apply -n s3proxy -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: minio
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: minio
+            template:
+              metadata:
+                labels:
+                  app: minio
+              spec:
+                containers:
+                - name: minio
+                  image: minio/minio:latest
+                  args: ["server", "/data"]
+                  env:
+                  - name: MINIO_ROOT_USER
+                    value: minioadmin
+                  - name: MINIO_ROOT_PASSWORD
+                    value: minioadmin
+                  ports:
+                  - containerPort: 9000
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: minio
+          spec:
+            selector:
+              app: minio
+            ports:
+            - port: 9000
+          EOF
+          kubectl wait --for=condition=ready pod -l app=minio -n s3proxy --timeout=120s
+
+      - name: Deploy Redis
+        run: |
+          cat <<EOF | kubectl apply -n s3proxy -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: redis
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: redis
+            template:
+              metadata:
+                labels:
+                  app: redis
+              spec:
+                containers:
+                - name: redis
+                  image: redis:7-alpine
+                  ports:
+                  - containerPort: 6379
+                  resources:
+                    limits:
+                      memory: 128Mi
+                      cpu: 100m
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: redis
+          spec:
+            selector:
+              app: redis
+            ports:
+            - port: 6379
+          EOF
+          kubectl wait --for=condition=ready pod -l app=redis -n s3proxy --timeout=120s
+
+      - name: Build Helm dependencies
+        run: helm dependency build manifests/
+
+      - name: Install s3proxy chart
+        run: |
+          helm install s3proxy manifests/ \
+            --namespace s3proxy \
+            --set image.repository=s3proxy \
+            --set image.tag=latest \
+            --set image.pullPolicy=IfNotPresent \
+            --set s3.host="http://minio:9000" \
+            --set secrets.encryptKey="test-encryption-key-32chars!!" \
+            --set secrets.awsAccessKeyId=minioadmin \
+            --set secrets.awsSecretAccessKey=minioadmin \
+            --set redis-ha.enabled=false \
+            --set externalRedis.url="redis://redis:6379/0" \
+            --set replicaCount=3 \
+            --set resources.limits.cpu=100m \
+            --set resources.requests.cpu=50m \
+            --wait \
+            --timeout 5m
+
+      - name: Verify pods are running
+        run: |
+          kubectl get pods -n s3proxy
+          POD_COUNT=$(kubectl get pods -n s3proxy -l app.kubernetes.io/name=s3proxy-python --no-headers | grep Running | wc -l)
+          if [ "$POD_COUNT" -lt 3 ]; then
+            echo "Expected 3 s3proxy pods, got $POD_COUNT"
+            exit 1
+          fi
+          echo "✓ All 3 s3proxy pods running"
+
+      - name: Run load test
+        run: |
+          # Save pod names for load balancing check
+          PODS=$(kubectl get pods -n s3proxy -l app.kubernetes.io/name=s3proxy-python -o jsonpath='{.items[*].metadata.name}')
+          echo "Found pods: $PODS"
+
+          # Save starting log line counts
+          for pod in $PODS; do
+            kubectl logs $pod -n s3proxy 2>/dev/null | wc -l > /tmp/$pod.start
+          done
+
+          # Run the load test
+          kubectl run s3-load-test -n s3proxy --rm -i --restart=Never \
+            --image=amazon/aws-cli:latest \
+            --env="AWS_ACCESS_KEY_ID=minioadmin" \
+            --env="AWS_SECRET_ACCESS_KEY=minioadmin" \
+            --env="AWS_DEFAULT_REGION=us-east-1" \
+            --command -- /bin/sh -c '
+              set -e
+              ENDPOINT="http://s3proxy-python:4433"
+
+              echo "=== Creating test bucket ==="
+              aws --endpoint-url $ENDPOINT s3 mb s3://load-test-bucket || true
+
+              echo "=== Generating 10MB test files ==="
+              mkdir -p /tmp/testfiles
+              for i in 1 2 3; do
+                dd if=/dev/urandom of=/tmp/testfiles/file-$i.bin bs=1M count=10 2>/dev/null &
+              done
+              wait
+              ls -lh /tmp/testfiles/
+
+              echo "=== Starting concurrent uploads ==="
+              START=$(date +%s)
+              for i in 1 2 3; do
+                aws --endpoint-url $ENDPOINT s3 cp /tmp/testfiles/file-$i.bin s3://load-test-bucket/file-$i.bin &
+              done
+              wait
+              END=$(date +%s)
+              echo "=== Uploads complete in $((END - START))s ==="
+
+              echo "=== Listing bucket ==="
+              aws --endpoint-url $ENDPOINT s3 ls s3://load-test-bucket/
+
+              echo "=== Downloading and verifying ==="
+              mkdir -p /tmp/downloads
+              for i in 1 2 3; do
+                aws --endpoint-url $ENDPOINT s3 cp s3://load-test-bucket/file-$i.bin /tmp/downloads/file-$i.bin &
+              done
+              wait
+
+              echo "=== Comparing checksums ==="
+              ORIG_SUMS=$(md5sum /tmp/testfiles/*.bin | cut -d" " -f1 | sort)
+              DOWN_SUMS=$(md5sum /tmp/downloads/*.bin | cut -d" " -f1 | sort)
+
+              if [ "$ORIG_SUMS" = "$DOWN_SUMS" ]; then
+                echo "✓ Checksums match - round-trip successful"
+              else
+                echo "✗ Checksum mismatch!"
+                exit 1
+              fi
+
+              echo "=== Verifying encryption ==="
+              dd if=/dev/urandom of=/tmp/encrypt-test.bin bs=1K count=100 2>/dev/null
+              ORIG_SIZE=$(stat -c%s /tmp/encrypt-test.bin)
+              ORIG_MD5=$(md5sum /tmp/encrypt-test.bin | cut -c1-32)
+
+              aws --endpoint-url $ENDPOINT s3 cp /tmp/encrypt-test.bin s3://load-test-bucket/encrypt-test.bin
+              aws --endpoint-url http://minio:9000 s3 cp s3://load-test-bucket/encrypt-test.bin /tmp/raw.bin 2>/dev/null || true
+
+              if [ -f /tmp/raw.bin ]; then
+                RAW_SIZE=$(stat -c%s /tmp/raw.bin)
+                RAW_MD5=$(md5sum /tmp/raw.bin | cut -c1-32)
+                EXPECTED_SIZE=$((ORIG_SIZE + 28))
+
+                if [ "$RAW_SIZE" = "$EXPECTED_SIZE" ] && [ "$ORIG_MD5" != "$RAW_MD5" ]; then
+                  echo "✓ Encryption verified - size +28 bytes (GCM overhead), content differs"
+                else
+                  echo "✗ Encryption check failed"
+                  exit 1
+                fi
+              fi
+
+              echo ""
+              echo "✓ All tests passed!"
+            '
+
+      - name: Check load balancing
+        run: |
+          PODS=$(kubectl get pods -n s3proxy -l app.kubernetes.io/name=s3proxy-python -o jsonpath='{.items[*].metadata.name}')
+          PODS_HIT=0
+
+          for pod in $PODS; do
+            START_LINE=$(cat /tmp/$pod.start 2>/dev/null || echo "0")
+            REQUEST_COUNT=$(kubectl logs $pod -n s3proxy 2>/dev/null | tail -n +$((START_LINE + 1)) | grep -cE "GET|POST|PUT|HEAD" || echo "0")
+            if [ "$REQUEST_COUNT" -gt 0 ]; then
+              PODS_HIT=$((PODS_HIT + 1))
+              echo "✓ Pod $pod: received $REQUEST_COUNT requests"
+            else
+              echo "  Pod $pod: received 0 requests"
+            fi
+          done
+
+          if [ "$PODS_HIT" -ge 2 ]; then
+            echo "✓ Load balancing verified - traffic distributed across $PODS_HIT pods"
+          else
+            echo "⚠ Traffic went to only $PODS_HIT pod(s)"
+          fi
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          echo "=== Pod Status ==="
+          kubectl get pods -n s3proxy -o wide
+          echo ""
+          echo "=== S3Proxy Logs ==="
+          kubectl logs -l app.kubernetes.io/name=s3proxy-python -n s3proxy --tail=100
+          echo ""
+          echo "=== MinIO Logs ==="
+          kubectl logs -l app=minio -n s3proxy --tail=50
+          echo ""
+          echo "=== Events ==="
+          kubectl get events -n s3proxy --sort-by=.lastTimestamp

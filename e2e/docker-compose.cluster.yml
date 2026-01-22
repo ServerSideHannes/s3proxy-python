@@ -9,7 +9,6 @@ services:
     working_dir: /app
     environment:
       - KUBECONFIG=/root/.kube/config
-      - CI=${CI:-false}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -161,114 +160,24 @@ services:
         # Generate encryption key for testing
         ENCRYPT_KEY=$$(openssl rand -base64 32)
 
-        # CI uses simple Redis (fast), local uses redis-ha (complete)
-        if [ "$${CI:-false}" = "true" ]; then
-          echo "CI detected - deploying simple Redis for speed..."
-          kubectl apply -n s3proxy -f - <<REDIS_EOF
-        apiVersion: apps/v1
-        kind: Deployment
-        metadata:
-          name: redis
-        spec:
-          replicas: 1
-          selector:
-            matchLabels:
-              app: redis
-          template:
-            metadata:
-              labels:
-                app: redis
-            spec:
-              containers:
-              - name: redis
-                image: redis:7-alpine
-                ports:
-                - containerPort: 6379
-                resources:
-                  limits:
-                    memory: 128Mi
-                    cpu: 100m
-        ---
-        apiVersion: v1
-        kind: Service
-        metadata:
-          name: redis
-        spec:
-          selector:
-            app: redis
-          ports:
-          - port: 6379
-        REDIS_EOF
-          kubectl wait --for=condition=ready pod -l app=redis -n s3proxy --timeout=120s
-
-          echo "Installing Helm chart (simple Redis)..."
-          helm upgrade --install s3proxy /app/manifests \
-            -n s3proxy \
-            --set image.repository=s3proxy \
-            --set image.pullPolicy=IfNotPresent \
-            --set s3.host="http://minio:9000" \
-            --set secrets.encryptKey="$$ENCRYPT_KEY" \
-            --set secrets.awsAccessKeyId="minioadmin" \
-            --set secrets.awsSecretAccessKey="minioadmin" \
-            --set gateway.enabled=true \
-            --set ingress.enabled=true \
-            --set resources.limits.cpu=100m \
-            --set resources.requests.cpu=50m \
-            --set redis-ha.enabled=false \
-            --set externalRedis.url="redis://redis:6379/0"
-
-          TIMEOUT=300
-        else
-          echo "Local environment - deploying full redis-ha..."
-          helm upgrade --install s3proxy /app/manifests \
-            -n s3proxy --wait --timeout 1800s \
-            --set image.repository=s3proxy \
-            --set image.pullPolicy=IfNotPresent \
-            --set s3.host="http://minio:9000" \
-            --set secrets.encryptKey="$$ENCRYPT_KEY" \
-            --set secrets.awsAccessKeyId="minioadmin" \
-            --set secrets.awsSecretAccessKey="minioadmin" \
-            --set gateway.enabled=true \
-            --set ingress.enabled=true \
-            --set resources.limits.cpu=500m \
-            --set resources.requests.cpu=500m \
-            --set redis-ha.persistentVolume.enabled=false \
-            --set redis-ha.hardAntiAffinity=false \
-            --set redis-ha.affinity=null \
-            --set redis-ha.haproxy.hardAntiAffinity=false \
-            --set redis-ha.haproxy.affinity=null
-
-          TIMEOUT=60
-        fi
-
-        echo "=== Waiting for s3proxy to be ready ==="
-        ELAPSED=0
-        while [ $$ELAPSED -lt $$TIMEOUT ]; do
-          echo "--- Status at $${ELAPSED}s ---"
-          kubectl get pods -n s3proxy
-
-          # Check if all pods are ready
-          NOT_READY=$$(kubectl get pods -n s3proxy --no-headers 2>/dev/null | grep -v "Running\|Completed" | wc -l || echo "999")
-          if [ "$$NOT_READY" -eq 0 ]; then
-            RUNNING=$$(kubectl get pods -n s3proxy --no-headers 2>/dev/null | grep "Running" | wc -l || echo "0")
-            if [ "$$RUNNING" -gt 0 ]; then
-              echo "All pods ready!"
-              break
-            fi
-          fi
-
-          # Show events for any failing pods
-          kubectl get events -n s3proxy --sort-by='.lastTimestamp' 2>/dev/null | tail -5 || true
-
-          sleep 15
-          ELAPSED=$$((ELAPSED + 15))
-        done
-
-        if [ $$ELAPSED -ge $$TIMEOUT ]; then
-          echo "=== TIMEOUT: Pods not ready after $${TIMEOUT}s ==="
-          kubectl describe pods -n s3proxy
-          exit 1
-        fi
+        echo "Installing Helm chart with redis-ha..."
+        helm upgrade --install s3proxy /app/manifests \
+          -n s3proxy --wait --timeout 1800s \
+          --set image.repository=s3proxy \
+          --set image.pullPolicy=IfNotPresent \
+          --set s3.host="http://minio:9000" \
+          --set secrets.encryptKey="$$ENCRYPT_KEY" \
+          --set secrets.awsAccessKeyId="minioadmin" \
+          --set secrets.awsSecretAccessKey="minioadmin" \
+          --set gateway.enabled=true \
+          --set ingress.enabled=true \
+          --set resources.limits.cpu=500m \
+          --set resources.requests.cpu=500m \
+          --set redis-ha.persistentVolume.enabled=false \
+          --set redis-ha.hardAntiAffinity=false \
+          --set redis-ha.affinity=null \
+          --set redis-ha.haproxy.hardAntiAffinity=false \
+          --set redis-ha.haproxy.affinity=null
 
         echo "=== Deployment Status ==="
         kubectl get all -n s3proxy
