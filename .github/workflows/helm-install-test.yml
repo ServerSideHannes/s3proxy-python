@@ -119,6 +119,8 @@ jobs:
             --set redis-ha.enabled=false \
             --set externalRedis.url="redis://redis:6379/0" \
             --set replicaCount=3 \
+            --set resources.limits.cpu=100m \
+            --set resources.requests.cpu=50m \
             --wait \
             --timeout 5m
 

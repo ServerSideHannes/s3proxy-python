@@ -50,7 +50,7 @@ case "${1:-run}" in
       done
 
       echo "=== Creating test pod with AWS CLI ==="
-      kubectl run s3-load-test -n s3proxy --rm -it --restart=Never \
+      kubectl run s3-load-test -n s3proxy --rm -i --restart=Never \
         --image=amazon/aws-cli:latest \
         --env="AWS_ACCESS_KEY_ID=minioadmin" \
         --env="AWS_SECRET_ACCESS_KEY=minioadmin" \
@@ -173,6 +173,12 @@ case "${1:-run}" in
             echo \"Skipping raw encryption verification\"
           fi
         "
+
+      LOAD_TEST_EXIT=$?
+      if [ $LOAD_TEST_EXIT -ne 0 ]; then
+        echo "✗ Load test failed with exit code $LOAD_TEST_EXIT"
+        exit 1
+      fi
 
       # Verify load balancing
       echo ""
