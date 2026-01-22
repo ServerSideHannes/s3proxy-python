@@ -105,6 +105,15 @@ jobs:
           EOF
           kubectl wait --for=condition=ready pod -l app=redis -n s3proxy --timeout=120s
 
+      - name: Create K8s Image Pull Secret
+        run: |
+          kubectl create secret docker-registry ghcr-login \
+            --docker-server=ghcr.io \
+            --docker-username=${{ github.actor }} \
+            --docker-password=${{ secrets.GITHUB_TOKEN }} \
+            --namespace s3proxy \
+            --dry-run=client -o yaml | kubectl apply -f -
+
       - name: Install chart from GHCR
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
@@ -114,6 +123,7 @@ jobs:
             --set image.repository=ghcr.io/${OWNER}/s3proxy-python \
             --set image.tag=latest \
             --set image.pullPolicy=Always \
+            --set "imagePullSecrets[0].name=ghcr-login" \
             --set s3.host="http://minio:9000" \
             --set secrets.encryptKey=test-encryption-key-for-ci \
             --set secrets.awsAccessKeyId=minioadmin \
