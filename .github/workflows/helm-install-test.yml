@@ -129,7 +129,6 @@ jobs:
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           helm install s3proxy oci://ghcr.io/${OWNER}/charts/s3proxy-python --version 0.0.0-latest \
             --namespace s3proxy \
-            --debug \
             --set image.repository=ghcr.io/${OWNER}/s3proxy-python \
             --set image.tag=latest \
             --set image.pullPolicy=Always \
