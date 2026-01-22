@@ -178,11 +178,13 @@ services:
           --set redis-ha.hardAntiAffinity=false \
           --set redis-ha.affinity=null \
           --set redis-ha.haproxy.hardAntiAffinity=false \
-          --set redis-ha.haproxy.affinity=null
+          --set redis-ha.haproxy.affinity=null \
+          --set redis-ha.redis.config.min-replicas-to-write=0 \
+          --set redis-ha.redis.config.min-replicas-max-lag=10
 
         echo "=== Waiting for deployments to be ready ==="
-        # Wait with progress updates every 30s
-        TIMEOUT=1200
+        # Wait with progress updates every 30s (30 min total for slow CI runners)
+        TIMEOUT=1800
         ELAPSED=0
         while [ $$ELAPSED -lt $$TIMEOUT ]; do
           echo "--- Status at $${ELAPSED}s ---"
