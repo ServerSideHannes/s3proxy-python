@@ -80,58 +80,6 @@ jobs:
           EOF
           kubectl wait --for=condition=ready pod -l app=minio -n s3proxy --timeout=120s
 
-      - name: Deploy Redis with password
-        run: |
-          # Create Redis password secret
-          kubectl create secret generic redis-secret \
-            --from-literal=redis-password=testredispassword123 \
-            -n s3proxy
-
-          cat <<EOF | kubectl apply -n s3proxy -f -
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: redis
-          spec:
-            replicas: 1
-            selector:
-              matchLabels:
-                app: redis
-            template:
-              metadata:
-                labels:
-                  app: redis
-              spec:
-                containers:
-                - name: redis
-                  image: redis:7-alpine
-                  command: ["redis-server"]
-                  args: ["--requirepass", "\$(REDIS_PASSWORD)"]
-                  env:
-                  - name: REDIS_PASSWORD
-                    valueFrom:
-                      secretKeyRef:
-                        name: redis-secret
-                        key: redis-password
-                  ports:
-                  - containerPort: 6379
-                  resources:
-                    limits:
-                      memory: 128Mi
-                      cpu: 100m
-          ---
-          apiVersion: v1
-          kind: Service
-          metadata:
-            name: redis
-          spec:
-            selector:
-              app: redis
-            ports:
-            - port: 6379
-          EOF
-          kubectl wait --for=condition=ready pod -l app=redis -n s3proxy --timeout=120s
-
       - name: Build Helm dependencies
         run: |
           helm repo add dandydeveloper https://dandydeveloper.github.io/charts
@@ -149,10 +97,11 @@ jobs:
             --set secrets.encryptKey="test-encryption-key-32chars!!" \
             --set secrets.awsAccessKeyId=minioadmin \
             --set secrets.awsSecretAccessKey=minioadmin \
-            --set redis-ha.enabled=false \
-            --set externalRedis.url="redis://redis:6379/0" \
-            --set externalRedis.existingSecret=redis-secret \
-            --set externalRedis.passwordKey=redis-password \
+            --set redis-ha.auth=true \
+            --set redis-ha.redisPassword=testredispassword123 \
+            --set redis-ha.persistentVolume.enabled=false \
+            --set redis-ha.hardAntiAffinity=false \
+            --set redis-ha.haproxy.hardAntiAffinity=false \
             --set replicaCount=3 \
             --set resources.limits.cpu=100m \
             --set resources.requests.cpu=50m \
