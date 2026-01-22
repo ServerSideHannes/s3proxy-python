@@ -254,39 +254,6 @@ aws s3 --endpoint-url https://s3proxy.example.com cp file.txt s3://bucket/
 
 > **Recommended for internal access:** Enable both `gateway.enabled=true` and `ingress.enabled=true`. This routes traffic through the ingress controller for load balancing across pods, while providing a convenient internal DNS name (`s3-gateway.<namespace>`) without external DNS configuration.
 
-#### Example: External Access with Ingress
-
-```yaml
-# values-prod.yaml
-gateway:
-  enabled: true
-ingress:
-  enabled: true
-  className: nginx
-  hosts:
-    - s3proxy.example.com
-  tls:
-    - secretName: s3proxy-tls
-      hosts:
-        - s3proxy.example.com
-```
-
-```bash
-helm install s3proxy ./manifests -f values-prod.yaml \
-  --set secrets.existingSecrets.enabled=true \
-  --set secrets.existingSecrets.name=s3proxy-secrets
-```
-
-#### Example: Using External Redis (ElastiCache, etc.)
-
-```bash
-helm install s3proxy ./manifests \
-  --set redis-ha.enabled=false \
-  --set externalRedis.url="redis://my-elasticache.xxx.cache.amazonaws.com:6379/0" \
-  --set secrets.existingSecrets.enabled=true \
-  --set secrets.existingSecrets.name=s3proxy-secrets
-```
-
 ### Health Checks
 
 The proxy exposes health endpoints for Kubernetes probes:
