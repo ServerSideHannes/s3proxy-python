@@ -42,7 +42,7 @@ def _create_malloc_release() -> Callable[[], int] | None:
 _malloc_release = _create_malloc_release()
 
 
-BACKPRESSURE_TIMEOUT = 30  # seconds to wait before rejecting
+BACKPRESSURE_TIMEOUT = int(os.environ.get("S3PROXY_BACKPRESSURE_TIMEOUT", "30"))
 
 
 class ConcurrencyLimiter:

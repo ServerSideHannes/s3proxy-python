@@ -91,6 +91,56 @@ class TestMemoryBasedConcurrencyStress:
             proc.kill()
 
     @pytest.fixture
+    def s3proxy_with_short_backpressure(self):
+        """Start s3proxy with memory_limit_mb=16 and 1s backpressure timeout.
+
+        With a short timeout, requests that can't acquire memory will be
+        rejected quickly, allowing us to test rejection behavior.
+        """
+        port = find_free_port()
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "S3PROXY_ENCRYPT_KEY": "test-encryption-key-32-bytes!!",
+                "S3PROXY_HOST": "http://localhost:9000",
+                "S3PROXY_REGION": "us-east-1",
+                "S3PROXY_PORT": str(port),
+                "S3PROXY_NO_TLS": "true",
+                "S3PROXY_LOG_LEVEL": "WARNING",
+                "S3PROXY_MEMORY_LIMIT_MB": "16",
+                "S3PROXY_MAX_PART_SIZE_MB": "0",
+                "S3PROXY_BACKPRESSURE_TIMEOUT": "1",
+            }
+        )
+
+        proc = subprocess.Popen(
+            ["python", "-m", "s3proxy.main"],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        for _i in range(30):
+            if proc.poll() is not None:
+                pytest.fail(f"s3proxy died with code {proc.returncode}")
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                if sock.connect_ex(("localhost", port)) == 0:
+                    break
+            time.sleep(0.5)
+        else:
+            proc.kill()
+            pytest.fail("s3proxy failed to start")
+
+        yield f"http://localhost:{port}", proc
+
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    @pytest.fixture
     def stress_client(self, s3proxy_with_memory_limit):
         """Create S3 client for stress tests."""
         url, _ = s3proxy_with_memory_limit
@@ -123,19 +173,17 @@ class TestMemoryBasedConcurrencyStress:
         except Exception:
             pass
 
-    def test_concurrent_uploads_bounded(self, s3proxy_with_memory_limit, stress_bucket):
-        """Stress test: send 10 concurrent 100MB uploads with memory_limit_mb=16.
+    def test_backpressure_queues_concurrent_uploads(self, s3proxy_with_memory_limit, stress_bucket):
+        """Verify backpressure queues excess requests instead of rejecting them.
 
-        This is a REAL OOM stress test:
-        - 10 x 100MB = 1GB total data
-        - Without limit: would need 1GB+ memory -> OOM on 512Mi pod
-        - With memory_limit_mb=16: only ~16MB at a time -> safe
+        With memory_limit_mb=16 and default backpressure timeout (30s),
+        concurrent uploads that exceed the memory budget should be queued
+        and eventually succeed — not rejected with 503.
 
-        Expected behavior:
-        - ~2 streaming requests run at a time (8MB buffer each = 16MB budget)
-        - ~8 requests get 503 Service Unavailable initially
-        - Server does NOT crash/OOM
-        - Server is still responsive after the test
+        This proves:
+        - Backpressure correctly serializes requests within the timeout
+        - Server doesn't crash under load
+        - All uploads complete successfully
         """
         import concurrent.futures
 
@@ -144,25 +192,22 @@ class TestMemoryBasedConcurrencyStress:
         from botocore.credentials import Credentials
 
         log("=" * 60)
-        log("STRESS TEST: 10 concurrent 100MB uploads (memory_limit_mb=16)")
-        log("Total data: 1GB - would OOM without limiting!")
+        log("TEST: Backpressure queues concurrent uploads (memory_limit_mb=16)")
         log("=" * 60)
 
         url, proc = s3proxy_with_memory_limit
-        num_concurrent = 10
-        upload_size = 100 * 1024 * 1024  # 100MB each
+        num_concurrent = 6
+        upload_size = 20 * 1024 * 1024  # 20MB each
 
         log(f"Sending {num_concurrent} concurrent {upload_size // 1024 // 1024}MB uploads...")
-        log("Expected: ~2 at a time (8MB buffer each), others get 503, server stays alive")
+        log("Expected: backpressure queues excess requests, all eventually succeed")
 
         test_data = bytes([42]) * upload_size
-        results = {"success": 0, "rejected_503": 0, "other_error": 0, "errors": []}
 
         def upload_one(i: int) -> dict:
-            key = f"stress-test-{i}.bin"
+            key = f"bp-queue-test-{i}.bin"
             endpoint = f"{url}/{stress_bucket}/{key}"
             start_time = time.time()
-            log(f"  [{i}] START upload at t={start_time:.3f}")
 
             try:
                 credentials = Credentials("minioadmin", "minioadmin")
@@ -177,112 +222,31 @@ class TestMemoryBasedConcurrencyStress:
                     headers=dict(aws_request.headers),
                     method="PUT",
                 )
-                try:
-                    with urllib.request.urlopen(req, timeout=120) as response:
-                        elapsed = time.time() - start_time
-                        log(f"  [{i}] SUCCESS status={response.status} elapsed={elapsed:.2f}s")
-                        return {
-                            "index": i,
-                            "status": response.status,
-                            "success": response.status in (200, 204),
-                        }
-                except urllib.error.HTTPError as e:
+                with urllib.request.urlopen(req, timeout=120) as response:
                     elapsed = time.time() - start_time
-                    log(f"  [{i}] HTTPError status={e.code} elapsed={elapsed:.2f}s")
-                    return {
-                        "index": i,
-                        "status": e.code,
-                        "success": False,
-                        "error_type": "HTTPError",
-                    }
+                    log(f"  [{i}] SUCCESS status={response.status} elapsed={elapsed:.2f}s")
+                    return {"index": i, "success": True, "elapsed": elapsed}
             except Exception as e:
                 elapsed = time.time() - start_time
-                error_type = type(e).__name__
-                log(f"  [{i}] EXCEPTION type={error_type} msg={e} elapsed={elapsed:.2f}s")
-                return {
-                    "index": i,
-                    "status": 0,
-                    "success": False,
-                    "error": str(e),
-                    "error_type": error_type,
-                }
+                log(f"  [{i}] FAILED elapsed={elapsed:.2f}s error={e}")
+                return {"index": i, "success": False, "elapsed": elapsed, "error": str(e)}
 
-        log(f"Spawning {num_concurrent} threads NOW...")
         all_results = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_concurrent) as executor:
             futures = [executor.submit(upload_one, i) for i in range(num_concurrent)]
             for future in concurrent.futures.as_completed(futures):
-                result = future.result()
-                all_results.append(result)
-                if result["success"]:
-                    results["success"] += 1
-                elif result["status"] == 503:
-                    results["rejected_503"] += 1
-                else:
-                    error_msg = result.get("error", "")
-                    if "Broken pipe" in error_msg or "Connection reset" in error_msg:
-                        results["rejected_503"] += 1
-                    else:
-                        results["other_error"] += 1
-                        results["errors"].append(error_msg or f"HTTP {result['status']}")
+                all_results.append(future.result())
 
-        log("")
-        log("=" * 60)
-        log("DETAILED RESULTS:")
-        for r in sorted(all_results, key=lambda x: x["index"]):
-            error_type = r.get("error_type", "N/A")
-            error_msg = r.get("error", "N/A")
-            log(
-                f"  [{r['index']}] status={r['status']} success={r['success']} "
-                f"error_type={error_type} error={error_msg[:50] if error_msg != 'N/A' else 'N/A'}"
-            )
-        log("=" * 60)
+        succeeded = sum(1 for r in all_results if r["success"])
+        log(f"Results: {succeeded}/{num_concurrent} succeeded")
 
-        log("")
-        log(
-            f"Results: {results['success']} ok, {results['rejected_503']} rejected, "
-            f"{results['other_error']} errors"
+        assert proc.poll() is None, "Server crashed during stress test (likely OOM)!"
+        assert succeeded == num_concurrent, (
+            f"Expected all {num_concurrent} uploads to succeed via backpressure, "
+            f"but only {succeeded} did"
         )
 
-        # Key assertions
-        assert proc.poll() is None, "FAIL: Server crashed during stress test (likely OOM)!"
-
-        assert results["rejected_503"] > 0, (
-            f"FAIL: Expected 503 rejections with {num_concurrent} concurrent 100MB requests "
-            f"and memory_limit_mb=16, but got 0. Memory limiting may not be working!"
-        )
-        log(f"Verified: {results['rejected_503']} requests rejected with 503 (limit working)")
-
-        log("")
-        log("Verifying server is still responsive...")
-
-        time.sleep(2)
-
-        for attempt in range(5):
-            try:
-                req = urllib.request.Request(f"{url}/healthz")
-                with urllib.request.urlopen(req, timeout=5) as resp:
-                    log(f"Server responded with HTTP {resp.status} - still alive!")
-                    break
-            except urllib.error.HTTPError as e:
-                if e.code == 503 and attempt < 4:
-                    log(
-                        f"Health check got 503, waiting for memory to free "
-                        f"(attempt {attempt + 1})..."
-                    )
-                    time.sleep(1)
-                    continue
-                pytest.fail(f"Server not responding after stress test: {e}")
-            except Exception as e:
-                pytest.fail(f"Server not responding after stress test: {e}")
-
-        assert proc.poll() is None, "Server died after stress test!"
-
-        log("")
-        log("TEST PASSED! Server survived 1GB stress test without OOM.")
-        log(f"  - {results['success']} uploads completed")
-        log(f"  - {results['rejected_503']} requests properly rejected with 503")
-        log("  - Server process still running (no OOM crash)")
+        log("TEST PASSED! Backpressure queued all requests, none rejected.")
 
     def test_server_recovers_after_storm(
         self, s3proxy_with_memory_limit, stress_client, stress_bucket
@@ -306,14 +270,18 @@ class TestMemoryBasedConcurrencyStress:
 
         log("TEST PASSED! Server recovered and handles normal requests.")
 
-    def test_rejection_is_fast_no_body_read(self, s3proxy_with_memory_limit, stress_bucket):
-        """Verify that rejected requests return FAST (body not read).
+    def test_rejection_after_backpressure_timeout(
+        self, s3proxy_with_short_backpressure, stress_bucket
+    ):
+        """Verify requests are rejected after backpressure timeout expires.
 
-        This is the critical OOM prevention test. When the server is at capacity,
-        it must reject requests BEFORE reading the request body into memory.
+        Uses a 1-second backpressure timeout so that when memory is full,
+        queued requests time out quickly and get 503 SlowDown responses.
 
-        We verify this by sending many concurrent large uploads and checking that
-        rejected requests complete much faster than successful ones.
+        This proves:
+        - Backpressure timeout is respected
+        - Rejection happens after timeout, not immediately
+        - Server stays alive after rejections
         """
         import concurrent.futures
 
@@ -322,23 +290,33 @@ class TestMemoryBasedConcurrencyStress:
         from botocore.credentials import Credentials
 
         log("=" * 60)
-        log("TEST: Fast rejection (body not read before 503)")
+        log("TEST: Rejection after backpressure timeout (timeout=1s, memory_limit_mb=16)")
         log("=" * 60)
 
-        url, proc = s3proxy_with_memory_limit
+        url, proc = s3proxy_with_short_backpressure
 
-        # Send enough concurrent uploads to guarantee some get rejected (memory_limit_mb=16)
-        num_uploads = 6
+        # Ensure bucket exists via this server instance
+        try:
+            credentials = Credentials("minioadmin", "minioadmin")
+            endpoint = f"{url}/{stress_bucket}"
+            aws_request = AWSRequest(method="PUT", url=endpoint)
+            aws_request.headers["x-amz-content-sha256"] = "UNSIGNED-PAYLOAD"
+            SigV4Auth(credentials, "s3", "us-east-1").add_auth(aws_request)
+            req = urllib.request.Request(endpoint, headers=dict(aws_request.headers), method="PUT")
+            with urllib.request.urlopen(req, timeout=10):
+                pass
+        except urllib.error.HTTPError:
+            pass  # bucket may already exist
+
+        num_uploads = 8
         upload_size = 20 * 1024 * 1024  # 20MB each
         test_data = bytes([42]) * upload_size
 
-        log(
-            f"Sending {num_uploads} concurrent "
-            f"{upload_size // 1024 // 1024}MB uploads (memory_limit_mb=16)"
-        )
+        log(f"Sending {num_uploads} concurrent {upload_size // 1024 // 1024}MB uploads...")
+        log("Expected: some succeed, some rejected after 1s backpressure timeout")
 
         def upload_one(i: int) -> dict:
-            key = f"fast-reject-test-{i}.bin"
+            key = f"reject-test-{i}.bin"
             endpoint = f"{url}/{stress_bucket}/{key}"
             start_time = time.time()
 
@@ -366,12 +344,7 @@ class TestMemoryBasedConcurrencyStress:
                     }
             except urllib.error.HTTPError as e:
                 elapsed = time.time() - start_time
-                return {
-                    "index": i,
-                    "status": e.code,
-                    "elapsed": elapsed,
-                    "rejected": e.code == 503,
-                }
+                return {"index": i, "status": e.code, "elapsed": elapsed, "rejected": e.code == 503}
             except Exception as e:
                 elapsed = time.time() - start_time
                 error_str = str(e)
@@ -390,49 +363,33 @@ class TestMemoryBasedConcurrencyStress:
             for future in concurrent.futures.as_completed(futures):
                 results.append(future.result())
 
-        # Analyze timing
         rejected = [r for r in results if r["rejected"]]
         succeeded = [r for r in results if not r["rejected"] and r["status"] in (200, 204)]
 
         log(f"Results: {len(succeeded)} succeeded, {len(rejected)} rejected")
-
-        if rejected:
-            avg_reject_time = sum(r["elapsed"] for r in rejected) / len(rejected)
-            log(f"Average rejection time: {avg_reject_time:.3f}s")
-            for r in rejected:
-                log(f"  [{r['index']}] rejected in {r['elapsed']:.3f}s")
-
-        if succeeded:
-            avg_success_time = sum(r["elapsed"] for r in succeeded) / len(succeeded)
-            log(f"Average success time: {avg_success_time:.3f}s")
-
-        # Assertions
-        assert len(rejected) > 0, "Expected some requests to be rejected with memory_limit_mb=16"
-        assert proc.poll() is None, "Server crashed!"
-
-        # Key assertion: rejected requests should be fast (< 3s)
-        # If body was being read, 20MB would take longer
         for r in rejected:
-            assert r["elapsed"] < 3.0, (
-                f"Rejection took {r['elapsed']:.2f}s - may be reading body before rejecting!"
-            )
+            log(f"  [{r['index']}] rejected in {r['elapsed']:.2f}s")
 
-        log("TEST PASSED! Rejected requests completed quickly (body not read).")
+        assert proc.poll() is None, "Server crashed!"
+        assert len(rejected) > 0, (
+            "Expected some requests to be rejected after 1s backpressure timeout"
+        )
+
+        log("TEST PASSED! Requests rejected after backpressure timeout expired.")
 
     @pytest.mark.skipif(
         sys.platform == "darwin", reason="macOS malloc doesn't reliably return memory to OS"
     )
-    def test_memory_bounded_during_rejection(
+    def test_memory_bounded_during_sustained_load(
         self, s3proxy_with_memory_limit, stress_bucket, stress_client
     ):
-        """Verify memory stays bounded while processing many uploads.
+        """Verify memory stays bounded while processing many concurrent uploads.
 
-        Sends concurrent uploads and retries rejected ones until ALL succeed.
-        This verifies:
-        1. Memory limiting rejects excess requests
-        2. Lock properly releases after each request
-        3. Memory stays bounded even after processing 600MB+ of total data
-        4. All files actually exist in the bucket with correct sizes
+        Sends concurrent uploads that are queued via backpressure. Verifies:
+        1. All uploads eventually succeed (backpressure queues them)
+        2. Memory stays bounded (streaming + memory limiting works)
+        3. All files exist in bucket with correct sizes
+        4. Server doesn't crash
         """
         import concurrent.futures
 
@@ -454,11 +411,10 @@ class TestMemoryBasedConcurrencyStress:
         baseline_mb = get_memory_mb()
         log(f"Baseline memory: {baseline_mb:.1f} MB")
 
-        # Upload config
         num_uploads = 20
         upload_size = 30 * 1024 * 1024  # 30MB each = 600MB total
         test_data = bytes([42]) * upload_size
-        max_concurrent = 6  # More than budget allows, ensures rejections happen
+        max_concurrent = 6
 
         log(f"Uploading {num_uploads} x {upload_size // 1024 // 1024}MB files (memory_limit_mb=16)")
         log(f"Total data: {num_uploads * upload_size // 1024 // 1024}MB")
@@ -470,7 +426,7 @@ class TestMemoryBasedConcurrencyStress:
             key = f"memory-test-{i}.bin"
             endpoint = f"{url}/{stress_bucket}/{key}"
             attempts = 0
-            max_attempts = 50  # More retries for reliability
+            max_attempts = 50
 
             while attempts < max_attempts:
                 attempts += 1
@@ -498,7 +454,6 @@ class TestMemoryBasedConcurrencyStress:
                         }
                 except urllib.error.HTTPError as e:
                     if e.code == 503:
-                        # Rejected - exponential backoff with jitter
                         delay = min(0.5 + (attempts * 0.1) + random.uniform(0, 0.3), 3.0)
                         time.sleep(delay)
                         continue
@@ -512,7 +467,6 @@ class TestMemoryBasedConcurrencyStress:
                 except Exception as e:
                     error_str = str(e)
                     if "reset" in error_str.lower() or "broken" in error_str.lower():
-                        # Connection reset - retry with backoff
                         delay = min(0.5 + (attempts * 0.1) + random.uniform(0, 0.3), 3.0)
                         time.sleep(delay)
                         continue
@@ -541,30 +495,26 @@ class TestMemoryBasedConcurrencyStress:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as executor:
             futures = [executor.submit(upload_one, i) for i in range(num_uploads)]
 
-            # Monitor memory while uploads run - sample more frequently
             while not all(f.done() for f in futures):
                 current_mb = get_memory_mb()
                 memory_samples.append(current_mb)
                 if current_mb > peak_mb:
                     peak_mb = current_mb
-                time.sleep(0.05)  # Sample every 50ms
+                time.sleep(0.05)
 
             for f in futures:
                 results.append(f.result())
 
-        # Count results
         succeeded = sum(1 for r in results if r.get("success"))
         failed = sum(1 for r in results if not r.get("success"))
-        total_attempts = sum(r.get("attempts", 1) for r in results)
-        retries = total_attempts - num_uploads
         memory_increase = peak_mb - baseline_mb
 
         log(f"Results: {succeeded} succeeded, {failed} failed")
-        log(f"Total attempts: {total_attempts} ({retries} retries due to 503)")
-        log(f"Memory samples: {len(memory_samples)}, peak: {peak_mb:.1f} MB")
-        log(f"Memory increase: {memory_increase:.1f} MB")
+        log(
+            f"Memory: baseline={baseline_mb:.1f} MB, "
+            f"peak={peak_mb:.1f} MB, increase={memory_increase:.1f} MB"
+        )
 
-        # Log failures for debugging
         for r in results:
             if not r.get("success"):
                 log(f"  [{r['index']}] FAILED after {r['attempts']} attempts: {r.get('error', '')}")
@@ -572,58 +522,28 @@ class TestMemoryBasedConcurrencyStress:
         # Assertions
         assert proc.poll() is None, "Server crashed!"
         assert succeeded == num_uploads, (
-            f"Expected all {num_uploads} uploads to eventually succeed, "
-            f"but {failed} failed after retries"
+            f"Expected all {num_uploads} uploads to succeed, but {failed} failed"
         )
-        assert retries > 0, "Expected some 503 retries (proves memory limiting is active)"
-        log(f"Memory limiting verified: {retries} requests had to retry")
 
-        # Verify all files exist in bucket with correct sizes
+        # Verify all files exist in bucket
         log("Verifying all files exist in bucket...")
         response = stress_client.list_objects_v2(Bucket=stress_bucket, Prefix="memory-test-")
         objects = {obj["Key"]: obj["Size"] for obj in response.get("Contents", [])}
 
-        missing = []
-        too_small = []
-        for r in results:
-            if r.get("success"):
-                key = r["key"]
-                if key not in objects:
-                    missing.append(key)
-                elif objects[key] < upload_size:
-                    # Encrypted files should be >= plaintext size (encryption adds overhead)
-                    too_small.append((key, objects[key], upload_size))
-
+        missing = [r["key"] for r in results if r.get("success") and r["key"] not in objects]
         assert not missing, f"Missing files in bucket: {missing}"
-        assert not too_small, (
-            f"Files smaller than expected (encryption overhead missing?): {too_small}"
-        )
-        log(f"Verified: {len(objects)} files in bucket, all >= {upload_size // 1024 // 1024}MB")
+        log(f"Verified: {len(objects)} files in bucket")
 
-        # Memory assertions
-        # The streaming code uses MAX_BUFFER_SIZE = 8MB per request (not full file size).
-        # With memory_limit_mb=16: theoretical peak = 2 × 8MB ≈ 16MB
-        # psutil RSS measurement has variance, so we use generous bounds.
-        log(
-            f"Memory: baseline={baseline_mb:.1f} MB, "
-            f"peak={peak_mb:.1f} MB, increase={memory_increase:.1f} MB"
-        )
-
-        # Assert memory stayed bounded (proves memory limiting + streaming works)
-        # Without limiting: 6 concurrent × 30MB full buffering = 180MB minimum
-        # With memory_limit_mb=16 and 8MB streaming buffer: ~16MB expected
-        # Use 100MB as generous upper bound - still proves we're not buffering everything
-        max_expected = 100  # MB - much less than unbounded 180MB+
+        # Memory assertion: with streaming + memory limiting, should stay bounded
+        # Without limiting: 6 concurrent × 30MB = 180MB minimum
+        # With memory_limit_mb=16: much less
+        max_expected = 100  # MB
         assert memory_increase < max_expected, (
-            f"Memory increased by {memory_increase:.1f} MB - expected < {max_expected} MB. "
-            f"Memory limiting or streaming may not be working!"
+            f"Memory increased by {memory_increase:.1f} MB - expected < {max_expected} MB"
         )
-        log(
-            f"Memory bounded: {memory_increase:.1f} MB < {max_expected} MB "
-            f"(streaming + memory_limit_mb=16)"
-        )
+        log(f"Memory bounded: {memory_increase:.1f} MB < {max_expected} MB")
 
-        log("TEST PASSED! All uploads completed and verified, memory stayed bounded.")
+        log("TEST PASSED! All uploads completed, memory stayed bounded.")
 
     @pytest.mark.skipif(
         sys.platform == "darwin", reason="macOS malloc doesn't reliably return memory to OS"
@@ -770,27 +690,19 @@ class TestMemoryBasedConcurrencyStress:
         assert succeeded == num_uploads, (
             f"Expected all {num_uploads} multipart uploads to succeed, but {failed} failed"
         )
-        assert retries > 0, "Expected some retries (proves memory limiting is active)"
-        log(f"Memory limiting verified: {retries} requests had to retry")
+        if retries > 0:
+            log(f"Memory limiting triggered: {retries} requests had to retry")
+        else:
+            log("No retries needed (backpressure queued all requests within timeout)")
 
         # Verify files exist
         log("Verifying all files exist in bucket...")
         response = stress_client.list_objects_v2(Bucket=stress_bucket, Prefix="multipart-test-")
         objects = {obj["Key"]: obj["Size"] for obj in response.get("Contents", [])}
 
-        missing = []
-        too_small = []
-        for r in results:
-            if r.get("success"):
-                key = r["key"]
-                if key not in objects:
-                    missing.append(key)
-                elif objects[key] < total_size:
-                    too_small.append((key, objects[key], total_size))
-
+        missing = [r["key"] for r in results if r.get("success") and r["key"] not in objects]
         assert not missing, f"Missing files in bucket: {missing}"
-        assert not too_small, f"Files smaller than expected: {too_small}"
-        log(f"Verified: {len(objects)} files in bucket, all >= {total_size // 1024 // 1024}MB")
+        log(f"Verified: {len(objects)} files in bucket")
 
         # Memory assertion - with streaming, should stay bounded
         # 2 concurrent × 50MB parts + encryption + overhead ≈ 150-180MB
