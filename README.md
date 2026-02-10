@@ -168,6 +168,22 @@ Yes. The proxy verifies the presigned signature, then makes its own authenticate
 
 ---
 
+## Changelog
+
+### 2026.2.0
+
+- Modular handler architecture (`objects/`, `multipart/`, `routing/`, `client/`, `streaming/`)
+- Memory-based concurrency limiting (replaces count-based), default 64 MB budget
+- Redis state management with automatic recovery; fix data loss on multipart complete/retry
+- Hardened input validation, XML escaping, backpressure, and error handling
+- Helm chart restructured (`manifests/` → `chart/`) with PDB, standardized labels, and [config reference](chart/README.md)
+- E2E tests for PostgreSQL, Elasticsearch, ScyllaDB, ClickHouse, and S3 compatibility
+- CI workflows for ruff linting and unit tests
+- Prometheus-compatible metrics endpoint
+- Slimmer Dockerfile and Makefile improvements
+
+---
+
 ## License
 
 MIT
