@@ -1,9 +1,8 @@
 """Configuration management for S3Proxy."""
 
 import hashlib
-from functools import lru_cache
 
-from pydantic import Field, field_validator
+from pydantic import Field, PrivateAttr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,36 +25,40 @@ class Settings(BaseSettings):
     no_tls: bool = Field(default=False, description="Disable TLS")
     cert_path: str = Field(default="/etc/s3proxy/certs", description="TLS certificate directory")
 
-    # Performance settings
-    # Memory usage: file_size + ~64MB per concurrent upload
-    # For 1GB pod with 10MB files: ~13 concurrent safe, default 10 for margin
-    # Files >16MB automatically use multipart encryption
-    throttling_requests_max: int = Field(default=10, description="Max concurrent requests (0=unlimited)")
-    max_upload_size_mb: int = Field(default=45, description="Max single-request upload size (MB)")
+    # Memory settings
+    # This is the ONLY setting needed for OOM protection.
+    # Use nginx proxy-body-size at ingress to reject oversized requests before they reach Python.
+    memory_limit_mb: int = Field(
+        default=64,
+        description="Memory budget for concurrent requests in MB. 0=unlimited. "
+        "Small files use content_length*2, large files use 8MB (streaming). "
+        "Excess requests wait up to 30s (backpressure), then get 503.",
+    )
 
     # Redis settings (for distributed state in HA deployments)
-    redis_url: str = Field(default="", description="Redis URL for HA mode (empty = in-memory single-instance)")
-    redis_password: str = Field(default="", description="Redis password (optional, can also be in URL)")
-    redis_upload_ttl_hours: int = Field(default=24, description="TTL for upload state in Redis (hours)")
+    redis_url: str = Field(
+        default="", description="Redis URL for HA mode (empty = in-memory single-instance)"
+    )
+    redis_password: str = Field(
+        default="", description="Redis password (optional, can also be in URL)"
+    )
+    redis_upload_ttl_hours: int = Field(
+        default=24, description="TTL for upload state in Redis (hours)"
+    )
 
     # Logging
     log_level: str = Field(default="INFO", description="Log level (DEBUG, INFO, WARNING, ERROR)")
 
-    @field_validator("encrypt_key")
-    @classmethod
-    def hash_encrypt_key(cls, v: str) -> str:
-        """Store the raw key - we'll hash it when needed."""
-        return v
+    # Cached KEK derived from encrypt_key (computed once in model_post_init)
+    _kek: bytes = PrivateAttr()
+
+    def model_post_init(self, __context: object) -> None:
+        self._kek = hashlib.sha256(self.encrypt_key.encode()).digest()
 
     @property
     def kek(self) -> bytes:
         """Get the 32-byte Key Encryption Key (SHA256 of encrypt_key)."""
-        return hashlib.sha256(self.encrypt_key.encode()).digest()
-
-    @property
-    def max_upload_size_bytes(self) -> int:
-        """Max upload size in bytes."""
-        return self.max_upload_size_mb * 1024 * 1024
+        return self._kek
 
     @property
     def s3_endpoint(self) -> str:
@@ -68,9 +71,3 @@ class Settings(BaseSettings):
     def redis_upload_ttl_seconds(self) -> int:
         """Get Redis upload TTL in seconds."""
         return self.redis_upload_ttl_hours * 3600
-
-
-@lru_cache
-def get_settings() -> Settings:
-    """Get cached settings instance."""
-    return Settings()

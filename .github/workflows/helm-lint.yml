@@ -3,7 +3,7 @@ name: Helm Lint
 on:
   pull_request:
     paths:
-      - 'manifests/**'
+      - 'chart/**'
 
 jobs:
   helm-lint:
@@ -22,12 +22,12 @@ jobs:
 
       - name: Update Helm dependencies
         run: |
-          helm dependency update manifests/
+          helm dependency update chart/
 
       - name: Lint Helm chart
         run: |
-          helm lint manifests/
+          helm lint chart/
 
       - name: Validate Helm template
         run: |
-          helm template s3proxy manifests/ --debug > /dev/null
+          helm template s3proxy chart/ --debug > /dev/null

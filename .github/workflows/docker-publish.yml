@@ -3,7 +3,7 @@ name: Build and Push Docker Image
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    tags: ['*']
 
 jobs:
   build-and-push:
@@ -20,8 +20,8 @@ jobs:
         id: tags
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/v}
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
             echo "tags=ghcr.io/${OWNER}/s3proxy-python:${VERSION}" >> $GITHUB_OUTPUT
           else
             echo "tags=ghcr.io/${OWNER}/s3proxy-python:latest" >> $GITHUB_OUTPUT

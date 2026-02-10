@@ -1,0 +1,485 @@
+services:
+  # Local registry as pull-through cache for Docker Hub - avoids rate limits
+  registry:
+    image: registry:3
+    restart: always
+    ports:
+      - "5001:5000"
+    volumes:
+      - registry-data:/var/lib/registry
+    environment:
+      REGISTRY_PROXY_REMOTEURL: https://registry-1.docker.io
+      REGISTRY_LOG_LEVEL: info
+      OTEL_TRACES_EXPORTER: none
+      OTEL_SDK_DISABLED: "true"
+
+  db-test:
+    image: docker:29-cli
+    privileged: true
+    depends_on:
+      - registry
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ..:/repo
+      - db-test-data:/root/.kube
+    working_dir: /repo/e2e
+    environment:
+      - KUBECONFIG=/root/.kube/config
+      - REGISTRY_HOST=registry:5000
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        echo "=== Installing tools ==="
+        apk add --no-cache curl wget bash openssl jq python3 py3-pip gettext
+
+        # Detect architecture
+        RAW_ARCH=$$(cat /etc/apk/arch 2>/dev/null || uname -m)
+        echo "Raw architecture: $$RAW_ARCH"
+        if [ "$$RAW_ARCH" = "x86_64" ]; then
+          ARCH="amd64"
+        else
+          ARCH="arm64"
+        fi
+        echo "Using architecture: $$ARCH"
+
+        echo "=== Installing kind, kubectl, helm (parallel) ==="
+        wget -qO /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/v0.31.0/kind-linux-$${ARCH}" &
+        wget -qO /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.32.2/bin/linux/$${ARCH}/kubectl" &
+        wget -qO- "https://get.helm.sh/helm-v3.14.0-linux-$${ARCH}.tar.gz" | tar xz -C /tmp &
+        wait
+        chmod +x /usr/local/bin/kind /usr/local/bin/kubectl
+        mv /tmp/linux-$${ARCH}/helm /usr/local/bin/helm
+        chmod +x /usr/local/bin/helm
+
+        echo "=== Starting parallel prep (docker build + helm + kind cluster) ==="
+
+        # 1. Docker builds (background, parallel)
+        docker build -t s3proxy:latest /repo &
+        BUILD_PID=$$!
+
+        # Build esrally image with dependencies pre-installed (parallel)
+        (
+          printf '%s\n' \
+            'FROM python:3.12-slim' \
+            'RUN apt-get update && apt-get install -y --no-install-recommends gcc python3-dev git curl && rm -rf /var/lib/apt/lists/*' \
+            'RUN pip install --no-cache-dir esrally' \
+            | docker build -t esrally:latest -f - /tmp
+          echo "✓ esrally image built"
+        ) &
+        ESRALLY_BUILD_PID=$$!
+
+        # Build mc (MinIO client) image for encryption verification (parallel)
+        (
+          printf '%s\n' \
+            'FROM alpine:latest' \
+            'RUN apk add --no-cache ca-certificates wget && ARCH=$$(uname -m) && [ "$$ARCH" = "aarch64" ] || [ "$$ARCH" = "arm64" ] && MC_ARCH=arm64 || MC_ARCH=amd64 && wget -q https://dl.min.io/client/mc/release/linux-$${MC_ARCH}/mc -O /usr/local/bin/mc && chmod +x /usr/local/bin/mc && apk del wget' \
+            | docker build -t mc:latest -f - /tmp
+          echo "✓ mc image built"
+        ) &
+        MC_BUILD_PID=$$!
+
+        # 2. Helm repo setup + dependency build (background)
+        (
+          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+          helm repo add dandydeveloper https://dandydeveloper.github.io/charts
+          helm repo update
+          helm dependency build /repo/chart
+          echo "✓ Helm repos and dependencies ready"
+        ) &
+        HELM_PREP_PID=$$!
+
+        # 3. Kind cluster creation (foreground - other tasks run in parallel)
+        echo "=== Creating kind cluster ==="
+        # Cleanup any leftover kind containers and network
+        CONTAINERS=$$(docker ps -aq --filter "label=io.x-k8s.kind.cluster=db-backup-test" 2>/dev/null || true)
+        if [ -n "$$CONTAINERS" ]; then
+          docker rm -f $$CONTAINERS 2>/dev/null || true
+        fi
+        docker network rm kind 2>/dev/null || true
+        kind delete cluster --name db-backup-test 2>/dev/null || true
+
+        # Get the real host path that maps to /repo (for Kind extraMounts)
+        REPO_HOST_PATH=$$(docker inspect $$(hostname) 2>/dev/null | jq -r '.[0].Mounts[] | select(.Destination=="/repo") | .Source' || echo "")
+        echo "Detected repo host path: $$REPO_HOST_PATH"
+
+        # Create kind config with 3 worker nodes for database replicas
+        HOST_PATH="$${REPO_HOST_PATH:-/tmp}"
+
+        printf '%s\n' \
+          "kind: Cluster" \
+          "apiVersion: kind.x-k8s.io/v1alpha4" \
+          "name: db-backup-test" \
+          "networking:" \
+          "  apiServerAddress: \"0.0.0.0\"" \
+          "containerdConfigPatches:" \
+          "- |-" \
+          "  [plugins.\"io.containerd.grpc.v1.cri\".registry]" \
+          "    config_path = \"/etc/containerd/certs.d\"" \
+          "nodes:" \
+          "  - role: control-plane" \
+          "    image: kindest/node:v1.32.2" \
+          "    extraMounts:" \
+          "      - hostPath: $$HOST_PATH" \
+          "        containerPath: /repo" \
+          "  - role: worker" \
+          "    image: kindest/node:v1.32.2" \
+          "    extraMounts:" \
+          "      - hostPath: $$HOST_PATH" \
+          "        containerPath: /repo" \
+          "  - role: worker" \
+          "    image: kindest/node:v1.32.2" \
+          "    extraMounts:" \
+          "      - hostPath: $$HOST_PATH" \
+          "        containerPath: /repo" \
+          "  - role: worker" \
+          "    image: kindest/node:v1.32.2" \
+          "    extraMounts:" \
+          "      - hostPath: $$HOST_PATH" \
+          "        containerPath: /repo" \
+          > /tmp/kind-config.yaml
+
+        kind create cluster --name db-backup-test --wait 120s --config /tmp/kind-config.yaml
+
+        # Configure registry mirror on all Kind nodes (inject hosts.toml after cluster creation)
+        echo "=== Configuring registry mirror on Kind nodes ==="
+        # Get registry IP on kind network (after connecting it below)
+        REGISTRY_CONTAINER=$$(docker ps -qf "name=registry" | head -1)
+        docker network connect kind $$REGISTRY_CONTAINER 2>/dev/null || true
+        REGISTRY_IP=$$(docker inspect -f '{{range $$k, $$v := .NetworkSettings.Networks}}{{if eq $$k "kind"}}{{$$v.IPAddress}}{{end}}{{end}}' $$REGISTRY_CONTAINER)
+        echo "Registry IP on kind network: $$REGISTRY_IP"
+
+        # Inject hosts.toml into each Kind node
+        for NODE in $$(kind get nodes --name db-backup-test); do
+          echo "Configuring registry mirror on $$NODE..."
+          docker exec $$NODE mkdir -p /etc/containerd/certs.d/docker.io
+          printf '%s\n' \
+            'server = "https://registry-1.docker.io"' \
+            '' \
+            "[host.\"http://$$REGISTRY_IP:5000\"]" \
+            '  capabilities = ["pull", "resolve"]' \
+            '  skip_verify = true' \
+            | docker exec -i $$NODE tee /etc/containerd/certs.d/docker.io/hosts.toml > /dev/null
+          # Restart containerd to pick up the new config
+          docker exec $$NODE systemctl restart containerd
+          echo "✓ $$NODE configured"
+        done
+        echo "✓ Registry mirror configured on all nodes"
+
+        # Verify registry mirror setup
+        echo "=== Verifying registry mirror setup ==="
+        CONTROL_PLANE=$$(kind get nodes --name db-backup-test | head -1)
+        echo "Checking hosts.toml on $$CONTROL_PLANE..."
+        docker exec $$CONTROL_PLANE cat /etc/containerd/certs.d/docker.io/hosts.toml
+        echo ""
+        echo "Testing registry connectivity from Kind node..."
+        docker exec $$CONTROL_PLANE curl -sf "http://$$REGISTRY_IP:5000/v2/" && echo "✓ Registry reachable from Kind nodes"
+
+        echo "=== Configuring kubectl ==="
+        mkdir -p /root/.kube
+
+        # Connect kind container to compose network
+        COMPOSE_NETWORK=$$(docker network ls --filter name=e2e_default -q | head -1)
+        if [ -z "$$COMPOSE_NETWORK" ]; then
+          COMPOSE_NETWORK=$$(docker network ls --filter name=e2e -q | head -1)
+        fi
+        echo "Connecting to compose network: $$COMPOSE_NETWORK"
+        docker network connect $$COMPOSE_NETWORK db-backup-test-control-plane 2>/dev/null || true
+
+
+        # Get kubeconfig
+        kind get kubeconfig --name db-backup-test > /root/.kube/config
+        sed -i 's|server:.*|server: https://db-backup-test-control-plane:6443|g' /root/.kube/config
+
+        echo "Waiting for API server..."
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          kubectl cluster-info && break
+          echo "Retry $$i..."
+          sleep 5
+        done
+        kubectl get nodes
+
+        # === ALL PARALLEL: Operators + Infrastructure start together ===
+        echo "=== Starting ALL parallel tasks (operators + infrastructure) ==="
+
+        # 1. ECK (Elasticsearch) operator
+        (
+          echo "Installing ECK CRDs..."
+          for i in 1 2 3; do
+            kubectl apply -f https://download.elastic.co/downloads/eck/3.2.0/crds.yaml && break
+            echo "ECK CRDs apply failed, retry $$i..."
+            sleep 5
+          done
+          # Wait for CRDs to be established before applying operator
+          echo "Waiting for ECK CRDs to be established..."
+          kubectl wait --for=condition=Established crd/elasticsearches.elasticsearch.k8s.elastic.co --timeout=60s
+          kubectl wait --for=condition=Established crd/kibanas.kibana.k8s.elastic.co --timeout=60s
+          echo "Installing ECK operator..."
+          for i in 1 2 3; do
+            kubectl apply -f https://download.elastic.co/downloads/eck/3.2.0/operator.yaml && break
+            echo "ECK operator apply failed, retry $$i..."
+            sleep 5
+          done
+          kubectl wait --namespace elastic-system --for=condition=ready pod --selector=control-plane=elastic-operator --timeout=300s
+          echo "✓ ECK operator ready"
+        ) &
+        ECK_PID=$$!
+
+        # 2. CloudNativePG (PostgreSQL) operator
+        (
+          helm repo add cnpg https://cloudnative-pg.github.io/charts 2>/dev/null || true
+          helm repo update cnpg 2>/dev/null || true
+          helm upgrade --install cnpg cnpg/cloudnative-pg --namespace cnpg-system --create-namespace --wait --timeout 300s
+          echo "✓ CloudNativePG operator ready"
+        ) &
+        CNPG_PID=$$!
+
+        # 3. ClickHouse operator
+        (
+          kubectl apply -f https://raw.githubusercontent.com/Altinity/clickhouse-operator/master/deploy/operator/clickhouse-operator-install-bundle.yaml
+          kubectl wait --namespace kube-system --for=condition=ready pod --selector=app=clickhouse-operator --timeout=300s
+          echo "✓ ClickHouse operator ready"
+        ) &
+        CLICKHOUSE_PID=$$!
+
+        # 4. cert-manager + Scylla Operator + Scylla Manager (sequential chain in single background job)
+        (
+          # cert-manager
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.17.2/cert-manager.yaml
+          kubectl wait --namespace cert-manager --for=condition=ready pod --all --timeout=300s
+          echo "✓ cert-manager ready"
+
+          # Scylla Operator (requires cert-manager)
+          kubectl apply --server-side -f https://raw.githubusercontent.com/scylladb/scylla-operator/v1.19.0/deploy/operator.yaml
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=scylla-operator -n scylla-operator --timeout=300s
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=webhook-server -n scylla-operator --timeout=300s
+          # Wait for webhook to be fully ready
+          sleep 15
+          echo "✓ Scylla Operator ready"
+
+          # Scylla Manager (requires Scylla Operator)
+          # Label worker nodes for ScyllaDB scheduling
+          for node in $$(kubectl get nodes -o name | grep -v control-plane); do
+            kubectl label "$$node" scylla.scylladb.com/node-type=scylla --overwrite 2>/dev/null || true
+          done
+
+          # Create storage class needed by manager-prod.yaml's ScyllaCluster
+          printf '%s\n' \
+            'apiVersion: storage.k8s.io/v1' \
+            'kind: StorageClass' \
+            'metadata:' \
+            '  name: scylladb-local-xfs' \
+            'provisioner: rancher.io/local-path' \
+            'volumeBindingMode: WaitForFirstConsumer' \
+            'reclaimPolicy: Delete' \
+            | kubectl apply -f -
+
+          # manager-prod.yaml creates a ScyllaCluster backend for the manager
+          kubectl apply --server-side -f https://raw.githubusercontent.com/scylladb/scylla-operator/v1.19.0/deploy/manager-prod.yaml
+
+          # Wait for backend DB pods to appear
+          echo "Waiting for Scylla Manager backend DB pods..."
+          until kubectl get pods -n scylla-manager -l scylla/cluster=scylla-manager-cluster 2>/dev/null | grep -q "."; do
+            sleep 2
+          done
+
+          # Wait for backend DB to be ready
+          kubectl wait --for=condition=ready pod -l scylla/cluster=scylla-manager-cluster -n scylla-manager --timeout=600s
+
+          # Allow backend DB to initialize schema
+          sleep 20
+
+          # Wait for manager deployment
+          kubectl rollout status deployment/scylla-manager -n scylla-manager --timeout=300s
+          echo "✓ Scylla Manager ready"
+        ) &
+        SCYLLA_PID=$$!
+
+        # 7. MinIO (no helm prep needed)
+        echo "  - MinIO deployment starting..."
+        kubectl create namespace minio 2>/dev/null || true
+        cat <<MINIOEOF | kubectl apply -n minio -f -
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: minio-pvc
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 50Gi
+        ---
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: minio
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: minio
+          template:
+            metadata:
+              labels:
+                app: minio
+            spec:
+              containers:
+              - name: minio
+                image: minio/minio:latest
+                args: ["server", "/data", "--console-address", ":9001"]
+                env:
+                - name: MINIO_ROOT_USER
+                  value: minioadmin
+                - name: MINIO_ROOT_PASSWORD
+                  value: minioadmin
+                ports:
+                - containerPort: 9000
+                - containerPort: 9001
+                volumeMounts:
+                - name: data
+                  mountPath: /data
+              volumes:
+              - name: data
+                persistentVolumeClaim:
+                  claimName: minio-pvc
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: minio
+        spec:
+          selector:
+            app: minio
+          ports:
+          - name: api
+            port: 9000
+          - name: console
+            port: 9001
+        MINIOEOF
+
+        # 2. Start ingress-nginx install (background)
+        echo "  - Ingress Controller starting..."
+        helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+          --namespace ingress-nginx --create-namespace \
+          --set controller.service.type=ClusterIP \
+          --set controller.admissionWebhooks.enabled=false \
+          --wait --timeout 300s &
+        INGRESS_PID=$$!
+
+        # 3. Wait for docker builds (already running in background)
+        echo "=== Waiting for docker builds ==="
+        wait $$BUILD_PID || { echo "s3proxy build failed"; exit 1; }
+        echo "✓ s3proxy build complete"
+        wait $$ESRALLY_BUILD_PID || { echo "esrally build failed"; exit 1; }
+        echo "✓ esrally build complete"
+        wait $$MC_BUILD_PID || { echo "mc build failed"; exit 1; }
+        echo "✓ mc build complete"
+
+
+        # 4. Load locally built images into Kind (only custom images, rest uses registry cache)
+        echo "=== Loading locally built images into Kind ==="
+        kind load docker-image s3proxy:latest esrally:latest mc:latest --name db-backup-test
+        echo "✓ Local images loaded"
+
+        kubectl create namespace s3proxy 2>/dev/null || true
+        ENCRYPT_KEY=$$(openssl rand -base64 32)
+
+        # 5. Wait for MinIO pod only (not buckets - those can be created in parallel)
+        echo "=== Waiting for MinIO pod ==="
+        kubectl wait --for=condition=ready pod -l app=minio -n minio --timeout=120s
+        echo "✓ MinIO ready"
+
+        # 6. Start bucket creation in background (doesn't block s3proxy)
+        echo "  - Creating buckets (background)..."
+        kubectl run minio-setup --namespace minio --rm -i \
+          --image=minio/mc:latest \
+          --restart=Never \
+          --command -- /bin/sh -c "
+            mc alias set local http://minio:9000 minioadmin minioadmin && \
+            mc mb local/postgres-backups --ignore-existing && \
+            mc mb local/elasticsearch-backups --ignore-existing && \
+            mc mb local/scylla-backups --ignore-existing && \
+            mc mb local/clickhouse-backups --ignore-existing && \
+            echo 'Buckets created successfully'
+          " &
+        BUCKETS_PID=$$!
+
+        # 7. Start s3proxy install (background) - MinIO is ready, ingress not needed yet
+        echo "=== Installing s3proxy (background) ==="
+        helm upgrade --install s3proxy /repo/chart \
+          -n s3proxy --wait --timeout 600s \
+          --set image.repository=s3proxy \
+          --set image.pullPolicy=IfNotPresent \
+          --set s3.host="http://minio.minio.svc.cluster.local:9000" \
+          --set secrets.encryptKey="$$ENCRYPT_KEY" \
+          --set secrets.awsAccessKeyId="minioadmin" \
+          --set secrets.awsSecretAccessKey="minioadmin" \
+          --set logLevel="DEBUG" \
+          --set performance.memoryLimitMb=64 \
+          --set gateway.enabled=true \
+          --set ingress.enabled=true \
+          --set 'ingress.annotations.nginx\.ingress\.kubernetes\.io/proxy-body-size=256m' \
+          --set redis-ha.enabled=true \
+          --set redis-ha.persistentVolume.enabled=true \
+          --set redis-ha.persistentVolume.size=10Gi \
+          --set redis-ha.hardAntiAffinity=false \
+          --set redis-ha.haproxy.hardAntiAffinity=false \
+          --set redis-ha.auth=true \
+          --set redis-ha.replicas=1 \
+          --set redis-ha.redisPassword=testredispassword \
+          --set redis-ha.redis.resources.requests.memory=128Mi \
+          --set redis-ha.redis.resources.limits.memory=256Mi \
+          --set redis-ha.redis.config.maxmemory=200mb \
+          --set redis-ha.redis.config.maxmemory-policy=noeviction \
+          --set redis-ha.redis.config.min-replicas-to-write=0 \
+          --set redis-ha.redis.config.min-replicas-max-lag=10 \
+          --set redis-ha.haproxy.checkInterval=5s \
+          --set redis-ha.haproxy.timeout.check=10s \
+          --set redis-ha.haproxy.timeout.server=60s \
+          --set redis-ha.haproxy.timeout.client=60s &
+        S3PROXY_PID=$$!
+
+        # 8. Wait for ALL parallel tasks
+        echo "=== Waiting for all parallel tasks ==="
+
+        # Infrastructure
+        wait $$BUCKETS_PID || { echo "Bucket creation failed"; exit 1; }; echo "✓ Buckets"
+        wait $$INGRESS_PID || { echo "Ingress failed"; exit 1; }; echo "✓ Ingress"
+        wait $$S3PROXY_PID || { echo "S3proxy failed"; exit 1; }; echo "✓ S3Proxy"
+
+        # Operators
+        wait $$ECK_PID || { echo "ECK failed"; exit 1; }; echo "✓ ECK"
+        wait $$CNPG_PID || { echo "CNPG failed"; exit 1; }; echo "✓ CNPG"
+        wait $$CLICKHOUSE_PID || { echo "ClickHouse failed"; exit 1; }; echo "✓ ClickHouse"
+        wait $$SCYLLA_PID || { echo "Scylla failed"; exit 1; }; echo "✓ Scylla"
+
+        echo "✓ All parallel tasks complete"
+
+        # Show s3proxy status
+        kubectl get pods -n s3proxy
+        kubectl get svc -n s3proxy
+
+        echo ""
+        echo "S3 Proxy endpoint for databases: http://s3-gateway.s3proxy.svc.cluster.local:80"
+        echo "Direct MinIO (unencrypted):      http://minio.minio.svc.cluster.local:9000"
+
+        echo ""
+        echo "=========================================="
+        echo "Cluster is ready"
+        echo "=========================================="
+        echo ""
+        echo "Run database tests with:"
+        echo "  ./cluster.sh postgres"
+        echo "  ./cluster.sh elasticsearch"
+        echo "  ./cluster.sh scylla"
+        echo ""
+        echo "Or open a shell:"
+        echo "  ./cluster.sh shell"
+        echo ""
+        # Keep container alive
+        tail -f /dev/null
+
+volumes:
+  db-test-data:
+  registry-data:

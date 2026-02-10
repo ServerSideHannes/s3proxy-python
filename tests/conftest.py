@@ -4,9 +4,8 @@ import asyncio
 import hashlib
 import os
 from datetime import UTC, datetime
-from io import BytesIO
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import fakeredis.aioredis
 import pytest
@@ -16,10 +15,9 @@ os.environ.setdefault("S3PROXY_ENCRYPT_KEY", "test-encryption-key-for-pytest")
 os.environ.setdefault("S3PROXY_HOST", "http://localhost:9000")
 
 from s3proxy.config import Settings
-from s3proxy import multipart
-from s3proxy.multipart import MultipartStateManager
 from s3proxy.s3client import S3Client, S3Credentials
-
+from s3proxy.state import MultipartStateManager
+from s3proxy.state import redis as state_redis
 
 # ============================================================================
 # Redis Fixtures
@@ -30,11 +28,11 @@ from s3proxy.s3client import S3Client, S3Credentials
 async def mock_redis():
     """Set up fake Redis for all tests."""
     fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=False)
-    original_client = multipart._redis_client
-    multipart._redis_client = fake_redis
+    original_client = state_redis._redis_client
+    state_redis._redis_client = fake_redis
     yield fake_redis
     await fake_redis.aclose()
-    multipart._redis_client = original_client
+    state_redis._redis_client = original_client
 
 
 # ============================================================================
@@ -78,10 +76,13 @@ def credentials():
 @pytest.fixture
 def mock_credentials_env():
     """Set up mock AWS credentials in environment."""
-    with patch.dict(os.environ, {
-        "AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE",
-        "AWS_SECRET_ACCESS_KEY": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-    }):
+    with patch.dict(
+        os.environ,
+        {
+            "AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE",
+            "AWS_SECRET_ACCESS_KEY": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        },
+    ):
         yield
 
 
@@ -109,6 +110,14 @@ class MockS3Response:
         """Read response body."""
         return self.data
 
+    async def __aenter__(self):
+        """Async context manager entry."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        return None
+
 
 class MockS3Client:
     """Mock S3 client for testing without real S3 backend."""
@@ -118,6 +127,14 @@ class MockS3Client:
         self.buckets: dict[str, dict] = {}
         self.multipart_uploads: dict[str, dict] = {}  # upload_id -> {bucket, key, parts}
         self.call_history: list[tuple[str, dict]] = []
+
+    async def __aenter__(self):
+        """Async context manager entry - returns self."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit - no cleanup needed for mock."""
+        return None
 
     def _key(self, bucket: str, key: str) -> str:
         return f"{bucket}/{key}"
@@ -129,6 +146,9 @@ class MockS3Client:
         body: bytes,
         metadata: dict[str, str] | None = None,
         content_type: str = "application/octet-stream",
+        tagging: str | None = None,
+        cache_control: str | None = None,
+        expires: str | None = None,
     ) -> dict:
         """Store an object."""
         self.call_history.append(("put_object", {"bucket": bucket, "key": key}))
@@ -139,12 +159,17 @@ class MockS3Client:
             "ContentLength": len(body),
             "ETag": hashlib.md5(body).hexdigest(),
             "LastModified": datetime.now(UTC),
+            "CacheControl": cache_control,
+            "Expires": expires,
+            "Tagging": tagging,
         }
         return {"ETag": f'"{hashlib.md5(body).hexdigest()}"'}
 
     async def get_object(self, bucket: str, key: str, range_header: str | None = None) -> dict:
         """Retrieve an object."""
-        self.call_history.append(("get_object", {"bucket": bucket, "key": key, "range": range_header}))
+        self.call_history.append(
+            ("get_object", {"bucket": bucket, "key": key, "range": range_header})
+        )
         obj_key = self._key(bucket, key)
         if obj_key not in self.objects:
             raise self._not_found_error(key)
@@ -222,26 +247,49 @@ class MockS3Client:
         prefix: str = "",
         continuation_token: str | None = None,
         max_keys: int = 1000,
+        delimiter: str | None = None,
     ) -> dict:
         """List objects in bucket."""
-        self.call_history.append(("list_objects_v2", {"bucket": bucket, "prefix": prefix}))
+        self.call_history.append(
+            ("list_objects_v2", {"bucket": bucket, "prefix": prefix, "delimiter": delimiter})
+        )
         contents = []
-        for obj_key, obj in self.objects.items():
+        common_prefixes = set()
+
+        for obj_key, obj in sorted(self.objects.items()):
             b, k = obj_key.split("/", 1)
-            if b == bucket and k.startswith(prefix):
-                contents.append({
+            if b != bucket or not k.startswith(prefix):
+                continue
+
+            # Handle delimiter for grouping
+            if delimiter:
+                suffix = k[len(prefix) :]
+                if delimiter in suffix:
+                    common_prefix = prefix + suffix[: suffix.index(delimiter) + len(delimiter)]
+                    common_prefixes.add(common_prefix)
+                    continue
+
+            contents.append(
+                {
                     "Key": k,
                     "Size": obj["ContentLength"],
                     "ETag": obj["ETag"],
                     "LastModified": obj["LastModified"],
                     "StorageClass": "STANDARD",
-                })
+                }
+            )
 
-        return {
+        is_truncated = len(contents) > max_keys
+        result = {
             "Contents": contents[:max_keys],
-            "IsTruncated": len(contents) > max_keys,
+            "IsTruncated": is_truncated,
             "KeyCount": min(len(contents), max_keys),
         }
+
+        if common_prefixes:
+            result["CommonPrefixes"] = [{"Prefix": p} for p in sorted(common_prefixes)]
+
+        return result
 
     async def copy_object(
         self,
@@ -253,7 +301,9 @@ class MockS3Client:
         content_type: str | None = None,
     ) -> dict:
         """Copy an object."""
-        self.call_history.append(("copy_object", {"bucket": bucket, "key": key, "source": copy_source}))
+        self.call_history.append(
+            ("copy_object", {"bucket": bucket, "key": key, "source": copy_source})
+        )
 
         # Parse source
         source = copy_source.lstrip("/")
@@ -334,7 +384,9 @@ class MockS3Client:
         body: bytes,
     ) -> dict:
         """Upload a part."""
-        self.call_history.append(("upload_part", {"bucket": bucket, "key": key, "part": part_number}))
+        self.call_history.append(
+            ("upload_part", {"bucket": bucket, "key": key, "part": part_number})
+        )
         if upload_id not in self.multipart_uploads:
             raise self._not_found_error(f"upload {upload_id}")
 
@@ -405,12 +457,14 @@ class MockS3Client:
                 key = upload["Key"]
                 if prefix and not key.startswith(prefix):
                     continue
-                uploads.append({
-                    "Key": key,
-                    "UploadId": upload_id,
-                    "Initiated": upload["Initiated"],
-                    "StorageClass": "STANDARD",
-                })
+                uploads.append(
+                    {
+                        "Key": key,
+                        "UploadId": upload_id,
+                        "Initiated": upload["Initiated"],
+                        "StorageClass": "STANDARD",
+                    }
+                )
 
         return {
             "Uploads": uploads[:max_uploads],
@@ -426,7 +480,9 @@ class MockS3Client:
         max_parts: int = 1000,
     ) -> dict:
         """List parts of a multipart upload."""
-        self.call_history.append(("list_parts", {"bucket": bucket, "key": key, "upload_id": upload_id}))
+        self.call_history.append(
+            ("list_parts", {"bucket": bucket, "key": key, "upload_id": upload_id})
+        )
         if upload_id not in self.multipart_uploads:
             raise self._not_found_error(f"upload {upload_id}")
 
@@ -435,12 +491,14 @@ class MockS3Client:
         for part_num, part in sorted(upload["Parts"].items()):
             if part_number_marker and part_num <= part_number_marker:
                 continue
-            parts.append({
-                "PartNumber": part_num,
-                "ETag": part["ETag"],
-                "Size": part["Size"],
-                "LastModified": part["LastModified"],
-            })
+            parts.append(
+                {
+                    "PartNumber": part_num,
+                    "ETag": part["ETag"],
+                    "Size": part["Size"],
+                    "LastModified": part["LastModified"],
+                }
+            )
 
         return {
             "Parts": parts[:max_parts],
@@ -469,7 +527,9 @@ class MockS3Client:
         max_keys: int = 1000,
     ) -> dict:
         """List objects in bucket using V1 API."""
-        self.call_history.append(("list_objects_v1", {"bucket": bucket, "prefix": prefix, "marker": marker}))
+        self.call_history.append(
+            ("list_objects_v1", {"bucket": bucket, "prefix": prefix, "marker": marker})
+        )
         contents = []
         common_prefixes = set()
         prefix = prefix or ""
@@ -483,19 +543,21 @@ class MockS3Client:
 
             # Handle delimiter for grouping
             if delimiter:
-                suffix = k[len(prefix):]
+                suffix = k[len(prefix) :]
                 if delimiter in suffix:
-                    common_prefix = prefix + suffix[:suffix.index(delimiter) + len(delimiter)]
+                    common_prefix = prefix + suffix[: suffix.index(delimiter) + len(delimiter)]
                     common_prefixes.add(common_prefix)
                     continue
 
-            contents.append({
-                "Key": k,
-                "Size": obj["ContentLength"],
-                "ETag": obj["ETag"],
-                "LastModified": obj["LastModified"],
-                "StorageClass": "STANDARD",
-            })
+            contents.append(
+                {
+                    "Key": k,
+                    "Size": obj["ContentLength"],
+                    "ETag": obj["ETag"],
+                    "LastModified": obj["LastModified"],
+                    "StorageClass": "STANDARD",
+                }
+            )
 
         is_truncated = len(contents) > max_keys
         contents = contents[:max_keys]
@@ -518,11 +580,11 @@ class MockS3Client:
         obj = self.objects[obj_key]
         return {"TagSet": obj.get("Tags", [])}
 
-    async def put_object_tagging(
-        self, bucket: str, key: str, tags: list[dict[str, str]]
-    ) -> dict:
+    async def put_object_tagging(self, bucket: str, key: str, tags: list[dict[str, str]]) -> dict:
         """Set object tags."""
-        self.call_history.append(("put_object_tagging", {"bucket": bucket, "key": key, "tags": tags}))
+        self.call_history.append(
+            ("put_object_tagging", {"bucket": bucket, "key": key, "tags": tags})
+        )
         obj_key = self._key(bucket, key)
         if obj_key not in self.objects:
             raise self._not_found_error(key)
@@ -550,10 +612,18 @@ class MockS3Client:
         copy_source_range: str | None = None,
     ) -> dict:
         """Copy a part from another object."""
-        self.call_history.append(("upload_part_copy", {
-            "bucket": bucket, "key": key, "upload_id": upload_id,
-            "part_number": part_number, "copy_source": copy_source,
-        }))
+        self.call_history.append(
+            (
+                "upload_part_copy",
+                {
+                    "bucket": bucket,
+                    "key": key,
+                    "upload_id": upload_id,
+                    "part_number": part_number,
+                    "copy_source": copy_source,
+                },
+            )
+        )
         if upload_id not in self.multipart_uploads:
             raise self._not_found_error(f"upload {upload_id}")
 
@@ -574,7 +644,7 @@ class MockS3Client:
             start, end = range_spec.split("-")
             start = int(start)
             end = int(end)
-            body = body[start:end + 1]
+            body = body[start : end + 1]
 
         etag = hashlib.md5(body).hexdigest()
         self.multipart_uploads[upload_id]["Parts"][part_number] = {
@@ -599,7 +669,9 @@ class MockS3Client:
     def _bucket_not_found_error(self, bucket: str):
         """Create a NoSuchBucket error."""
         error = Exception(f"NoSuchBucket: {bucket}")
-        error.response = {"Error": {"Code": "NoSuchBucket", "Message": f"Bucket not found: {bucket}"}}
+        error.response = {
+            "Error": {"Code": "NoSuchBucket", "Message": f"Bucket not found: {bucket}"}
+        }
         return error
 
 
@@ -704,6 +776,20 @@ def mock_s3_client(mock_s3, settings, credentials):
 def multipart_manager():
     """Create a multipart state manager."""
     return MultipartStateManager()
+
+
+@pytest.fixture
+def manager():
+    """Alias for multipart_manager (used by many test files)."""
+    return MultipartStateManager()
+
+
+@pytest.fixture
+def handler(settings, manager):
+    """Create MultipartHandlerMixin instance for testing."""
+    from s3proxy.handlers.multipart import MultipartHandlerMixin
+
+    return MultipartHandlerMixin(settings, {}, manager)
 
 
 # ============================================================================

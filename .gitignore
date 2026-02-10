@@ -49,4 +49,7 @@ htmlcov/
 Thumbs.db
 
 # Helm dependencies (downloaded via helm dependency build)
-manifests/charts/*.tgz
+chart/charts/*.tgz
+
+# Database backup testing
+db-backup-tests/

@@ -1,0 +1,55 @@
+apiVersion: "clickhouse.altinity.com/v1"
+kind: "ClickHouseInstallation"
+metadata:
+  name: ${RESTORE_CLUSTER_NAME}
+spec:
+  configuration:
+    clusters:
+      - name: "cluster"
+        layout:
+          shardsCount: 1
+          replicasCount: 3
+  defaults:
+    templates:
+      podTemplate: clickhouse-pod
+      dataVolumeClaimTemplate: data-volume
+  templates:
+    podTemplates:
+      - name: clickhouse-pod
+        spec:
+          containers:
+            - name: clickhouse
+              image: clickhouse/clickhouse-server:25.8
+              resources:
+                requests:
+                  memory: "4Gi"
+                  cpu: "500m"
+                limits:
+                  memory: "4Gi"
+                  cpu: "2"
+            - name: clickhouse-backup
+              image: altinity/clickhouse-backup:2.6.15
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  echo "clickhouse-backup sidecar ready"
+                  tail -f /dev/null
+              volumeMounts:
+                - name: clickhouse-backup-config
+                  mountPath: /etc/clickhouse-backup
+                - name: data-volume
+                  mountPath: /var/lib/clickhouse
+          volumes:
+            - name: clickhouse-backup-config
+              configMap:
+                name: clickhouse-backup-config
+    volumeClaimTemplates:
+      - name: data-volume
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 20Gi

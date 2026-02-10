@@ -1,0 +1,13 @@
+{{- if .Values.gateway.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.gateway.serviceName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "s3proxy.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  type: ExternalName
+  externalName: {{ .Values.gateway.ingressService }}
+{{- end }}

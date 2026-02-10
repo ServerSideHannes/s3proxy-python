@@ -1,0 +1,7 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Backup
+metadata:
+  name: ${CLUSTER_NAME}-backup-1
+spec:
+  cluster:
+    name: ${CLUSTER_NAME}
