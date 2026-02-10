@@ -1,4 +1,4 @@
-.PHONY: test test-all test-unit test-run test-memory-bounds e2e cluster lint
+.PHONY: test test-all test-unit test-run test-oom e2e cluster lint
 
 # Lint: ruff check + format check
 lint:
@@ -31,6 +31,17 @@ test-run:
 	@AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin uv run pytest -v -n auto --dist loadgroup $(TESTS); \
 		EXIT_CODE=$$?; \
 		docker compose -f tests/docker-compose.yml down; \
+		exit $$EXIT_CODE
+
+# OOM proof test: runs s3proxy in a 128MB container and hammers it
+test-oom:
+	@docker compose -f tests/docker-compose.yml --profile oom down 2>/dev/null || true
+	@docker compose -f tests/docker-compose.yml --profile oom up -d --build
+	@sleep 5
+	@AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin \
+		uv run pytest -v tests/integration/test_memory_leak.py; \
+		EXIT_CODE=$$?; \
+		docker compose -f tests/docker-compose.yml --profile oom down; \
 		exit $$EXIT_CODE
 
 # E2E cluster commands
