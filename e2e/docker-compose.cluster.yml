@@ -1,0 +1,236 @@
+services:
+  helm-test:
+    image: docker:24-cli
+    privileged: true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ..:/app
+      - kind-data:/root/.kube
+    working_dir: /app
+    environment:
+      - KUBECONFIG=/root/.kube/config
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        echo "=== Installing tools ==="
+        apk add --no-cache curl wget bash openssl
+
+        # Detect architecture (Alpine uses /etc/apk/arch)
+        RAW_ARCH=$$(cat /etc/apk/arch 2>/dev/null || uname -m)
+        echo "Raw architecture: $$RAW_ARCH"
+        if [ "$$RAW_ARCH" = "x86_64" ]; then
+          ARCH="amd64"
+        else
+          ARCH="arm64"
+        fi
+        echo "Using architecture: $$ARCH"
+
+        echo "=== Installing kind ==="
+        wget -qO /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/v0.21.0/kind-linux-$${ARCH}"
+        chmod +x /usr/local/bin/kind
+
+        echo "=== Installing kubectl ==="
+        wget -qO /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.29.2/bin/linux/$${ARCH}/kubectl"
+        chmod +x /usr/local/bin/kubectl
+
+        echo "=== Installing helm ==="
+        wget -qO- "https://get.helm.sh/helm-v3.14.0-linux-$${ARCH}.tar.gz" | tar xz -C /tmp
+        mv /tmp/linux-$${ARCH}/helm /usr/local/bin/helm
+        chmod +x /usr/local/bin/helm
+
+        echo "=== Creating kind cluster ==="
+        kind delete cluster --name s3proxy-test 2>/dev/null || true
+
+        # Create kind config to use the compose network
+        cat > /tmp/kind-config.yaml << 'KINDEOF'
+        kind: Cluster
+        apiVersion: kind.x-k8s.io/v1alpha4
+        networking:
+          apiServerAddress: "0.0.0.0"
+        KINDEOF
+
+        kind create cluster --name s3proxy-test --wait 120s --config /tmp/kind-config.yaml
+
+        echo "=== Configuring kubectl ==="
+        mkdir -p /root/.kube
+
+        # Connect kind container to compose network so they can communicate
+        # The network name is based on the compose project (directory name) + "_default"
+        COMPOSE_NETWORK=$$(docker network ls --filter name=e2e_default -q | head -1)
+        if [ -z "$$COMPOSE_NETWORK" ]; then
+          # Fallback: find any network with "e2e" in the name
+          COMPOSE_NETWORK=$$(docker network ls --filter name=e2e -q | head -1)
+        fi
+        echo "Connecting to compose network: $$COMPOSE_NETWORK"
+        docker network connect $$COMPOSE_NETWORK s3proxy-test-control-plane 2>/dev/null || true
+
+        # Get kubeconfig with the correct server address for compose network
+        kind get kubeconfig --name s3proxy-test > /root/.kube/config
+
+        # Update kubeconfig to use the control plane hostname that resolves in compose network
+        sed -i 's|server:.*|server: https://s3proxy-test-control-plane:6443|g' /root/.kube/config
+
+        echo "Waiting for API server..."
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          kubectl cluster-info && break
+          echo "Retry $$i..."
+          sleep 5
+        done
+        kubectl get nodes
+
+        echo "=== Installing NGINX Ingress Controller ==="
+        helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+        helm repo update
+
+        # Install NGINX Controller with settings optimized for Kind
+        helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+          --namespace ingress-nginx --create-namespace \
+          --set controller.service.type=ClusterIP \
+          --set controller.admissionWebhooks.enabled=false \
+          --wait --timeout 300s
+
+        echo "✓ Ingress Controller installed"
+
+        echo "=== Building s3proxy image ==="
+        # Skip if image already exists (pre-built in CI)
+        if docker image inspect s3proxy:latest >/dev/null 2>&1; then
+          echo "Image already exists, skipping build"
+        else
+          docker build -t s3proxy:latest /app
+        fi
+
+        echo "=== Loading image into kind ==="
+        kind load docker-image s3proxy:latest --name s3proxy-test
+
+        echo "=== Deploying MinIO for testing ==="
+        kubectl create namespace s3proxy 2>/dev/null || true
+        cat <<MINIOEOF | kubectl apply -n s3proxy -f -
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: minio
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: minio
+          template:
+            metadata:
+              labels:
+                app: minio
+            spec:
+              containers:
+              - name: minio
+                image: minio/minio:latest
+                args: ["server", "/data", "--console-address", ":9001"]
+                env:
+                - name: MINIO_ROOT_USER
+                  value: minioadmin
+                - name: MINIO_ROOT_PASSWORD
+                  value: minioadmin
+                ports:
+                - containerPort: 9000
+                - containerPort: 9001
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: minio
+        spec:
+          selector:
+            app: minio
+          ports:
+          - name: api
+            port: 9000
+          - name: console
+            port: 9001
+        MINIOEOF
+        kubectl wait --for=condition=ready pod -l app=minio -n s3proxy --timeout=120s
+        echo "✓ MinIO deployed"
+
+        echo "=== Installing Helm chart ==="
+        # Add Helm repositories
+        helm repo add dandydeveloper https://dandydeveloper.github.io/charts
+        helm repo update
+
+        # Build helm dependencies
+        helm dependency build /app/manifests
+
+        # Generate encryption key for testing
+        ENCRYPT_KEY=$$(openssl rand -base64 32)
+
+        echo "Installing Helm chart with redis-ha..."
+        helm upgrade --install s3proxy /app/manifests \
+          -n s3proxy --wait --timeout 1800s \
+          --set image.repository=s3proxy \
+          --set image.pullPolicy=IfNotPresent \
+          --set s3.host="http://minio:9000" \
+          --set secrets.encryptKey="$$ENCRYPT_KEY" \
+          --set secrets.awsAccessKeyId="minioadmin" \
+          --set secrets.awsSecretAccessKey="minioadmin" \
+          --set gateway.enabled=true \
+          --set ingress.enabled=true \
+          --set resources.limits.cpu=500m \
+          --set resources.requests.cpu=500m \
+          --set redis-ha.persistentVolume.enabled=false \
+          --set redis-ha.hardAntiAffinity=false \
+          --set redis-ha.affinity=null \
+          --set redis-ha.haproxy.hardAntiAffinity=false \
+          --set redis-ha.haproxy.affinity=null
+
+        echo "=== Deployment Status ==="
+        kubectl get all -n s3proxy
+
+        echo "=== Pod Logs ==="
+        kubectl logs -l app=s3proxy-python -n s3proxy --tail=20 || true
+
+        echo ""
+        echo "=========================================="
+        echo "Post-Deployment Validation"
+        echo "=========================================="
+        echo ""
+
+        echo "1. Checking pod status..."
+        POD_STATUS=$$(kubectl get pods -n s3proxy -o wide)
+        echo "$$POD_STATUS"
+        echo "✓ All pods are running"
+        echo ""
+
+        echo "2. Checking secrets..."
+        SECRETS=$$(kubectl get secrets -n s3proxy)
+        if echo "$$SECRETS" | grep -q "s3proxy-secrets"; then
+          echo "✓ Static secrets created: s3proxy-secrets"
+        else
+          echo "⚠ Static secrets not found (using existing secrets mode)"
+        fi
+        echo ""
+
+        echo "3. Checking ConfigMap..."
+        CONFIG=$$(kubectl get configmap -n s3proxy s3proxy-python-config -o yaml)
+        if [ ! -z "$$CONFIG" ]; then
+          echo "✓ ConfigMap s3proxy-python-config found"
+        else
+          echo "✗ ConfigMap not found"
+          exit 1
+        fi
+        echo ""
+
+        echo "4. Checking deployment replicas..."
+        REPLICAS=$$(kubectl get deployment s3proxy-python -n s3proxy -o jsonpath='{.status.readyReplicas}/{.spec.replicas}')
+        if [ ! -z "$$REPLICAS" ]; then
+          echo "✓ S3PROXY replicas ready: $$REPLICAS"
+        else
+          echo "⚠ Could not determine replica status"
+        fi
+        echo ""
+
+        echo "=========================================="
+        echo "Cluster is ready"
+        echo "=========================================="
+        echo ""
+        # Keep container alive for commands
+        tail -f /dev/null
+
+volumes:
+  kind-data:

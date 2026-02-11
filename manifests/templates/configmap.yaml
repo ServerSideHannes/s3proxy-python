@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Chart.Name }}-config
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+data:
+  S3PROXY_HOST: {{ .Values.s3.host | quote }}
+  S3PROXY_REGION: {{ .Values.s3.region | quote }}
+  S3PROXY_IP: "0.0.0.0"
+  S3PROXY_PORT: {{ .Values.server.port | quote }}
+  S3PROXY_NO_TLS: {{ .Values.server.noTls | quote }}
+  S3PROXY_THROTTLING_REQUESTS_MAX: {{ .Values.performance.throttlingRequestsMax | quote }}
+  S3PROXY_MAX_UPLOAD_SIZE_MB: {{ .Values.performance.maxUploadSizeMb | quote }}
+  {{- if index .Values "redis-ha" "enabled" }}
+  S3PROXY_REDIS_URL: "redis://{{ .Release.Name }}-redis-ha-haproxy:6379/0"
+  {{- else }}
+  S3PROXY_REDIS_URL: {{ .Values.externalRedis.url | quote }}
+  {{- end }}
+  S3PROXY_REDIS_UPLOAD_TTL_HOURS: {{ .Values.externalRedis.uploadTtlHours | quote }}
+  S3PROXY_LOG_LEVEL: {{ .Values.logLevel | quote }}
