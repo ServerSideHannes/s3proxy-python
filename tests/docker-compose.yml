@@ -22,14 +22,14 @@ services:
       context: ../
       dockerfile: Dockerfile
     container_name: s3proxy-test-server
-    mem_limit: 128m
+    mem_limit: 256m
     ports:
       - "4433:4433"
     environment:
       S3PROXY_ENCRYPT_KEY: "test-encryption-key-32-bytes!!"
       S3PROXY_HOST: "http://minio:9000"
       S3PROXY_REGION: "us-east-1"
-      S3PROXY_MEMORY_LIMIT_MB: "16"
+      S3PROXY_MEMORY_LIMIT_MB: "48"
       S3PROXY_LOG_LEVEL: "WARNING"
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin

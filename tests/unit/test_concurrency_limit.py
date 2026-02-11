@@ -331,12 +331,12 @@ class TestMemoryConcurrencyModule:
         assert footprint == 2 * 1024 * 1024
 
     def test_estimate_memory_footprint_put_large(self):
-        """PUT with large file should use fixed buffer size (streaming)."""
+        """PUT with large file should use 2x buffer size (buffer + ciphertext)."""
         import s3proxy.concurrency as concurrency_module
 
-        # 100MB file → 8MB footprint (streaming uses fixed buffer)
+        # 100MB file → 16MB footprint (8MB buffer + 8MB ciphertext simultaneously)
         footprint = concurrency_module.estimate_memory_footprint("PUT", 100 * 1024 * 1024)
-        assert footprint == concurrency_module.MAX_BUFFER_SIZE
+        assert footprint == concurrency_module.MAX_BUFFER_SIZE * 2
 
     def test_estimate_memory_footprint_get(self):
         """GET should always use fixed buffer size."""

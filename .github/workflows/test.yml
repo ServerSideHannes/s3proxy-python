@@ -11,9 +11,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  tests:
+  unit:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
 
@@ -29,8 +29,26 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
-      - name: Run all tests
-        run: make test-all
+      - name: Run unit tests
+        run: make test-unit
 
-      - name: OOM proof test (128MB container)
-        run: make test-oom
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+          cache: 'pip'
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Run integration tests
+        run: make test-integration

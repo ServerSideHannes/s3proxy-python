@@ -6,8 +6,8 @@ at 733 bytes) should not be treated the same as large uploads (100MB+).
 
 Memory estimation logic:
 - PUT ≤8MB: content_length * 2 (body + ciphertext buffer)
-- PUT >8MB: MAX_BUFFER_SIZE (8MB, streaming uses fixed buffer)
-- GET: MAX_BUFFER_SIZE (8MB, streaming decryption)
+- PUT >8MB: MAX_BUFFER_SIZE * 2 (16MB, streaming buffer + ciphertext)
+- GET: MAX_BUFFER_SIZE (8MB baseline, handler acquires more for encrypted decrypts)
 - POST: MIN_RESERVATION (64KB, metadata only)
 - HEAD/DELETE: 0 (no buffering, bypass limit)
 """
@@ -46,12 +46,12 @@ class TestMemoryFootprintEstimation:
         footprint = concurrency_module.estimate_memory_footprint("PUT", 100 * 1024)
         assert footprint == 200 * 1024
 
-    def test_large_file_uses_fixed_buffer(self):
-        """PUT with 100MB file should reserve 8MB (streaming fixed buffer)."""
+    def test_large_file_uses_double_buffer(self):
+        """PUT with 100MB file should reserve 16MB (buffer + ciphertext)."""
         import s3proxy.concurrency as concurrency_module
 
         footprint = concurrency_module.estimate_memory_footprint("PUT", 100 * 1024 * 1024)
-        assert footprint == concurrency_module.MAX_BUFFER_SIZE  # 8MB
+        assert footprint == concurrency_module.MAX_BUFFER_SIZE * 2  # 16MB
 
     def test_minimum_reservation_enforced(self):
         """0-byte file should still reserve MIN_RESERVATION (64KB)."""
@@ -146,16 +146,15 @@ class TestMemoryBudgetManagement:
 
     @pytest.mark.asyncio
     async def test_single_request_cannot_exceed_budget(self):
-        """A single 100MB request should be capped at the 64MB budget."""
+        """A single 100MB request should be rejected when it exceeds the 64MB budget."""
         import s3proxy.concurrency as concurrency_module
+        from s3proxy.errors import S3Error
 
-        # Request 100MB, but should be capped at 64MB limit
-        reserved = await concurrency_module.try_acquire_memory(100 * 1024 * 1024)
+        # Request 100MB — exceeds 64MB limit, should be rejected immediately
+        with pytest.raises(S3Error, match="503"):
+            await concurrency_module.try_acquire_memory(100 * 1024 * 1024)
 
-        # Should be capped at the total budget
-        assert reserved == 64 * 1024 * 1024
-
-        await concurrency_module.release_memory(reserved)
+        # No memory should be reserved after rejection
         assert concurrency_module.get_active_memory() == 0
 
     @pytest.mark.asyncio
@@ -264,10 +263,10 @@ class TestRealWorldScenarios:
 
         reservations = []
 
-        # 2 large streaming uploads (8MB each = 16MB)
+        # 2 large streaming uploads (16MB each = 32MB)
         for _ in range(2):
             footprint = concurrency_module.estimate_memory_footprint("PUT", 100 * 1024 * 1024)
-            assert footprint == 8 * 1024 * 1024  # Fixed streaming buffer
+            assert footprint == 16 * 1024 * 1024  # buffer + ciphertext
             reserved = await concurrency_module.try_acquire_memory(footprint)
             reservations.append(reserved)
 
@@ -278,13 +277,13 @@ class TestRealWorldScenarios:
             reserved = await concurrency_module.try_acquire_memory(footprint)
             reservations.append(reserved)
 
-        # Total: 32MB used, 32MB remaining
-        assert concurrency_module.get_active_memory() == 32 * 1024 * 1024
+        # Total: 48MB used, 16MB remaining
+        assert concurrency_module.get_active_memory() == 48 * 1024 * 1024
 
-        # Calculate how many small files fit in remaining 32MB budget
+        # Calculate how many small files fit in remaining 16MB budget
         # Each small file reserves MIN_RESERVATION (64KB = 65536 bytes)
-        remaining_budget = 64 * 1024 * 1024 - 32 * 1024 * 1024  # 32MB
-        files_that_fit = remaining_budget // concurrency_module.MIN_RESERVATION  # 512 files
+        remaining_budget = 64 * 1024 * 1024 - 48 * 1024 * 1024  # 16MB
+        files_that_fit = remaining_budget // concurrency_module.MIN_RESERVATION  # 256 files
 
         small_reservations = []
         for _ in range(files_that_fit):
@@ -292,8 +291,8 @@ class TestRealWorldScenarios:
             reserved = await concurrency_module.try_acquire_memory(footprint)
             small_reservations.append(reserved)
 
-        # Now at 64MB (32MB large + 512 * 64KB = 32MB small)
-        expected_total = 32 * 1024 * 1024 + files_that_fit * concurrency_module.MIN_RESERVATION
+        # Now at 64MB (48MB large + 256 * 64KB = 16MB small)
+        expected_total = 48 * 1024 * 1024 + files_that_fit * concurrency_module.MIN_RESERVATION
         assert concurrency_module.get_active_memory() == expected_total
 
         # Next request should fail

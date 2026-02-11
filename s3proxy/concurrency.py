@@ -84,7 +84,21 @@ class ConcurrencyLimiter:
         if self._limit_bytes <= 0:
             return 0
 
-        to_reserve = max(MIN_RESERVATION, min(bytes_needed, self._limit_bytes))
+        to_reserve = max(MIN_RESERVATION, bytes_needed)
+
+        # Single request exceeds entire budget — can never fit, reject immediately
+        if to_reserve > self._limit_bytes:
+            request_mb = to_reserve / 1024 / 1024
+            limit_mb = self._limit_bytes / 1024 / 1024
+            logger.warning(
+                "MEMORY_TOO_LARGE",
+                requested_mb=round(request_mb, 2),
+                limit_mb=round(limit_mb, 2),
+            )
+            MEMORY_REJECTIONS.inc()
+            raise S3Error.slow_down(
+                f"Request needs {request_mb:.0f}MB but budget is {limit_mb:.0f}MB"
+            )
 
         async with self._condition:
             deadline = asyncio.get_event_loop().time() + BACKPRESSURE_TIMEOUT
@@ -147,7 +161,12 @@ _default = ConcurrencyLimiter(limit_mb=int(os.environ.get("S3PROXY_MEMORY_LIMIT_
 
 
 def estimate_memory_footprint(method: str, content_length: int) -> int:
-    """Estimate memory needed for a request."""
+    """Estimate memory needed for a request.
+
+    Streaming PUTs hold an 8MB plaintext buffer + 8MB ciphertext simultaneously,
+    so large PUTs need 2x MAX_BUFFER_SIZE. Small PUTs buffer the whole body + ciphertext.
+    GETs reserve a baseline here; encrypted GETs acquire additional memory in the handler.
+    """
     if method in ("HEAD", "DELETE"):
         return 0
     if method == "GET":
@@ -156,7 +175,7 @@ def estimate_memory_footprint(method: str, content_length: int) -> int:
         return MIN_RESERVATION
     if content_length <= MAX_BUFFER_SIZE:
         return max(MIN_RESERVATION, content_length * 2)
-    return MAX_BUFFER_SIZE
+    return MAX_BUFFER_SIZE * 2
 
 
 # Module-level convenience functions delegating to the default instance

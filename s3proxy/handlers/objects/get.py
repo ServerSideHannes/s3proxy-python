@@ -11,7 +11,8 @@ from fastapi import Request, Response
 from fastapi.responses import StreamingResponse
 from structlog.stdlib import BoundLogger
 
-from ... import crypto
+from ... import concurrency, crypto
+from ...concurrency import MAX_BUFFER_SIZE
 from ...errors import S3Error
 from ...s3client import S3Client, S3Credentials
 from ...state import (
@@ -147,37 +148,51 @@ class GetObjectMixin(BaseHandler):
     ) -> Response:
         logger.info("GET_ENCRYPTED_SINGLE", bucket=bucket, key=key)
         resp = await client.get_object(bucket, key)
-        wrapped_dek = base64.b64decode(wrapped_dek_b64)
-        # Read and close body to release aioboto3/aiohttp resources
-        async with resp["Body"] as body:
-            ciphertext = await body.read()
-        plaintext = crypto.decrypt_object(ciphertext, wrapped_dek, self.settings.kek)
-        del ciphertext  # Free memory
+        content_length = resp.get("ContentLength", 0)
 
-        content_type = head_resp.get("ContentType", "application/octet-stream")
-        cache_control = head_resp.get("CacheControl")
-        expires = head_resp.get("Expires")
+        # Encrypted decrypts buffer ciphertext + plaintext simultaneously.
+        # Acquire additional memory beyond the initial MAX_BUFFER_SIZE reservation.
+        additional = max(0, content_length * 2 - MAX_BUFFER_SIZE)
+        extra_reserved = 0
+        try:
+            if additional > 0:
+                extra_reserved = await concurrency.try_acquire_memory(additional)
 
-        if range_header:
-            start, end = self._parse_range(range_header, len(plaintext))
+            wrapped_dek = base64.b64decode(wrapped_dek_b64)
+            async with resp["Body"] as body:
+                ciphertext = await body.read()
+            plaintext = crypto.decrypt_object(ciphertext, wrapped_dek, self.settings.kek)
+            del ciphertext
+
+            content_type = head_resp.get("ContentType", "application/octet-stream")
+            cache_control = head_resp.get("CacheControl")
+            expires = head_resp.get("Expires")
+
+            if range_header:
+                start, end = self._parse_range(range_header, len(plaintext))
+                headers = self._build_headers(
+                    content_type=content_type,
+                    content_length=end - start + 1,
+                    last_modified=last_modified,
+                    cache_control=cache_control,
+                    expires=expires,
+                )
+                headers["Content-Range"] = f"bytes {start}-{end}/{len(plaintext)}"
+                return Response(
+                    content=plaintext[start : end + 1], status_code=206, headers=headers
+                )
+
             headers = self._build_headers(
                 content_type=content_type,
-                content_length=end - start + 1,
+                content_length=len(plaintext),
                 last_modified=last_modified,
                 cache_control=cache_control,
                 expires=expires,
             )
-            headers["Content-Range"] = f"bytes {start}-{end}/{len(plaintext)}"
-            return Response(content=plaintext[start : end + 1], status_code=206, headers=headers)
-
-        headers = self._build_headers(
-            content_type=content_type,
-            content_length=len(plaintext),
-            last_modified=last_modified,
-            cache_control=cache_control,
-            expires=expires,
-        )
-        return Response(content=plaintext, headers=headers)
+            return Response(content=plaintext, headers=headers)
+        finally:
+            if extra_reserved > 0:
+                await concurrency.release_memory(extra_reserved)
 
     async def _get_multipart(
         self,
@@ -378,13 +393,17 @@ class GetObjectMixin(BaseHandler):
         ct_end: int,
         dek: bytes,
     ) -> bytes:
+        expected_size = ct_end - ct_start + 1
+        additional = max(0, expected_size * 2 - MAX_BUFFER_SIZE)
+        extra_reserved = 0
         try:
+            if additional > 0:
+                extra_reserved = await concurrency.try_acquire_memory(additional)
+
             resp = await client.get_object(bucket, key, f"bytes={ct_start}-{ct_end}")
-            # Read and close body to release aioboto3/aiohttp resources
             async with resp["Body"] as body:
                 ciphertext = await body.read()
 
-            expected_size = ct_end - ct_start + 1
             if len(ciphertext) < crypto.ENCRYPTION_OVERHEAD or len(ciphertext) != expected_size:
                 logger.error(
                     "GET_CIPHERTEXT_SIZE_MISMATCH",
@@ -419,6 +438,9 @@ class GetObjectMixin(BaseHandler):
                     f"range {ct_start}-{ct_end} invalid"
                 ) from e
             raise
+        finally:
+            if extra_reserved > 0:
+                await concurrency.release_memory(extra_reserved)
 
     async def _fetch_and_decrypt_part(
         self,
@@ -445,12 +467,21 @@ class GetObjectMixin(BaseHandler):
 
         self._validate_ciphertext_range(bucket, key, part_num, 0, ct_end, actual_size)
 
-        resp = await client.get_object(bucket, key, f"bytes={ct_start}-{ct_end}")
-        # Read and close body to release aioboto3/aiohttp resources
-        async with resp["Body"] as body:
-            ciphertext = await body.read()
-        decrypted = crypto.decrypt(ciphertext, dek)
-        return decrypted[off_start : off_end + 1]
+        part_size = part_meta.ciphertext_size
+        additional = max(0, part_size * 2 - MAX_BUFFER_SIZE)
+        extra_reserved = 0
+        try:
+            if additional > 0:
+                extra_reserved = await concurrency.try_acquire_memory(additional)
+
+            resp = await client.get_object(bucket, key, f"bytes={ct_start}-{ct_end}")
+            async with resp["Body"] as body:
+                ciphertext = await body.read()
+            decrypted = crypto.decrypt(ciphertext, dek)
+            return decrypted[off_start : off_end + 1]
+        finally:
+            if extra_reserved > 0:
+                await concurrency.release_memory(extra_reserved)
 
     def _build_response_headers(self, resp: dict, last_modified: str | None) -> dict[str, str]:
         return self._build_headers(
