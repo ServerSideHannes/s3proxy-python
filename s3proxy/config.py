@@ -35,6 +35,7 @@ class Settings(BaseSettings):
 
     # Redis settings (for distributed state in HA deployments)
     redis_url: str = Field(default="", description="Redis URL for HA mode (empty = in-memory single-instance)")
+    redis_password: str = Field(default="", description="Redis password (optional, can also be in URL)")
     redis_upload_ttl_hours: int = Field(default=24, description="TTL for upload state in Redis (hours)")
 
     # Logging

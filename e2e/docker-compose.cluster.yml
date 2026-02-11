@@ -93,12 +93,7 @@ services:
         echo "✓ Ingress Controller installed"
 
         echo "=== Building s3proxy image ==="
-        # Skip if image already exists (pre-built in CI)
-        if docker image inspect s3proxy:latest >/dev/null 2>&1; then
-          echo "Image already exists, skipping build"
-        else
-          docker build -t s3proxy:latest /app
-        fi
+        docker build -t s3proxy:latest /app
 
         echo "=== Loading image into kind ==="
         kind load docker-image s3proxy:latest --name s3proxy-test
@@ -164,6 +159,7 @@ services:
         helm upgrade --install s3proxy /app/manifests \
           -n s3proxy --wait --timeout 1800s \
           --set image.repository=s3proxy \
+          --debug \
           --set image.pullPolicy=IfNotPresent \
           --set s3.host="http://minio:9000" \
           --set secrets.encryptKey="$$ENCRYPT_KEY" \
@@ -177,7 +173,9 @@ services:
           --set redis-ha.hardAntiAffinity=false \
           --set redis-ha.affinity=null \
           --set redis-ha.haproxy.hardAntiAffinity=false \
-          --set redis-ha.haproxy.affinity=null
+          --set redis-ha.haproxy.affinity=null \
+          --set redis-ha.auth=true \
+          --set redis-ha.redisPassword=testredispassword123
 
         echo "=== Deployment Status ==="
         kubectl get all -n s3proxy
