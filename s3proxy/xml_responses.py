@@ -1,26 +1,38 @@
 """S3 XML response builders."""
 
+from urllib.parse import quote
 from xml.sax.saxutils import escape
+
+# Common XML constants
+_XML_HEADER = '<?xml version="1.0" encoding="UTF-8"?>'
+_S3_NS = 'xmlns="http://s3.amazonaws.com/doc/2006-03-01/"'
+
+
+def _encode_key(key: str, encoding_type: str | None) -> str:
+    """URL-encode key if encoding_type is 'url'."""
+    if encoding_type == "url":
+        return quote(key, safe="")
+    return escape(key)
 
 
 def initiate_multipart(bucket: str, key: str, upload_id: str) -> str:
     """Build InitiateMultipartUploadResult XML."""
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-    <Bucket>{bucket}</Bucket>
-    <Key>{key}</Key>
-    <UploadId>{upload_id}</UploadId>
+    return f"""{_XML_HEADER}
+<InitiateMultipartUploadResult {_S3_NS}>
+    <Bucket>{escape(bucket)}</Bucket>
+    <Key>{escape(key)}</Key>
+    <UploadId>{escape(upload_id)}</UploadId>
 </InitiateMultipartUploadResult>"""
 
 
 def complete_multipart(location: str, bucket: str, key: str, etag: str) -> str:
     """Build CompleteMultipartUploadResult XML."""
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<CompleteMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-    <Location>{location}</Location>
-    <Bucket>{bucket}</Bucket>
-    <Key>{key}</Key>
-    <ETag>"{etag}"</ETag>
+    return f"""{_XML_HEADER}
+<CompleteMultipartUploadResult {_S3_NS}>
+    <Location>{escape(location)}</Location>
+    <Bucket>{escape(bucket)}</Bucket>
+    <Key>{escape(key)}</Key>
+    <ETag>"{escape(etag)}"</ETag>
 </CompleteMultipartUploadResult>"""
 
 
@@ -31,32 +43,74 @@ def list_objects(
     is_truncated: bool,
     next_token: str | None,
     objects: list[dict],
+    delimiter: str | None = None,
+    common_prefixes: list[str] | None = None,
+    continuation_token: str | None = None,
+    start_after: str | None = None,
+    encoding_type: str | None = None,
+    fetch_owner: bool = False,
 ) -> str:
-    """Build ListBucketResult XML."""
+    """Build ListBucketResult XML for V2 API."""
     objects_xml = ""
     for obj in objects:
+        key_encoded = _encode_key(obj["key"], encoding_type)
+        owner_xml = ""
+        if fetch_owner:
+            owner_xml = """
+        <Owner>
+            <ID>owner-id</ID>
+            <DisplayName>owner-name</DisplayName>
+        </Owner>"""
         objects_xml += f"""
     <Contents>
-        <Key>{obj["key"]}</Key>
+        <Key>{key_encoded}</Key>
         <LastModified>{obj["last_modified"]}</LastModified>
         <ETag>"{obj["etag"]}"</ETag>
         <Size>{obj["size"]}</Size>
-        <StorageClass>{obj.get("storage_class", "STANDARD")}</StorageClass>
+        <StorageClass>{obj.get("storage_class", "STANDARD")}</StorageClass>{owner_xml}
     </Contents>"""
 
     next_token_xml = (
-        f"<NextContinuationToken>{next_token}</NextContinuationToken>"
-        if next_token else ""
+        f"<NextContinuationToken>{_encode_key(next_token, encoding_type)}</NextContinuationToken>"
+        if next_token
+        else ""
     )
 
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-    <Name>{bucket}</Name>
-    <Prefix>{prefix}</Prefix>
+    continuation_token_xml = (
+        f"<ContinuationToken>{_encode_key(continuation_token, encoding_type)}</ContinuationToken>"
+        if continuation_token is not None
+        else ""
+    )
+
+    start_after_xml = (
+        f"<StartAfter>{_encode_key(start_after, encoding_type)}</StartAfter>" if start_after else ""
+    )
+
+    # Note: Delimiter is NOT URL-encoded even with encoding-type=url per S3 spec
+    delimiter_xml = f"<Delimiter>{escape(delimiter)}</Delimiter>" if delimiter else ""
+    encoding_xml = f"<EncodingType>{encoding_type}</EncodingType>" if encoding_type else ""
+
+    prefixes_xml = ""
+    if common_prefixes:
+        for cp in common_prefixes:
+            prefixes_xml += f"""
+    <CommonPrefixes>
+        <Prefix>{_encode_key(cp, encoding_type)}</Prefix>
+    </CommonPrefixes>"""
+
+    # Note: Prefix is echoed back as-is, not URL-encoded (per S3 behavior)
+    return f"""{_XML_HEADER}
+<ListBucketResult {_S3_NS}>
+    <Name>{escape(bucket)}</Name>
+    <Prefix>{escape(prefix)}</Prefix>
+    {delimiter_xml}
+    {start_after_xml}
+    {encoding_xml}
     <MaxKeys>{max_keys}</MaxKeys>
+    {continuation_token_xml}
     <IsTruncated>{str(is_truncated).lower()}</IsTruncated>
     {next_token_xml}
-    <KeyCount>{len(objects)}</KeyCount>{objects_xml}
+    <KeyCount>{len(objects) + len(common_prefixes or [])}</KeyCount>{objects_xml}{prefixes_xml}
 </ListBucketResult>"""
 
 
@@ -64,19 +118,23 @@ def location_constraint(location: str | None) -> str:
     """Build LocationConstraint XML for GetBucketLocation."""
     # AWS returns empty LocationConstraint for us-east-1
     if location is None or location == "us-east-1" or location == "":
-        return """<?xml version="1.0" encoding="UTF-8"?>
-<LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>"""
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">{location}</LocationConstraint>"""
+        return f"{_XML_HEADER}\n<LocationConstraint {_S3_NS}/>"
+    return f"{_XML_HEADER}\n<LocationConstraint {_S3_NS}>{escape(location)}</LocationConstraint>"
 
 
-def copy_object_result(etag: str, last_modified: str) -> str:
-    """Build CopyObjectResult XML."""
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<CopyObjectResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+def copy_result(etag: str, last_modified: str, is_part: bool = False) -> str:
+    """Build CopyObjectResult or CopyPartResult XML."""
+    tag = "CopyPartResult" if is_part else "CopyObjectResult"
+    return f"""{_XML_HEADER}
+<{tag} {_S3_NS}>
     <ETag>"{etag}"</ETag>
     <LastModified>{last_modified}</LastModified>
-</CopyObjectResult>"""
+</{tag}>"""
+
+
+# Backwards compatibility aliases
+def copy_object_result(etag: str, last_modified: str) -> str:
+    return copy_result(etag, last_modified, is_part=False)
 
 
 def delete_objects_result(
@@ -84,13 +142,7 @@ def delete_objects_result(
     errors: list[dict[str, str]],
     quiet: bool = False,
 ) -> str:
-    """Build DeleteResult XML for batch delete.
-
-    Args:
-        deleted: List of {"Key": key, "VersionId": vid} for deleted objects
-        errors: List of {"Key": key, "Code": code, "Message": msg} for failures
-        quiet: If True, don't include deleted objects in response
-    """
+    """Build DeleteResult XML for batch delete."""
     deleted_xml = ""
     if not quiet:
         for obj in deleted:
@@ -116,8 +168,8 @@ def delete_objects_result(
         errors_xml += """
     </Error>"""
 
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">{deleted_xml}{errors_xml}
+    return f"""{_XML_HEADER}
+<DeleteResult {_S3_NS}>{deleted_xml}{errors_xml}
 </DeleteResult>"""
 
 
@@ -132,19 +184,7 @@ def list_multipart_uploads(
     is_truncated: bool,
     prefix: str | None = None,
 ) -> str:
-    """Build ListMultipartUploadsResult XML.
-
-    Args:
-        bucket: Bucket name
-        uploads: List of upload dicts with Key, UploadId, Initiated, etc.
-        key_marker: KeyMarker from request
-        upload_id_marker: UploadIdMarker from request
-        next_key_marker: NextKeyMarker for pagination
-        next_upload_id_marker: NextUploadIdMarker for pagination
-        max_uploads: MaxUploads from request
-        is_truncated: Whether there are more results
-        prefix: Optional prefix filter
-    """
+    """Build ListMultipartUploadsResult XML."""
     uploads_xml = ""
     for upload in uploads:
         uploads_xml += f"""
@@ -166,11 +206,13 @@ def list_multipart_uploads(
     if is_truncated and next_key_marker:
         next_markers_xml += f"<NextKeyMarker>{escape(next_key_marker)}</NextKeyMarker>"
     if is_truncated and next_upload_id_marker:
-        next_markers_xml += f"<NextUploadIdMarker>{escape(next_upload_id_marker)}</NextUploadIdMarker>"
+        next_markers_xml += (
+            f"<NextUploadIdMarker>{escape(next_upload_id_marker)}</NextUploadIdMarker>"
+        )
 
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<ListMultipartUploadsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-    <Bucket>{bucket}</Bucket>
+    return f"""{_XML_HEADER}
+<ListMultipartUploadsResult {_S3_NS}>
+    <Bucket>{escape(bucket)}</Bucket>
     {key_marker_xml}
     {upload_id_marker_xml}
     {next_markers_xml}
@@ -191,19 +233,7 @@ def list_parts(
     is_truncated: bool,
     storage_class: str = "STANDARD",
 ) -> str:
-    """Build ListPartsResult XML.
-
-    Args:
-        bucket: Bucket name
-        key: Object key
-        upload_id: Multipart upload ID
-        parts: List of part dicts with PartNumber, ETag, Size, LastModified
-        part_number_marker: PartNumberMarker from request
-        next_part_number_marker: NextPartNumberMarker for pagination
-        max_parts: MaxParts from request
-        is_truncated: Whether there are more results
-        storage_class: Storage class
-    """
+    """Build ListPartsResult XML."""
     parts_xml = ""
     for part in parts:
         parts_xml += f"""
@@ -222,11 +252,11 @@ def list_parts(
     if is_truncated and next_part_number_marker:
         next_marker_xml = f"<NextPartNumberMarker>{next_part_number_marker}</NextPartNumberMarker>"
 
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<ListPartsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-    <Bucket>{bucket}</Bucket>
+    return f"""{_XML_HEADER}
+<ListPartsResult {_S3_NS}>
+    <Bucket>{escape(bucket)}</Bucket>
     <Key>{escape(key)}</Key>
-    <UploadId>{upload_id}</UploadId>
+    <UploadId>{escape(upload_id)}</UploadId>
     {marker_xml}
     {next_marker_xml}
     <MaxParts>{max_parts}</MaxParts>
@@ -236,12 +266,7 @@ def list_parts(
 
 
 def list_buckets(owner: dict, buckets: list[dict]) -> str:
-    """Build ListAllMyBucketsResult XML.
-
-    Args:
-        owner: Owner dict with ID and DisplayName
-        buckets: List of bucket dicts with Name and CreationDate
-    """
+    """Build ListAllMyBucketsResult XML."""
     buckets_xml = ""
     for b in buckets:
         creation_date = b.get("CreationDate", "")
@@ -253,8 +278,8 @@ def list_buckets(owner: dict, buckets: list[dict]) -> str:
             <CreationDate>{creation_date}</CreationDate>
         </Bucket>"""
 
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+    return f"""{_XML_HEADER}
+<ListAllMyBucketsResult {_S3_NS}>
     <Owner>
         <ID>{escape(owner.get("ID", ""))}</ID>
         <DisplayName>{escape(owner.get("DisplayName", ""))}</DisplayName>
@@ -274,49 +299,48 @@ def list_objects_v1(
     next_marker: str | None,
     objects: list[dict],
     common_prefixes: list[str] | None = None,
+    encoding_type: str | None = None,
 ) -> str:
-    """Build ListBucketResult XML for V1 API.
-
-    Args:
-        bucket: Bucket name
-        prefix: Prefix filter
-        marker: Marker from request
-        delimiter: Delimiter for grouping
-        max_keys: Max keys requested
-        is_truncated: Whether there are more results
-        next_marker: Next marker for pagination
-        objects: List of object dicts
-        common_prefixes: List of common prefix strings
-    """
+    """Build ListBucketResult XML for V1 API."""
     objects_xml = ""
     for obj in objects:
+        key_encoded = _encode_key(obj["key"], encoding_type)
         objects_xml += f"""
     <Contents>
-        <Key>{escape(obj["key"])}</Key>
+        <Key>{key_encoded}</Key>
         <LastModified>{obj["last_modified"]}</LastModified>
         <ETag>"{obj["etag"]}"</ETag>
         <Size>{obj["size"]}</Size>
         <StorageClass>{obj.get("storage_class", "STANDARD")}</StorageClass>
     </Contents>"""
 
+    # Note: Marker is echoed back as-is, not URL-encoded (per S3 behavior)
     marker_xml = f"<Marker>{escape(marker or '')}</Marker>"
-    next_marker_xml = f"<NextMarker>{escape(next_marker or '')}</NextMarker>" if next_marker else ""
+    next_marker_xml = (
+        f"<NextMarker>{_encode_key(next_marker or '', encoding_type)}</NextMarker>"
+        if next_marker
+        else ""
+    )
+    # Note: Delimiter is NOT URL-encoded even with encoding-type=url per S3 spec
     delimiter_xml = f"<Delimiter>{escape(delimiter)}</Delimiter>" if delimiter else ""
+    encoding_xml = f"<EncodingType>{encoding_type}</EncodingType>" if encoding_type else ""
 
     prefixes_xml = ""
     if common_prefixes:
         for cp in common_prefixes:
             prefixes_xml += f"""
     <CommonPrefixes>
-        <Prefix>{escape(cp)}</Prefix>
+        <Prefix>{_encode_key(cp, encoding_type)}</Prefix>
     </CommonPrefixes>"""
 
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-    <Name>{bucket}</Name>
+    # Note: Prefix is echoed back as-is, not URL-encoded (per S3 behavior)
+    return f"""{_XML_HEADER}
+<ListBucketResult {_S3_NS}>
+    <Name>{escape(bucket)}</Name>
     <Prefix>{escape(prefix)}</Prefix>
     {marker_xml}
     {delimiter_xml}
+    {encoding_xml}
     <MaxKeys>{max_keys}</MaxKeys>
     <IsTruncated>{str(is_truncated).lower()}</IsTruncated>
     {next_marker_xml}{objects_xml}{prefixes_xml}
@@ -324,11 +348,7 @@ def list_objects_v1(
 
 
 def get_tagging(tags: list[dict]) -> str:
-    """Build GetObjectTaggingResult XML.
-
-    Args:
-        tags: List of tag dicts with Key and Value
-    """
+    """Build GetObjectTaggingResult XML."""
     tags_xml = ""
     for tag in tags:
         tags_xml += f"""
@@ -337,17 +357,12 @@ def get_tagging(tags: list[dict]) -> str:
             <Value>{escape(tag.get("Value", ""))}</Value>
         </Tag>"""
 
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<Tagging xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+    return f"""{_XML_HEADER}
+<Tagging {_S3_NS}>
     <TagSet>{tags_xml}
     </TagSet>
 </Tagging>"""
 
 
 def upload_part_copy_result(etag: str, last_modified: str) -> str:
-    """Build CopyPartResult XML."""
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<CopyPartResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-    <ETag>"{etag}"</ETag>
-    <LastModified>{last_modified}</LastModified>
-</CopyPartResult>"""
+    return copy_result(etag, last_modified, is_part=True)

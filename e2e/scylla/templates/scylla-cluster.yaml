@@ -1,0 +1,32 @@
+apiVersion: scylla.scylladb.com/v1
+kind: ScyllaCluster
+metadata:
+  name: ${CLUSTER_NAME}
+spec:
+  version: 2025.3.5
+  agentVersion: 3.7.0
+  developerMode: true
+  sysctls:
+    - fs.aio-max-nr=1048576
+  datacenter:
+    name: dc1
+    racks:
+      - name: rack1
+        members: 3
+        storage:
+          capacity: 10Gi
+        resources:
+          requests:
+            cpu: 500m
+            memory: 2Gi
+          limits:
+            cpu: 2
+            memory: 4Gi
+        volumes:
+          - name: agent-config
+            secret:
+              secretName: scylla-agent-config
+        agentVolumeMounts:
+          - name: agent-config
+            mountPath: /etc/scylla-manager-agent/scylla-manager-agent.yaml
+            subPath: scylla-manager-agent.yaml

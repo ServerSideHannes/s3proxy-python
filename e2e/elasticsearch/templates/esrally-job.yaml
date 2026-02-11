@@ -1,0 +1,52 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: geonames-loader
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: esrally
+        image: esrally:latest
+        imagePullPolicy: Never
+        env:
+        - name: ES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: ${CLUSTER_NAME}-es-elastic-user
+              key: elastic
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -e
+          ES_HOST="${CLUSTER_NAME}-es-http"
+          ES_URL="https://${ES_HOST}:9200"
+
+          echo "=== Waiting for Elasticsearch to be ready ==="
+          until curl -sk -u "elastic:${ES_PASSWORD}" "${ES_URL}/_cluster/health" | grep -q '"status":"green"\|"status":"yellow"'; do
+            echo "Waiting for ES cluster..."
+            sleep 5
+          done
+          echo "ES cluster is ready!"
+
+          echo "=== Running esrally geonames track ==="
+          esrally race \
+            --track=geonames \
+            --target-hosts="${ES_HOST}:9200" \
+            --pipeline=benchmark-only \
+            --client-options="use_ssl:true,verify_certs:false,basic_auth_user:'elastic',basic_auth_password:'${ES_PASSWORD}'" \
+            --include-tasks="delete-index,create-index,check-cluster-health,index-append,refresh-after-index,force-merge" \
+            --on-error=abort \
+            --kill-running-processes
+
+          echo "esrally completed!"
+        resources:
+          requests:
+            memory: 4Gi
+            cpu: 1
+          limits:
+            memory: 8Gi
+            cpu: 4

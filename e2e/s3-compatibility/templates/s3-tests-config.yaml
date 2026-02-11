@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: s3-tests-config
+data:
+  s3tests.conf: |
+    [DEFAULT]
+    # Use gateway hostname matching ingress rule
+    host = s3-gateway.s3proxy
+    port = 80
+    is_secure = False
+    ssl_verify = False
+
+    [fixtures]
+    bucket prefix = s3compat-{random}-
+
+    [s3 main]
+    user_id = testuser
+    display_name = Test User
+    email = testuser@example.com
+    access_key = minioadmin
+    secret_key = minioadmin
+    api_name = default
+
+    [s3 alt]
+    user_id = altuser
+    display_name = Alt User
+    email = altuser@example.com
+    access_key = minioadmin
+    secret_key = minioadmin
+
+    [s3 tenant]
+    user_id = tenantuser
+    display_name = Tenant User
+    email = tenantuser@example.com
+    access_key = minioadmin
+    secret_key = minioadmin
+    tenant = test
+
+    [iam]
+    access_key = minioadmin
+    secret_key = minioadmin
+    display_name = IAM User
+    user_id = iamuser
+    email = iamuser@example.com
+
+    [iam root]
+    access_key = minioadmin
+    secret_key = minioadmin
+    user_id = iamrootuser
+    email = iamroot@example.com
+
+    [iam alt root]
+    access_key = minioadmin
+    secret_key = minioadmin
+    user_id = iamaltrootuser
+    email = iamaltroot@example.com
+
+    [webidentity]
+    token =
+    aud =
+    thumbprint =
+    KC_REALM =

@@ -1,7 +1,7 @@
 """S3 proxy request handlers."""
 
 from .buckets import BucketHandlerMixin
-from .multipart_ops import MultipartHandlerMixin
+from .multipart import MultipartHandlerMixin
 from .objects import ObjectHandlerMixin
 
 
