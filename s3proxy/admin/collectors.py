@@ -33,7 +33,7 @@ ADMIN_TTL_SECONDS = 30
 class RateTracker:
     """Tracks counter snapshots over a sliding window to compute per-minute rates."""
 
-    def __init__(self, window_seconds: int = 300):
+    def __init__(self, window_seconds: int = 600):
         self._window = window_seconds
         self._snapshots: deque[tuple[float, dict[str, float]]] = deque()
 
@@ -55,8 +55,26 @@ class RateTracker:
         delta = newest_vals.get(key, 0) - oldest_vals.get(key, 0)
         return max(0.0, delta / elapsed * 60)
 
+    def history(self, key: str, max_points: int = 60) -> list[float]:
+        """Return per-minute rate history as a list of floats for sparklines."""
+        if len(self._snapshots) < 2:
+            return []
+        rates: list[float] = []
+        for i in range(1, len(self._snapshots)):
+            prev_ts, prev_vals = self._snapshots[i - 1]
+            curr_ts, curr_vals = self._snapshots[i]
+            elapsed = curr_ts - prev_ts
+            if elapsed < 0.1:
+                continue
+            delta = curr_vals.get(key, 0) - prev_vals.get(key, 0)
+            rates.append(round(max(0.0, delta / elapsed * 60), 1))
+        if len(rates) > max_points:
+            step = len(rates) / max_points
+            rates = [rates[int(i * step)] for i in range(max_points)]
+        return rates
 
-_rate_tracker = RateTracker(window_seconds=300)
+
+_rate_tracker = RateTracker(window_seconds=600)
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +195,13 @@ def collect_throughput() -> dict:
             "errors_4xx_per_min": round(_rate_tracker.rate_per_minute("errors_4xx"), 1),
             "errors_5xx_per_min": round(_rate_tracker.rate_per_minute("errors_5xx"), 1),
             "errors_503_per_min": round(_rate_tracker.rate_per_minute("errors_503"), 1),
+        },
+        "history": {
+            "requests_per_min": _rate_tracker.history("requests"),
+            "encrypt_per_min": _rate_tracker.history("encrypt_ops"),
+            "decrypt_per_min": _rate_tracker.history("decrypt_ops"),
+            "bytes_encrypted_per_min": _rate_tracker.history("bytes_encrypted"),
+            "bytes_decrypted_per_min": _rate_tracker.history("bytes_decrypted"),
         },
     }
 

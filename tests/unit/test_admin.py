@@ -161,6 +161,7 @@ class TestDashboardHTML:
         assert "S3Proxy Admin" in html
         assert "Health" in html
         assert "Throughput" in html
+        assert "Bandwidth" in html
         assert "Active Uploads" in html
 
     def test_no_sensitive_data_in_html(self, client, admin_credentials, admin_settings):
@@ -288,6 +289,10 @@ class TestCollectors:
         assert "errors_4xx_per_min" in rates
         assert "errors_5xx_per_min" in rates
         assert "errors_503_per_min" in rates
+        history = result["history"]
+        assert "requests_per_min" in history
+        assert "bytes_encrypted_per_min" in history
+        assert "bytes_decrypted_per_min" in history
 
     def test_format_bytes(self):
         assert _format_bytes(0) == "0 B"
@@ -343,6 +348,35 @@ class TestRateTracker:
         tracker.record({"x": 100.0})
         # Old entries beyond window + 10s buffer should be pruned
         assert len(tracker._snapshots) < 50
+
+    def test_history_empty(self):
+        tracker = RateTracker()
+        assert tracker.history("requests") == []
+
+    def test_history_single_snapshot(self):
+        tracker = RateTracker()
+        tracker.record({"requests": 100})
+        assert tracker.history("requests") == []
+
+    def test_history_computation(self):
+        tracker = RateTracker()
+        tracker._snapshots.clear()
+        # 3 snapshots 60s apart: 100→200→400
+        tracker._snapshots.append((1000.0, {"requests": 100}))
+        tracker._snapshots.append((1060.0, {"requests": 200}))
+        tracker._snapshots.append((1120.0, {"requests": 400}))
+        hist = tracker.history("requests")
+        assert len(hist) == 2
+        assert hist[0] == 100.0  # (200-100)/60*60
+        assert hist[1] == 200.0  # (400-200)/60*60
+
+    def test_history_downsampling(self):
+        tracker = RateTracker()
+        tracker._snapshots.clear()
+        for i in range(101):
+            tracker._snapshots.append((1000.0 + i * 3, {"x": float(i * 10)}))
+        hist = tracker.history("x", max_points=20)
+        assert len(hist) == 20
 
 
 # ============================================================================

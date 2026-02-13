@@ -70,6 +70,13 @@ td.num{font-variant-numeric:tabular-nums;text-align:right}
 .spinner{width:8px;height:8px;border:1.5px solid #30363d;border-top-color:#58a6ff;border-radius:50%;display:inline-block}
 .spinner.active{animation:spin 0.6s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
+
+canvas.sparkline{display:block;width:100%;height:24px;margin-top:6px}
+.bw-row{display:flex;align-items:center;gap:12px;padding:5px 0;border-bottom:1px solid #21262d}
+.bw-row:last-child{border-bottom:none}
+.bw-label{color:#8b949e;font-size:11px;width:56px;flex-shrink:0}
+canvas.bw-spark{display:block;flex:1;height:32px}
+.bw-val{color:#f0f6fc;font-size:12px;font-weight:500;width:100px;text-align:right;flex-shrink:0;font-variant-numeric:tabular-nums}
 </style>
 </head>
 <body>
@@ -93,7 +100,7 @@ td.num{font-variant-numeric:tabular-nums;text-align:right}
 <div class="section-title">Health <span class="section-tag">this pod</span></div>
 <div class="row"><span class="label">Memory</span><span class="value" id="memory">-</span></div>
 <div class="row"><span class="label">In-Flight</span><span class="value" id="in-flight">-</span></div>
-<div class="section-title" style="margin-top:10px;margin-bottom:6px">Errors <span class="section-tag">5 min rate</span></div>
+<div class="section-title" style="margin-top:10px;margin-bottom:6px">Errors <span class="section-tag">10 min rate</span></div>
 <div class="errors-row">
 <span class="err-item">4xx <span class="err-val" id="err-4xx">0</span>/min</span>
 <span class="err-item">5xx <span class="err-val" id="err-5xx">0</span>/min</span>
@@ -102,12 +109,18 @@ td.num{font-variant-numeric:tabular-nums;text-align:right}
 </div>
 
 <div class="section">
-<div class="section-title">Throughput <span class="section-tag">this pod &middot; 5 min rate</span></div>
+<div class="section-title">Throughput <span class="section-tag">this pod &middot; 10 min</span></div>
 <div class="throughput-grid">
-<div class="tp-item"><div class="tp-num" id="tp-req">0</div><div class="tp-unit">/min</div><div class="tp-label">requests</div></div>
-<div class="tp-item"><div class="tp-num" id="tp-enc">0</div><div class="tp-unit">/min &middot; <span id="tp-enc-bytes">0 B</span>/min</div><div class="tp-label">encrypt</div></div>
-<div class="tp-item"><div class="tp-num" id="tp-dec">0</div><div class="tp-unit">/min &middot; <span id="tp-dec-bytes">0 B</span>/min</div><div class="tp-label">decrypt</div></div>
+<div class="tp-item"><div class="tp-num" id="tp-req">0</div><div class="tp-unit">/min</div><div class="tp-label">requests</div><canvas class="sparkline" id="spark-req" height="24"></canvas></div>
+<div class="tp-item"><div class="tp-num" id="tp-enc">0</div><div class="tp-unit">/min &middot; <span id="tp-enc-bytes">0 B</span>/min</div><div class="tp-label">encrypt</div><canvas class="sparkline" id="spark-enc" height="24"></canvas></div>
+<div class="tp-item"><div class="tp-num" id="tp-dec">0</div><div class="tp-unit">/min &middot; <span id="tp-dec-bytes">0 B</span>/min</div><div class="tp-label">decrypt</div><canvas class="sparkline" id="spark-dec" height="24"></canvas></div>
 </div>
+</div>
+
+<div class="section">
+<div class="section-title">Bandwidth <span class="section-tag">this pod &middot; 10 min</span></div>
+<div class="bw-row"><span class="bw-label">encrypt</span><canvas class="bw-spark" id="spark-bw-enc" height="32"></canvas><span class="bw-val" id="bw-enc-val">0 B/min</span></div>
+<div class="bw-row"><span class="bw-label">decrypt</span><canvas class="bw-spark" id="spark-bw-dec" height="32"></canvas><span class="bw-val" id="bw-dec-val">0 B/min</span></div>
 </div>
 
 <div class="section">
@@ -128,6 +141,27 @@ function age(iso){
   if(s<3600)return Math.floor(s/60)+'m';
   if(s<86400)return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';
   return Math.floor(s/86400)+'d '+Math.floor((s%86400)/3600)+'h';
+}
+
+function drawSpark(id,data,color){
+  var c=document.getElementById(id);
+  if(!c)return;
+  var dpr=window.devicePixelRatio||1;
+  var w=c.offsetWidth,h=parseInt(c.getAttribute('height'))||24;
+  c.width=w*dpr;c.height=h*dpr;
+  var ctx=c.getContext('2d');
+  ctx.scale(dpr,dpr);
+  if(!data||data.length<2)return;
+  var mx=0;
+  for(var i=0;i<data.length;i++)if(data[i]>mx)mx=data[i];
+  if(!mx)return;
+  var bw=Math.max(1,Math.floor(w/data.length)-1);
+  ctx.fillStyle=color||'#3fb950';
+  for(var i=0;i<data.length;i++){
+    var bh=Math.round((data[i]/mx)*(h-2));
+    if(data[i]>0&&bh<1)bh=1;
+    ctx.fillRect(i*(bw+1),h-bh,bw,bh);
+  }
 }
 
 function updatePods(pods, currentPod){
@@ -175,6 +209,15 @@ function update(d){
   document.getElementById('tp-dec').textContent=t.decrypt_per_min||0;
   document.getElementById('tp-enc-bytes').textContent=f.bytes_encrypted_per_min||'0 B';
   document.getElementById('tp-dec-bytes').textContent=f.bytes_decrypted_per_min||'0 B';
+
+  var hist=(d.throughput||{}).history||{};
+  drawSpark('spark-req',hist.requests_per_min,'#3fb950');
+  drawSpark('spark-enc',hist.encrypt_per_min,'#3fb950');
+  drawSpark('spark-dec',hist.decrypt_per_min,'#58a6ff');
+  drawSpark('spark-bw-enc',hist.bytes_encrypted_per_min,'#3fb950');
+  drawSpark('spark-bw-dec',hist.bytes_decrypted_per_min,'#58a6ff');
+  document.getElementById('bw-enc-val').textContent=(f.bytes_encrypted_per_min||'0 B')+'/min';
+  document.getElementById('bw-dec-val').textContent=(f.bytes_decrypted_per_min||'0 B')+'/min';
 
   document.getElementById('upload-num').textContent=u.active_count||0;
   document.getElementById('uploads-source').textContent=pod.storage_backend==='In-memory'?'this pod':'cluster \\u00b7 Redis';
