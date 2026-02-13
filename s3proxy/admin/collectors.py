@@ -3,47 +3,76 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import time
+from collections import deque
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+import structlog
+
 from .. import metrics
-from ..state.redis import is_using_redis
+from ..state.redis import get_redis, is_using_redis
 
 if TYPE_CHECKING:
     from ..config import Settings
     from ..handlers import S3ProxyHandler
 
+logger = structlog.get_logger(__name__)
 
-def collect_key_status(settings: Settings) -> dict:
-    """Collect encryption key status. Never exposes raw key material."""
-    return {
-        "kek_fingerprint": hashlib.sha256(settings.kek).hexdigest()[:16],
-        "algorithm": "AES-256-GCM + AES-KWP",
-        "dek_tag_name": settings.dektag_name,
-    }
+ADMIN_KEY_PREFIX = "s3proxy:admin:"
+ADMIN_TTL_SECONDS = 30
 
 
-async def collect_upload_status(handler: S3ProxyHandler) -> dict:
-    """Collect active multipart upload status."""
-    uploads = await handler.multipart_manager.list_active_uploads()
-    return {
-        "active_count": len(uploads),
-        "uploads": uploads,
-    }
+# ---------------------------------------------------------------------------
+# Rate tracker — sliding window over Prometheus counters
+# ---------------------------------------------------------------------------
+
+
+class RateTracker:
+    """Tracks counter snapshots over a sliding window to compute per-minute rates."""
+
+    def __init__(self, window_seconds: int = 300):
+        self._window = window_seconds
+        self._snapshots: deque[tuple[float, dict[str, float]]] = deque()
+
+    def record(self, counters: dict[str, float]) -> None:
+        now = time.monotonic()
+        self._snapshots.append((now, counters))
+        cutoff = now - self._window - 10
+        while len(self._snapshots) > 2 and self._snapshots[0][0] < cutoff:
+            self._snapshots.popleft()
+
+    def rate_per_minute(self, key: str) -> float:
+        if len(self._snapshots) < 2:
+            return 0.0
+        oldest_ts, oldest_vals = self._snapshots[0]
+        newest_ts, newest_vals = self._snapshots[-1]
+        elapsed = newest_ts - oldest_ts
+        if elapsed < 1:
+            return 0.0
+        delta = newest_vals.get(key, 0) - oldest_vals.get(key, 0)
+        return max(0.0, delta / elapsed * 60)
+
+
+_rate_tracker = RateTracker(window_seconds=300)
+
+
+# ---------------------------------------------------------------------------
+# Prometheus helpers
+# ---------------------------------------------------------------------------
 
 
 def _read_gauge(gauge) -> float:
-    """Read current value from a Prometheus Gauge."""
     return gauge._value.get()
 
 
 def _read_counter(counter) -> float:
-    """Read current value from a Prometheus Counter."""
     return counter._value.get()
 
 
 def _read_labeled_counter_sum(counter) -> float:
-    """Sum all label combinations for a labeled counter."""
     total = 0.0
     for sample in counter.collect()[0].samples:
         if sample.name.endswith("_total"):
@@ -52,32 +81,66 @@ def _read_labeled_counter_sum(counter) -> float:
 
 
 def _read_labeled_gauge_sum(gauge) -> float:
-    """Sum all label combinations for a labeled gauge."""
     total = 0.0
     for sample in gauge.collect()[0].samples:
         total += sample.value
     return total
 
 
-def collect_system_health(start_time: float) -> dict:
-    """Collect system health metrics."""
+def _read_errors_by_class() -> tuple[float, float, float]:
+    """Read 4xx, 5xx, 503 counts from REQUEST_COUNT labels."""
+    errors_4xx = 0.0
+    errors_5xx = 0.0
+    errors_503 = 0.0
+    for sample in metrics.REQUEST_COUNT.collect()[0].samples:
+        if not sample.name.endswith("_total"):
+            continue
+        status = str(sample.labels.get("status", ""))
+        if status.startswith("4"):
+            errors_4xx += sample.value
+        elif status == "503":
+            errors_503 += sample.value
+            errors_5xx += sample.value
+        elif status.startswith("5"):
+            errors_5xx += sample.value
+    return errors_4xx, errors_5xx, errors_503
+
+
+# ---------------------------------------------------------------------------
+# Collectors
+# ---------------------------------------------------------------------------
+
+
+def collect_pod_identity(settings: Settings, start_time: float) -> dict:
+    """Collect pod identity for the header banner."""
+    return {
+        "pod_name": os.environ.get("HOSTNAME", "unknown"),
+        "uptime_seconds": int(time.monotonic() - start_time),
+        "storage_backend": "Redis (HA)" if is_using_redis() else "In-memory",
+        "kek_fingerprint": hashlib.sha256(settings.kek).hexdigest()[:16],
+    }
+
+
+def collect_health() -> dict:
+    """Collect health metrics with error counts."""
     memory_reserved = _read_gauge(metrics.MEMORY_RESERVED_BYTES)
     memory_limit = _read_gauge(metrics.MEMORY_LIMIT_BYTES)
     usage_pct = round(memory_reserved / memory_limit * 100, 1) if memory_limit > 0 else 0
+    errors_4xx, errors_5xx, errors_503 = _read_errors_by_class()
 
     return {
         "memory_reserved_bytes": int(memory_reserved),
         "memory_limit_bytes": int(memory_limit),
         "memory_usage_pct": usage_pct,
         "requests_in_flight": int(_read_labeled_gauge_sum(metrics.REQUESTS_IN_FLIGHT)),
-        "memory_rejections": int(_read_counter(metrics.MEMORY_REJECTIONS)),
-        "uptime_seconds": int(time.monotonic() - start_time),
-        "storage_backend": ("Redis (HA)" if is_using_redis() else "In-memory"),
+        "errors_4xx": int(errors_4xx),
+        "errors_5xx": int(errors_5xx),
+        "errors_503": int(errors_503),
     }
 
 
-def collect_request_stats() -> dict:
-    """Collect request statistics."""
+def collect_throughput() -> dict:
+    """Collect throughput counters and compute per-minute rates."""
     encrypt_ops = 0.0
     decrypt_ops = 0.0
     for sample in metrics.ENCRYPTION_OPERATIONS.collect()[0].samples:
@@ -87,13 +150,93 @@ def collect_request_stats() -> dict:
             elif sample.labels.get("operation") == "decrypt":
                 decrypt_ops = sample.value
 
-    return {
-        "total_requests": int(_read_labeled_counter_sum(metrics.REQUEST_COUNT)),
-        "encrypt_ops": int(encrypt_ops),
-        "decrypt_ops": int(decrypt_ops),
-        "bytes_encrypted": int(_read_counter(metrics.BYTES_ENCRYPTED)),
-        "bytes_decrypted": int(_read_counter(metrics.BYTES_DECRYPTED)),
+    total_requests = _read_labeled_counter_sum(metrics.REQUEST_COUNT)
+    bytes_encrypted = _read_counter(metrics.BYTES_ENCRYPTED)
+    bytes_decrypted = _read_counter(metrics.BYTES_DECRYPTED)
+    errors_4xx, errors_5xx, errors_503 = _read_errors_by_class()
+
+    counters = {
+        "requests": total_requests,
+        "encrypt_ops": encrypt_ops,
+        "decrypt_ops": decrypt_ops,
+        "bytes_encrypted": bytes_encrypted,
+        "bytes_decrypted": bytes_decrypted,
+        "errors_4xx": errors_4xx,
+        "errors_5xx": errors_5xx,
+        "errors_503": errors_503,
     }
+    _rate_tracker.record(counters)
+
+    return {
+        "rates": {
+            "requests_per_min": round(_rate_tracker.rate_per_minute("requests"), 1),
+            "encrypt_per_min": round(_rate_tracker.rate_per_minute("encrypt_ops"), 1),
+            "decrypt_per_min": round(_rate_tracker.rate_per_minute("decrypt_ops"), 1),
+            "bytes_encrypted_per_min": int(_rate_tracker.rate_per_minute("bytes_encrypted")),
+            "bytes_decrypted_per_min": int(_rate_tracker.rate_per_minute("bytes_decrypted")),
+            "errors_4xx_per_min": round(_rate_tracker.rate_per_minute("errors_4xx"), 1),
+            "errors_5xx_per_min": round(_rate_tracker.rate_per_minute("errors_5xx"), 1),
+            "errors_503_per_min": round(_rate_tracker.rate_per_minute("errors_503"), 1),
+        },
+    }
+
+
+async def collect_upload_status(handler: S3ProxyHandler) -> dict:
+    """Collect active multipart upload status with stale detection."""
+    uploads = await handler.multipart_manager.list_active_uploads()
+    now = datetime.now(UTC)
+    for upload in uploads:
+        created = datetime.fromisoformat(upload["created_at"])
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=UTC)
+        age_seconds = (now - created).total_seconds()
+        upload["is_stale"] = age_seconds > 1800
+        upload["total_plaintext_size_formatted"] = _format_bytes(upload["total_plaintext_size"])
+    return {
+        "active_count": len(uploads),
+        "uploads": uploads,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Redis pod metrics publishing (multi-pod view)
+# ---------------------------------------------------------------------------
+
+
+async def publish_pod_metrics(pod_data: dict) -> None:
+    """Publish this pod's metrics to Redis so other pods can read them."""
+    if not is_using_redis():
+        return
+    try:
+        client = get_redis()
+        pod_name = pod_data["pod"]["pod_name"]
+        key = f"{ADMIN_KEY_PREFIX}{pod_name}"
+        await client.set(key, json.dumps(pod_data).encode(), ex=ADMIN_TTL_SECONDS)
+    except Exception:
+        logger.debug("Failed to publish pod metrics to Redis", exc_info=True)
+
+
+async def read_all_pod_metrics() -> list[dict]:
+    """Read all pods' metrics from Redis. Returns empty list if not using Redis."""
+    if not is_using_redis():
+        return []
+    try:
+        client = get_redis()
+        pods = []
+        async for key in client.scan_iter(match=f"{ADMIN_KEY_PREFIX}*", count=100):
+            data = await client.get(key)
+            if data:
+                pods.append(json.loads(data))
+        pods.sort(key=lambda p: p.get("pod", {}).get("pod_name", ""))
+        return pods
+    except Exception:
+        logger.debug("Failed to read pod metrics from Redis", exc_info=True)
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Formatters
+# ---------------------------------------------------------------------------
 
 
 def _format_bytes(n: int) -> str:
@@ -119,25 +262,47 @@ def _format_uptime(seconds: int) -> str:
     return " ".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# Aggregate
+# ---------------------------------------------------------------------------
+
+
 async def collect_all(
     settings: Settings,
     handler: S3ProxyHandler,
     start_time: float,
 ) -> dict:
-    """Collect all dashboard data."""
+    """Collect all dashboard data and publish to Redis for multi-pod view."""
+    pod = collect_pod_identity(settings, start_time)
+    health = collect_health()
+    throughput = collect_throughput()
     upload_status = await collect_upload_status(handler)
-    health = collect_system_health(start_time)
-    stats = collect_request_stats()
-    return {
-        "key_status": collect_key_status(settings),
-        "upload_status": upload_status,
-        "system_health": health,
-        "request_stats": stats,
+
+    local_data = {
+        "pod": pod,
+        "health": health,
+        "throughput": throughput,
         "formatted": {
             "memory_reserved": _format_bytes(health["memory_reserved_bytes"]),
             "memory_limit": _format_bytes(health["memory_limit_bytes"]),
-            "uptime": _format_uptime(health["uptime_seconds"]),
-            "bytes_encrypted": _format_bytes(stats["bytes_encrypted"]),
-            "bytes_decrypted": _format_bytes(stats["bytes_decrypted"]),
+            "uptime": _format_uptime(pod["uptime_seconds"]),
+            "bytes_encrypted_per_min": _format_bytes(
+                throughput["rates"]["bytes_encrypted_per_min"]
+            ),
+            "bytes_decrypted_per_min": _format_bytes(
+                throughput["rates"]["bytes_decrypted_per_min"]
+            ),
         },
+    }
+
+    # Publish this pod's data to Redis (fire-and-forget for other pods to see)
+    await publish_pod_metrics(local_data)
+
+    # Read all pods from Redis (includes this pod's just-published data)
+    all_pods = await read_all_pod_metrics()
+
+    return {
+        **local_data,
+        "uploads": upload_status,
+        "all_pods": all_pods,
     }

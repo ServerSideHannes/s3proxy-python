@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, Request
@@ -31,6 +32,9 @@ def create_admin_router(settings: Settings, credentials_store: dict[str, str]) -
             request.app.state.handler,
             request.app.state.start_time,
         )
-        return JSONResponse(data)
+        return JSONResponse(
+            data,
+            headers={"X-Served-By": os.environ.get("HOSTNAME", "unknown")},
+        )
 
     return router

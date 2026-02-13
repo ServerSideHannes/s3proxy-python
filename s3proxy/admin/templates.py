@@ -9,107 +9,200 @@ DASHBOARD_HTML = """\
 <title>S3Proxy Admin</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#0f1117;color:#c9d1d9;font-family:'SF Mono',Menlo,Consolas,monospace;font-size:14px;padding:24px;max-width:900px;margin:0 auto}
-h1{font-size:18px;color:#f0f6fc;margin-bottom:4px}
-.subtitle{color:#8b949e;font-size:12px;margin-bottom:24px}
-.refresh-badge{display:inline-block;background:#1c2128;border:1px solid #30363d;border-radius:4px;padding:2px 8px;font-size:11px;color:#8b949e}
+body{background:#0f1117;color:#c9d1d9;font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;padding:20px;max-width:960px;margin:0 auto}
+
+.header{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:16px}
+.header-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+.pod-name{font-size:16px;color:#f0f6fc;font-weight:700}
+.header-meta{color:#8b949e;font-size:12px;margin-top:2px}
+.header-meta span{margin-right:16px}
+.kek{color:#7ee787}
+.tip{color:#484f58;font-size:11px;margin-top:8px;border-top:1px solid #21262d;padding-top:8px}
+
 .section{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:16px}
-.section-title{font-size:13px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;font-weight:600}
-.row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #21262d}
+.section-title{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px;font-weight:600;display:flex;justify-content:space-between;align-items:center}
+.section-tag{font-size:10px;color:#484f58;text-transform:none;letter-spacing:0;font-weight:400}
+.section.warning{border-left:3px solid #f85149}
+.section.caution{border-left:3px solid #d29922}
+
+.row{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #21262d}
 .row:last-child{border-bottom:none}
 .label{color:#8b949e}
 .value{color:#f0f6fc;font-weight:500}
-.bar-container{width:120px;height:8px;background:#21262d;border-radius:4px;display:inline-block;vertical-align:middle;margin-left:8px}
-.bar-fill{height:100%;border-radius:4px;transition:width 0.3s}
+
+.bar-container{width:100px;height:6px;background:#21262d;border-radius:3px;display:inline-block;vertical-align:middle;margin-left:8px}
+.bar-fill{height:100%;border-radius:3px;transition:width 0.5s ease}
 .bar-green{background:#3fb950}
 .bar-yellow{background:#d29922}
 .bar-red{background:#f85149}
+
+.errors-row{display:flex;gap:20px;padding:5px 0}
+.errors-row .err-item{color:#8b949e}
+.errors-row .err-val{font-weight:500}
+.err-val.hot{color:#f85149}
+
+.throughput-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+.tp-item{text-align:center;padding:8px;background:#0f1117;border-radius:6px}
+.tp-num{font-size:18px;color:#f0f6fc;font-weight:700;font-variant-numeric:tabular-nums}
+.tp-unit{font-size:10px;color:#8b949e;margin-top:2px}
+.tp-label{font-size:11px;color:#8b949e;margin-top:4px}
+
 table{width:100%;border-collapse:collapse;margin-top:8px}
-th{text-align:left;color:#8b949e;font-weight:500;padding:6px 8px;border-bottom:1px solid #30363d;font-size:12px}
-td{padding:6px 8px;border-bottom:1px solid #21262d;color:#c9d1d9}
+th{text-align:left;color:#8b949e;font-weight:500;padding:5px 8px;border-bottom:1px solid #30363d;font-size:11px}
+td{padding:5px 8px;border-bottom:1px solid #21262d;color:#c9d1d9;font-size:12px}
+td.num{font-variant-numeric:tabular-nums;text-align:right}
+.stale{color:#d29922}
 .empty{color:#484f58;font-style:italic;padding:12px 0}
-.num{font-variant-numeric:tabular-nums}
-#status-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#3fb950;margin-right:6px}
+
+.pods-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;margin-bottom:16px}
+.pod-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px}
+.pod-card.current{border-color:#58a6ff}
+.pod-card .pc-name{font-size:12px;color:#f0f6fc;font-weight:600;margin-bottom:6px;display:flex;justify-content:space-between}
+.pod-card .pc-uptime{color:#8b949e;font-weight:400;font-size:11px}
+.pod-card .pc-row{display:flex;justify-content:space-between;font-size:11px;padding:2px 0;color:#8b949e}
+.pod-card .pc-val{color:#c9d1d9}
+.pod-card .pc-bar{width:100%;height:4px;background:#21262d;border-radius:2px;margin:4px 0}
+.pod-card .pc-bar-fill{height:100%;border-radius:2px;transition:width 0.5s ease}
+.pod-card.warning{border-left:3px solid #f85149}
+
+#status-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#3fb950;margin-right:4px;transition:background 0.3s}
+.refresh-badge{font-size:10px;color:#484f58;display:flex;align-items:center;gap:4px}
+.spinner{width:8px;height:8px;border:1.5px solid #30363d;border-top-color:#58a6ff;border-radius:50%;display:inline-block}
+.spinner.active{animation:spin 0.6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 </style>
 </head>
 <body>
-<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px">
-<div><h1><span id="status-dot"></span>S3Proxy Admin</h1><div class="subtitle">Encryption proxy dashboard</div></div>
-<div class="refresh-badge">auto-refresh: 10s</div>
+
+<div class="header">
+<div class="header-top">
+<div><span id="status-dot"></span><span class="pod-name" id="pod-name">loading...</span></div>
+<div class="refresh-badge"><span class="spinner" id="spinner"></span> <span id="refresh-label">3s</span></div>
+</div>
+<div class="header-meta">
+<span>uptime <strong id="uptime">-</strong></span>
+<span>KEK <strong class="kek" id="kek-fp">-</strong></span>
+<span id="storage-label">-</span>
+</div>
+<div class="tip" id="tip-line">Served by this pod. Other pods publish metrics via Redis.</div>
+</div>
+
+<div class="pods-grid" id="pods-grid"></div>
+
+<div class="section" id="health-section">
+<div class="section-title">Health <span class="section-tag">this pod</span></div>
+<div class="row"><span class="label">Memory</span><span class="value" id="memory">-</span></div>
+<div class="row"><span class="label">In-Flight</span><span class="value" id="in-flight">-</span></div>
+<div class="section-title" style="margin-top:10px;margin-bottom:6px">Errors <span class="section-tag">5 min rate</span></div>
+<div class="errors-row">
+<span class="err-item">4xx <span class="err-val" id="err-4xx">0</span>/min</span>
+<span class="err-item">5xx <span class="err-val" id="err-5xx">0</span>/min</span>
+<span class="err-item">503 <span class="err-val" id="err-503">0</span>/min</span>
+</div>
 </div>
 
 <div class="section">
-<div class="section-title">Key Status</div>
-<div class="row"><span class="label">KEK Fingerprint</span><span class="value" id="kek-fp"></span></div>
-<div class="row"><span class="label">Algorithm</span><span class="value" id="algo"></span></div>
-<div class="row"><span class="label">DEK Tag Name</span><span class="value" id="dek-tag"></span></div>
+<div class="section-title">Throughput <span class="section-tag">this pod &middot; 5 min rate</span></div>
+<div class="throughput-grid">
+<div class="tp-item"><div class="tp-num" id="tp-req">0</div><div class="tp-unit">/min</div><div class="tp-label">requests</div></div>
+<div class="tp-item"><div class="tp-num" id="tp-enc">0</div><div class="tp-unit">/min &middot; <span id="tp-enc-bytes">0 B</span>/min</div><div class="tp-label">encrypt</div></div>
+<div class="tp-item"><div class="tp-num" id="tp-dec">0</div><div class="tp-unit">/min &middot; <span id="tp-dec-bytes">0 B</span>/min</div><div class="tp-label">decrypt</div></div>
+</div>
 </div>
 
 <div class="section">
-<div class="section-title">Active Uploads</div>
-<div class="row"><span class="label">Count</span><span class="value num" id="upload-count"></span></div>
+<div class="section-title">Active Uploads <span class="section-tag" id="uploads-source">cluster &middot; Redis</span></div>
+<div id="upload-count" style="margin-bottom:6px;color:#8b949e"><span class="value" id="upload-num">0</span> active</div>
 <div id="uploads-table"></div>
 </div>
 
-<div class="section">
-<div class="section-title">System Health</div>
-<div class="row"><span class="label">Memory</span><span class="value" id="memory"></span></div>
-<div class="row"><span class="label">In-Flight Requests</span><span class="value num" id="in-flight"></span></div>
-<div class="row"><span class="label">503 Rejections</span><span class="value num" id="rejections"></span></div>
-<div class="row"><span class="label">Uptime</span><span class="value" id="uptime"></span></div>
-<div class="row"><span class="label">Storage Backend</span><span class="value" id="storage"></span></div>
-</div>
-
-<div class="section">
-<div class="section-title">Request Stats</div>
-<div class="row"><span class="label">Total Requests</span><span class="value num" id="total-req"></span></div>
-<div class="row"><span class="label">Encrypt Ops</span><span class="value num" id="encrypt-ops"></span></div>
-<div class="row"><span class="label">Decrypt Ops</span><span class="value num" id="decrypt-ops"></span></div>
-<div class="row"><span class="label">Bytes Encrypted</span><span class="value" id="bytes-enc"></span></div>
-<div class="row"><span class="label">Bytes Decrypted</span><span class="value" id="bytes-dec"></span></div>
-</div>
-
 <script>
-function fmt(n){return n.toLocaleString()}
-function barClass(pct){return pct>80?'bar-red':pct>50?'bar-yellow':'bar-green'}
-function bar(pct){return '<div class="bar-container"><div class="bar-fill '+barClass(pct)+'" style="width:'+Math.min(pct,100)+'%"></div></div>'}
+function barClass(p){return p>80?'bar-red':p>50?'bar-yellow':'bar-green'}
+function bar(p){return '<div class="bar-container"><div class="bar-fill '+barClass(p)+'" style="width:'+Math.min(p,100)+'%"></div></div>'}
+function miniBar(p){return '<div class="pc-bar"><div class="pc-bar-fill '+barClass(p)+'" style="width:'+Math.min(p,100)+'%"></div></div>'}
 function age(iso){
+  if(!iso)return'-';
   var s=Math.floor((Date.now()-new Date(iso+'Z'))/1000);
+  if(s<0)s=0;
   if(s<60)return s+'s';
   if(s<3600)return Math.floor(s/60)+'m';
   if(s<86400)return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';
   return Math.floor(s/86400)+'d '+Math.floor((s%86400)/3600)+'h';
 }
-function update(d){
-  var k=d.key_status,u=d.upload_status,h=d.system_health,r=d.request_stats,f=d.formatted;
-  document.getElementById('kek-fp').textContent=k.kek_fingerprint;
-  document.getElementById('algo').textContent=k.algorithm;
-  document.getElementById('dek-tag').textContent=k.dek_tag_name;
-  document.getElementById('upload-count').textContent=u.active_count;
-  var ut=document.getElementById('uploads-table');
-  if(u.uploads.length===0){ut.innerHTML='<div class="empty">No active uploads</div>';}
-  else{var h2='<table><tr><th>Bucket</th><th>Key</th><th>Parts</th><th>Size</th><th>Age</th></tr>';
-    u.uploads.forEach(function(up){h2+='<tr><td>'+up.bucket+'</td><td>'+up.key+'</td><td class="num">'+up.parts_count+'</td><td class="num">'+up.total_plaintext_size+'</td><td>'+age(up.created_at)+'</td></tr>';});
-    h2+='</table>';ut.innerHTML=h2;}
-  document.getElementById('memory').innerHTML=f.memory_reserved+' / '+f.memory_limit+' ('+h.memory_usage_pct+'%)'+bar(h.memory_usage_pct);
-  document.getElementById('in-flight').textContent=fmt(h.requests_in_flight);
-  document.getElementById('rejections').textContent=fmt(h.memory_rejections);
-  document.getElementById('uptime').textContent=f.uptime;
-  document.getElementById('storage').textContent=h.storage_backend;
-  document.getElementById('total-req').textContent=fmt(r.total_requests);
-  document.getElementById('encrypt-ops').textContent=fmt(r.encrypt_ops);
-  document.getElementById('decrypt-ops').textContent=fmt(r.decrypt_ops);
-  document.getElementById('bytes-enc').textContent=f.bytes_encrypted;
-  document.getElementById('bytes-dec').textContent=f.bytes_decrypted;
+
+function updatePods(pods, currentPod){
+  var grid=document.getElementById('pods-grid');
+  if(!pods||pods.length<=1){grid.innerHTML='';return;}
+  var html='';
+  pods.forEach(function(p){
+    var pod=p.pod||{},h=p.health||{},t=(p.throughput||{}).rates||{},f=p.formatted||{};
+    var isCurrent=pod.pod_name===currentPod;
+    var hasErrors=(t.errors_5xx_per_min||0)>0||(t.errors_503_per_min||0)>0;
+    var cls='pod-card'+(isCurrent?' current':'')+(hasErrors?' warning':'');
+    html+='<div class="'+cls+'">';
+    html+='<div class="pc-name"><span>'+pod.pod_name+'</span><span class="pc-uptime">'+(f.uptime||'-')+'</span></div>';
+    html+=miniBar(h.memory_usage_pct||0);
+    html+='<div class="pc-row"><span>Memory</span><span class="pc-val">'+(f.memory_reserved||'0 B')+' / '+(f.memory_limit||'0 B')+' ('+(h.memory_usage_pct||0)+'%)</span></div>';
+    html+='<div class="pc-row"><span>In-Flight</span><span class="pc-val">'+(h.requests_in_flight||0)+'</span></div>';
+    html+='<div class="pc-row"><span>Throughput</span><span class="pc-val">'+(t.requests_per_min||0)+'/min</span></div>';
+    if(hasErrors)html+='<div class="pc-row"><span>Errors</span><span class="pc-val hot">5xx:'+(t.errors_5xx_per_min||0)+' 503:'+(t.errors_503_per_min||0)+'</span></div>';
+    html+='</div>';
+  });
+  grid.innerHTML=html;
 }
+
+function update(d){
+  var pod=d.pod||{},h=d.health||{},t=(d.throughput||{}).rates||{},f=d.formatted||{},u=d.uploads||{};
+  document.getElementById('pod-name').textContent=pod.pod_name||'unknown';
+  document.getElementById('uptime').textContent=f.uptime||'-';
+  document.getElementById('kek-fp').textContent=pod.kek_fingerprint||'-';
+  document.getElementById('storage-label').textContent=pod.storage_backend||'-';
+  document.getElementById('memory').innerHTML=(f.memory_reserved||'0 B')+' / '+(f.memory_limit||'0 B')+' ('+(h.memory_usage_pct||0)+'%)'+bar(h.memory_usage_pct||0);
+  document.getElementById('in-flight').textContent=h.requests_in_flight||0;
+
+  var e4=document.getElementById('err-4xx'),e5=document.getElementById('err-5xx'),e503=document.getElementById('err-503');
+  e4.textContent=t.errors_4xx_per_min||0;
+  e5.textContent=t.errors_5xx_per_min||0;
+  e503.textContent=t.errors_503_per_min||0;
+  e5.className='err-val'+((t.errors_5xx_per_min||0)>0?' hot':'');
+  e503.className='err-val'+((t.errors_503_per_min||0)>0?' hot':'');
+
+  var hs=document.getElementById('health-section');
+  hs.className='section'+((t.errors_5xx_per_min||0)>0?' warning':((t.errors_4xx_per_min||0)>0?' caution':''));
+
+  document.getElementById('tp-req').textContent=t.requests_per_min||0;
+  document.getElementById('tp-enc').textContent=t.encrypt_per_min||0;
+  document.getElementById('tp-dec').textContent=t.decrypt_per_min||0;
+  document.getElementById('tp-enc-bytes').textContent=f.bytes_encrypted_per_min||'0 B';
+  document.getElementById('tp-dec-bytes').textContent=f.bytes_decrypted_per_min||'0 B';
+
+  document.getElementById('upload-num').textContent=u.active_count||0;
+  document.getElementById('uploads-source').textContent=pod.storage_backend==='In-memory'?'this pod':'cluster \\u00b7 Redis';
+  var ut=document.getElementById('uploads-table');
+  if(!u.uploads||u.uploads.length===0){ut.innerHTML='<div class="empty">No active uploads</div>';}
+  else{var h2='<table><tr><th>Bucket</th><th>Key</th><th style="text-align:right">Parts</th><th style="text-align:right">Size</th><th style="text-align:right">Age</th></tr>';
+    u.uploads.forEach(function(up){
+      var stale=up.is_stale?' class="stale"':'';
+      h2+='<tr><td>'+up.bucket+'</td><td>'+up.key+'</td><td class="num">'+up.parts_count+'</td><td class="num">'+(up.total_plaintext_size_formatted||up.total_plaintext_size)+'</td><td class="num"'+stale+'>'+age(up.created_at)+(up.is_stale?' \\u26a0':'')+'</td></tr>';
+    });
+    h2+='</table>';ut.innerHTML=h2;}
+
+  updatePods(d.all_pods||[], pod.pod_name);
+
+  var dot=document.getElementById('status-dot');
+  dot.style.background=(t.errors_5xx_per_min||0)>0?'#f85149':((t.errors_4xx_per_min||0)>0?'#d29922':'#3fb950');
+}
+
 function refresh(){
+  var sp=document.getElementById('spinner');
+  sp.className='spinner active';
   fetch('api/status',{credentials:'same-origin'})
     .then(function(r){return r.json()})
-    .then(update)
-    .catch(function(){});
+    .then(function(d){update(d);sp.className='spinner';})
+    .catch(function(){sp.className='spinner';});
 }
 refresh();
-setInterval(refresh,10000);
+setInterval(refresh,3000);
 </script>
 </body>
 </html>
