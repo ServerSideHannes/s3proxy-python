@@ -17,4 +17,6 @@ data:
   S3PROXY_REDIS_URL: {{ .Values.externalRedis.url | quote }}
   {{- end }}
   S3PROXY_REDIS_UPLOAD_TTL_HOURS: {{ .Values.externalRedis.uploadTtlHours | quote }}
+  S3PROXY_ADMIN_UI: {{ .Values.admin.enabled | quote }}
+  S3PROXY_ADMIN_PATH: {{ .Values.admin.path | quote }}
   S3PROXY_LOG_LEVEL: {{ .Values.logLevel | quote }}

@@ -18,6 +18,8 @@ services:
     privileged: true
     depends_on:
       - registry
+    ports:
+      - "4433:4433"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ..:/repo
@@ -437,7 +439,8 @@ services:
           --set redis-ha.haproxy.checkInterval=5s \
           --set redis-ha.haproxy.timeout.check=10s \
           --set redis-ha.haproxy.timeout.server=60s \
-          --set redis-ha.haproxy.timeout.client=60s &
+          --set redis-ha.haproxy.timeout.client=60s \
+          --set admin.enabled=true &
         S3PROXY_PID=$$!
 
         # 8. Wait for ALL parallel tasks
@@ -464,10 +467,16 @@ services:
         echo "S3 Proxy endpoint for databases: http://s3-gateway.s3proxy.svc.cluster.local:80"
         echo "Direct MinIO (unencrypted):      http://minio.minio.svc.cluster.local:9000"
 
+        # Start admin dashboard port-forward in background
+        kubectl port-forward --address 0.0.0.0 svc/s3proxy-python 4433:4433 -n s3proxy &
+
         echo ""
         echo "=========================================="
         echo "Cluster is ready"
         echo "=========================================="
+        echo ""
+        echo "Admin dashboard: http://localhost:4433/admin/"
+        echo "Login: minioadmin / minioadmin"
         echo ""
         echo "Run database tests with:"
         echo "  ./cluster.sh postgres"
