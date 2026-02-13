@@ -49,6 +49,11 @@ class StateStore(ABC):
         ...
 
     @abstractmethod
+    async def list_keys(self) -> list[str]:
+        """List all stored keys."""
+        ...
+
+    @abstractmethod
     async def update(self, key: str, updater: Updater, ttl_seconds: int) -> bytes | None:
         """Atomically update value using updater function.
 
@@ -68,6 +73,9 @@ class MemoryStateStore(StateStore):
 
     def __init__(self) -> None:
         self._store: dict[str, bytes] = {}
+
+    async def list_keys(self) -> list[str]:
+        return list(self._store.keys())
 
     async def get(self, key: str) -> bytes | None:
         return self._store.get(key)
@@ -107,6 +115,13 @@ class RedisStateStore(StateStore):
     def _key(self, key: str) -> str:
         """Get prefixed key."""
         return f"{self._prefix}{key}"
+
+    async def list_keys(self) -> list[str]:
+        keys: list[str] = []
+        async for key in self._client.scan_iter(match=f"{self._prefix}*", count=100):
+            k = key.decode() if isinstance(key, bytes) else key
+            keys.append(k.removeprefix(self._prefix))
+        return keys
 
     async def get(self, key: str) -> bytes | None:
         return await self._client.get(self._key(key))

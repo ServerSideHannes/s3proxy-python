@@ -49,6 +49,16 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = Field(default="INFO", description="Log level (DEBUG, INFO, WARNING, ERROR)")
 
+    # Admin dashboard settings
+    admin_ui: bool = Field(default=False, description="Enable admin dashboard")
+    admin_path: str = Field(default="/admin", description="URL path prefix for admin dashboard")
+    admin_username: str = Field(
+        default="", description="Admin dashboard username (default: AWS access key)"
+    )
+    admin_password: str = Field(
+        default="", description="Admin dashboard password (default: AWS secret key)"
+    )
+
     # Cached KEK derived from encrypt_key (computed once in model_post_init)
     _kek: bytes = PrivateAttr()
 

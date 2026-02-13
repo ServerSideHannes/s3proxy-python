@@ -44,6 +44,29 @@ class MultipartStateManager:
         """Generate storage key for upload state."""
         return f"{bucket}:{key}:{upload_id}"
 
+    async def list_active_uploads(self) -> list[dict]:
+        """List active uploads for admin dashboard. DEKs are never exposed."""
+        keys = await self._store.list_keys()
+        uploads = []
+        for key in keys:
+            data = await self._store.get(key)
+            if data is None:
+                continue
+            state = deserialize_upload_state(data)
+            if state is None:
+                continue
+            uploads.append(
+                {
+                    "bucket": state.bucket,
+                    "key": state.key,
+                    "upload_id": self._truncate_id(state.upload_id),
+                    "parts_count": len(state.parts),
+                    "created_at": state.created_at.isoformat(),
+                    "total_plaintext_size": state.total_plaintext_size,
+                }
+            )
+        return uploads
+
     async def create_upload(
         self,
         bucket: str,
