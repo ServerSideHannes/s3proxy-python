@@ -9,7 +9,7 @@ DASHBOARD_HTML = """\
 <title>S3Proxy Admin</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#0f1117;color:#c9d1d9;font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;padding:20px;max-width:960px;margin:0 auto}
+body{background:#0f1117;color:#f0f6fc;font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;padding:20px;max-width:960px;margin:0 auto}
 
 .header{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:16px}
 .header-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
@@ -17,7 +17,10 @@ body{background:#0f1117;color:#c9d1d9;font-family:'SF Mono',Menlo,Consolas,monos
 .header-meta{color:#8b949e;font-size:12px;margin-top:2px}
 .header-meta span{margin-right:16px}
 .kek{color:#7ee787}
-.tip{color:#484f58;font-size:11px;margin-top:8px;border-top:1px solid #21262d;padding-top:8px}
+.pods-bar{display:none;flex-wrap:wrap;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid #21262d}
+.pod-badge{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;background:#0f1117;border:1px solid #30363d;border-radius:4px;font-size:11px;color:#8b949e}
+.pod-badge.current{border-color:#58a6ff;color:#f0f6fc}
+.pod-badge .pb-dot{width:5px;height:5px;border-radius:50%;flex-shrink:0}
 
 .section{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:16px}
 .section-title{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px;font-weight:600;display:flex;justify-content:space-between;align-items:center}
@@ -38,7 +41,7 @@ body{background:#0f1117;color:#c9d1d9;font-family:'SF Mono',Menlo,Consolas,monos
 
 .errors-row{display:flex;gap:20px;padding:5px 0}
 .errors-row .err-item{color:#8b949e}
-.errors-row .err-val{font-weight:500}
+.errors-row .err-val{font-weight:500;color:#f0f6fc}
 .err-val.hot{color:#f85149}
 
 .throughput-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
@@ -46,37 +49,38 @@ body{background:#0f1117;color:#c9d1d9;font-family:'SF Mono',Menlo,Consolas,monos
 .tp-num{font-size:18px;color:#f0f6fc;font-weight:700;font-variant-numeric:tabular-nums}
 .tp-unit{font-size:10px;color:#8b949e;margin-top:2px}
 .tp-label{font-size:11px;color:#8b949e;margin-top:4px}
+canvas.sparkline{display:block;width:100%;height:24px;margin-top:6px}
 
-table{width:100%;border-collapse:collapse;margin-top:8px}
-th{text-align:left;color:#8b949e;font-weight:500;padding:5px 8px;border-bottom:1px solid #30363d;font-size:11px}
-td{padding:5px 8px;border-bottom:1px solid #21262d;color:#c9d1d9;font-size:12px}
-td.num{font-variant-numeric:tabular-nums;text-align:right}
-.stale{color:#d29922}
+.feed-wrap{max-height:400px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#30363d #0f1117}
+.feed-wrap::-webkit-scrollbar{width:6px}
+.feed-wrap::-webkit-scrollbar-track{background:#0f1117}
+.feed-wrap::-webkit-scrollbar-thumb{background:#30363d;border-radius:3px}
+.feed-table{width:100%;border-collapse:collapse}
+.feed-table th{position:sticky;top:0;background:#161b22;z-index:1;text-align:left;color:#8b949e;font-weight:500;padding:4px 6px;border-bottom:1px solid #30363d;font-size:11px}
+.feed-table td{padding:3px 6px;border-bottom:1px solid #1c2128;font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.feed-table tr.new-row{animation:rowIn 0.5s ease}
+@keyframes rowIn{from{background:rgba(63,185,80,0.1)}to{background:transparent}}
+.method-get{color:#58a6ff}
+.method-put{color:#3fb950}
+.method-del{color:#f85149}
+.method-other{color:#8b949e}
+.status-2xx{color:#3fb950}
+.status-4xx{color:#d29922}
+.status-5xx{color:#f85149}
+.latency-warn{color:#d29922}
+.latency-bad{color:#f85149}
+.path-cell{max-width:220px;overflow:hidden;text-overflow:ellipsis}
+.crypto-badge{font-size:10px;padding:1px 4px;border-radius:3px;font-weight:600;letter-spacing:0.5px}
+.crypto-enc{background:#1c3a2a;color:#3fb950}
+.crypto-dec{background:#172030;color:#58a6ff}
 .empty{color:#484f58;font-style:italic;padding:12px 0}
-
-.pods-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;margin-bottom:16px}
-.pod-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px}
-.pod-card.current{border-color:#58a6ff}
-.pod-card .pc-name{font-size:12px;color:#f0f6fc;font-weight:600;margin-bottom:6px;display:flex;justify-content:space-between}
-.pod-card .pc-uptime{color:#8b949e;font-weight:400;font-size:11px}
-.pod-card .pc-row{display:flex;justify-content:space-between;font-size:11px;padding:2px 0;color:#8b949e}
-.pod-card .pc-val{color:#c9d1d9}
-.pod-card .pc-bar{width:100%;height:4px;background:#21262d;border-radius:2px;margin:4px 0}
-.pod-card .pc-bar-fill{height:100%;border-radius:2px;transition:width 0.5s ease}
-.pod-card.warning{border-left:3px solid #f85149}
+td.r{text-align:right}
 
 #status-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#3fb950;margin-right:4px;transition:background 0.3s}
 .refresh-badge{font-size:10px;color:#484f58;display:flex;align-items:center;gap:4px}
 .spinner{width:8px;height:8px;border:1.5px solid #30363d;border-top-color:#58a6ff;border-radius:50%;display:inline-block}
 .spinner.active{animation:spin 0.6s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
-
-canvas.sparkline{display:block;width:100%;height:24px;margin-top:6px}
-.bw-row{display:flex;align-items:center;gap:12px;padding:5px 0;border-bottom:1px solid #21262d}
-.bw-row:last-child{border-bottom:none}
-.bw-label{color:#8b949e;font-size:11px;width:56px;flex-shrink:0}
-canvas.bw-spark{display:block;flex:1;height:32px}
-.bw-val{color:#f0f6fc;font-size:12px;font-weight:500;width:100px;text-align:right;flex-shrink:0;font-variant-numeric:tabular-nums}
 </style>
 </head>
 <body>
@@ -91,10 +95,8 @@ canvas.bw-spark{display:block;flex:1;height:32px}
 <span>KEK <strong class="kek" id="kek-fp">-</strong></span>
 <span id="storage-label">-</span>
 </div>
-<div class="tip" id="tip-line">Served by this pod. Other pods publish metrics via Redis.</div>
+<div class="pods-bar" id="pods-bar"></div>
 </div>
-
-<div class="pods-grid" id="pods-grid"></div>
 
 <div class="section" id="health-section">
 <div class="section-title">Health <span class="section-tag">this pod</span></div>
@@ -117,31 +119,20 @@ canvas.bw-spark{display:block;flex:1;height:32px}
 </div>
 </div>
 
-<div class="section">
-<div class="section-title">Bandwidth <span class="section-tag">this pod &middot; 10 min</span></div>
-<div class="bw-row"><span class="bw-label">encrypt</span><canvas class="bw-spark" id="spark-bw-enc" height="32"></canvas><span class="bw-val" id="bw-enc-val">0 B/min</span></div>
-<div class="bw-row"><span class="bw-label">decrypt</span><canvas class="bw-spark" id="spark-bw-dec" height="32"></canvas><span class="bw-val" id="bw-dec-val">0 B/min</span></div>
+<div class="section" id="feed-section">
+<div class="section-title">Live Feed <span class="section-tag">last 50 &middot; this pod</span></div>
+<div class="feed-wrap" id="feed-wrap">
+<table class="feed-table">
+<thead><tr><th>Time</th><th>Method</th><th>Path</th><th>Op</th><th style="text-align:right">Status</th><th style="text-align:right">Latency</th><th style="text-align:right">Size</th><th></th></tr></thead>
+<tbody id="feed-body"></tbody>
+</table>
+<div class="empty" id="feed-empty">Waiting for requests...</div>
 </div>
-
-<div class="section">
-<div class="section-title">Active Uploads <span class="section-tag" id="uploads-source">cluster &middot; Redis</span></div>
-<div id="upload-count" style="margin-bottom:6px;color:#8b949e"><span class="value" id="upload-num">0</span> active</div>
-<div id="uploads-table"></div>
 </div>
 
 <script>
 function barClass(p){return p>80?'bar-red':p>50?'bar-yellow':'bar-green'}
 function bar(p){return '<div class="bar-container"><div class="bar-fill '+barClass(p)+'" style="width:'+Math.min(p,100)+'%"></div></div>'}
-function miniBar(p){return '<div class="pc-bar"><div class="pc-bar-fill '+barClass(p)+'" style="width:'+Math.min(p,100)+'%"></div></div>'}
-function age(iso){
-  if(!iso)return'-';
-  var s=Math.floor((Date.now()-new Date(iso+'Z'))/1000);
-  if(s<0)s=0;
-  if(s<60)return s+'s';
-  if(s<3600)return Math.floor(s/60)+'m';
-  if(s<86400)return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';
-  return Math.floor(s/86400)+'d '+Math.floor((s%86400)/3600)+'h';
-}
 
 function drawSpark(id,data,color){
   var c=document.getElementById(id);
@@ -164,29 +155,92 @@ function drawSpark(id,data,color){
   }
 }
 
-function updatePods(pods, currentPod){
-  var grid=document.getElementById('pods-grid');
-  if(!pods||pods.length<=1){grid.innerHTML='';return;}
+function updatePods(pods,currentPod){
+  var bar=document.getElementById('pods-bar');
+  if(!bar)return;
+  if(!pods||pods.length<=1){bar.style.display='none';return;}
+  bar.style.display='flex';
   var html='';
   pods.forEach(function(p){
     var pod=p.pod||{},h=p.health||{},t=(p.throughput||{}).rates||{},f=p.formatted||{};
     var isCurrent=pod.pod_name===currentPod;
-    var hasErrors=(t.errors_5xx_per_min||0)>0||(t.errors_503_per_min||0)>0;
-    var cls='pod-card'+(isCurrent?' current':'')+(hasErrors?' warning':'');
-    html+='<div class="'+cls+'">';
-    html+='<div class="pc-name"><span>'+pod.pod_name+'</span><span class="pc-uptime">'+(f.uptime||'-')+'</span></div>';
-    html+=miniBar(h.memory_usage_pct||0);
-    html+='<div class="pc-row"><span>Memory</span><span class="pc-val">'+(f.memory_reserved||'0 B')+' / '+(f.memory_limit||'0 B')+' ('+(h.memory_usage_pct||0)+'%)</span></div>';
-    html+='<div class="pc-row"><span>In-Flight</span><span class="pc-val">'+(h.requests_in_flight||0)+'</span></div>';
-    html+='<div class="pc-row"><span>Throughput</span><span class="pc-val">'+(t.requests_per_min||0)+'/min</span></div>';
-    if(hasErrors)html+='<div class="pc-row"><span>Errors</span><span class="pc-val hot">5xx:'+(t.errors_5xx_per_min||0)+' 503:'+(t.errors_503_per_min||0)+'</span></div>';
+    var memPct=h.memory_usage_pct||0;
+    var dotColor=memPct>80?'#f85149':memPct>50?'#d29922':'#3fb950';
+    if((t.errors_5xx_per_min||0)>0)dotColor='#f85149';
+    html+='<div class="pod-badge'+(isCurrent?' current':'')+'">';
+    html+='<span class="pb-dot" style="background:'+dotColor+'"></span>';
+    html+=pod.pod_name+' '+(f.uptime||'-')+' '+memPct+'% '+(t.requests_per_min||0)+'/m';
     html+='</div>';
   });
-  grid.innerHTML=html;
+  bar.innerHTML=html;
+}
+
+function formatTime(ts){
+  var d=new Date(ts*1000);
+  return d.toLocaleTimeString('en-GB',{hour12:false});
+}
+function formatSize(bytes){
+  if(!bytes||bytes<=0)return'-';
+  if(bytes<1024)return bytes+'B';
+  if(bytes<1048576)return(bytes/1024).toFixed(1)+'KB';
+  if(bytes<1073741824)return(bytes/1048576).toFixed(1)+'MB';
+  return(bytes/1073741824).toFixed(1)+'GB';
+}
+function methodClass(m){
+  if(m==='GET')return'method-get';
+  if(m==='PUT')return'method-put';
+  if(m==='DELETE')return'method-del';
+  return'method-other';
+}
+function statusClass(s){
+  if(s>=500)return'status-5xx';
+  if(s>=400)return'status-4xx';
+  return'status-2xx';
+}
+function latencyFmt(ms){
+  if(ms<1)return'<1ms';
+  if(ms<1000)return Math.round(ms)+'ms';
+  return(ms/1000).toFixed(1)+'s';
+}
+function latencyClass(ms){
+  if(ms>5000)return'latency-bad';
+  if(ms>1000)return'latency-warn';
+  return'';
+}
+function cryptoBadge(c){
+  if(c==='encrypt')return'<span class="crypto-badge crypto-enc">ENC</span>';
+  if(c==='decrypt')return'<span class="crypto-badge crypto-dec">DEC</span>';
+  return'';
+}
+
+var _prevFirst=0;
+function updateFeed(log){
+  var body=document.getElementById('feed-body');
+  var empty=document.getElementById('feed-empty');
+  if(!log||log.length===0){body.innerHTML='';empty.style.display='block';return;}
+  empty.style.display='none';
+  var isNew=log[0].timestamp!==_prevFirst;
+  _prevFirst=log[0].timestamp;
+  var html='';
+  for(var i=0;i<log.length;i++){
+    var r=log[i];
+    var cls=i===0&&isNew?' class="new-row"':'';
+    html+='<tr'+cls+'>';
+    html+='<td>'+formatTime(r.timestamp)+'</td>';
+    html+='<td class="'+methodClass(r.method)+'">'+r.method+'</td>';
+    html+='<td class="path-cell" title="'+r.path+'">'+r.path+'</td>';
+    html+='<td style="color:#8b949e">'+r.operation+'</td>';
+    html+='<td class="r '+statusClass(r.status)+'">'+r.status+'</td>';
+    html+='<td class="r '+latencyClass(r.duration_ms)+'">'+latencyFmt(r.duration_ms)+'</td>';
+    html+='<td class="r">'+formatSize(r.size)+'</td>';
+    html+='<td>'+cryptoBadge(r.crypto)+'</td>';
+    html+='</tr>';
+  }
+  body.innerHTML=html;
 }
 
 function update(d){
-  var pod=d.pod||{},h=d.health||{},t=(d.throughput||{}).rates||{},f=d.formatted||{},u=d.uploads||{};
+  var pod=d.pod||{},h=d.health||{},t=(d.throughput||{}).rates||{},f=d.formatted||{};
   document.getElementById('pod-name').textContent=pod.pod_name||'unknown';
   document.getElementById('uptime').textContent=f.uptime||'-';
   document.getElementById('kek-fp').textContent=pod.kek_fingerprint||'-';
@@ -211,26 +265,12 @@ function update(d){
   document.getElementById('tp-dec-bytes').textContent=f.bytes_decrypted_per_min||'0 B';
 
   var hist=(d.throughput||{}).history||{};
-  drawSpark('spark-req',hist.requests_per_min,'#3fb950');
+  drawSpark('spark-req',hist.requests_per_min,'#58a6ff');
   drawSpark('spark-enc',hist.encrypt_per_min,'#3fb950');
   drawSpark('spark-dec',hist.decrypt_per_min,'#58a6ff');
-  drawSpark('spark-bw-enc',hist.bytes_encrypted_per_min,'#3fb950');
-  drawSpark('spark-bw-dec',hist.bytes_decrypted_per_min,'#58a6ff');
-  document.getElementById('bw-enc-val').textContent=(f.bytes_encrypted_per_min||'0 B')+'/min';
-  document.getElementById('bw-dec-val').textContent=(f.bytes_decrypted_per_min||'0 B')+'/min';
 
-  document.getElementById('upload-num').textContent=u.active_count||0;
-  document.getElementById('uploads-source').textContent=pod.storage_backend==='In-memory'?'this pod':'cluster \\u00b7 Redis';
-  var ut=document.getElementById('uploads-table');
-  if(!u.uploads||u.uploads.length===0){ut.innerHTML='<div class="empty">No active uploads</div>';}
-  else{var h2='<table><tr><th>Bucket</th><th>Key</th><th style="text-align:right">Parts</th><th style="text-align:right">Size</th><th style="text-align:right">Age</th></tr>';
-    u.uploads.forEach(function(up){
-      var stale=up.is_stale?' class="stale"':'';
-      h2+='<tr><td>'+up.bucket+'</td><td>'+up.key+'</td><td class="num">'+up.parts_count+'</td><td class="num">'+(up.total_plaintext_size_formatted||up.total_plaintext_size)+'</td><td class="num"'+stale+'>'+age(up.created_at)+(up.is_stale?' \\u26a0':'')+'</td></tr>';
-    });
-    h2+='</table>';ut.innerHTML=h2;}
-
-  updatePods(d.all_pods||[], pod.pod_name);
+  updateFeed(d.request_log||[]);
+  updatePods(d.all_pods||[],pod.pod_name);
 
   var dot=document.getElementById('status-dot');
   dot.style.background=(t.errors_5xx_per_min||0)>0?'#f85149':((t.errors_4xx_per_min||0)>0?'#d29922':'#3fb950');

@@ -11,14 +11,15 @@ from fastapi.testclient import TestClient
 
 from s3proxy.admin.collectors import (
     RateTracker,
+    RequestLog,
     _format_bytes,
     _format_uptime,
     collect_health,
     collect_pod_identity,
     collect_throughput,
+    record_request,
 )
 from s3proxy.config import Settings
-from s3proxy.state import MultipartStateManager
 
 # ============================================================================
 # Fixtures
@@ -161,8 +162,7 @@ class TestDashboardHTML:
         assert "S3Proxy Admin" in html
         assert "Health" in html
         assert "Throughput" in html
-        assert "Bandwidth" in html
-        assert "Active Uploads" in html
+        assert "Live Feed" in html
 
     def test_no_sensitive_data_in_html(self, client, admin_credentials, admin_settings):
         headers = _basic_auth_header(admin_credentials[0], admin_credentials[1])
@@ -194,7 +194,7 @@ class TestApiStatus:
         assert "pod" in data
         assert "health" in data
         assert "throughput" in data
-        assert "uploads" in data
+        assert "request_log" in data
         assert "formatted" in data
         assert "all_pods" in data
 
@@ -380,41 +380,57 @@ class TestRateTracker:
 
 
 # ============================================================================
-# State Store list_keys Tests
+# Request Log Tests
 # ============================================================================
 
 
-class TestStateStoreListKeys:
-    @pytest.mark.asyncio
-    async def test_memory_store_list_keys(self):
-        from s3proxy.state.storage import MemoryStateStore
+class TestRequestLog:
+    def test_empty_log(self):
+        log = RequestLog(maxlen=10)
+        assert log.recent() == []
 
-        store = MemoryStateStore()
-        assert await store.list_keys() == []
-        await store.set("key1", b"data1", 3600)
-        await store.set("key2", b"data2", 3600)
-        keys = await store.list_keys()
-        assert sorted(keys) == ["key1", "key2"]
+    def test_record_and_recent(self):
+        log = RequestLog(maxlen=10)
+        log.record("GET", "/bucket/key", "GetObject", 200, 0.05, 1024)
+        entries = log.recent(10)
+        assert len(entries) == 1
+        assert entries[0]["method"] == "GET"
+        assert entries[0]["operation"] == "GetObject"
+        assert entries[0]["status"] == 200
+        assert entries[0]["crypto"] == "decrypt"
+        assert entries[0]["duration_ms"] == 50.0
+        assert entries[0]["size"] == 1024
 
-    @pytest.mark.asyncio
-    async def test_manager_list_active_uploads_empty(self):
-        manager = MultipartStateManager()
-        uploads = await manager.list_active_uploads()
-        assert uploads == []
+    def test_encrypt_crypto_tag(self):
+        log = RequestLog(maxlen=10)
+        log.record("PUT", "/bucket/key", "PutObject", 200, 0.1, 2048)
+        assert log.recent()[0]["crypto"] == "encrypt"
 
-    @pytest.mark.asyncio
-    async def test_manager_list_active_uploads_with_data(self):
-        from s3proxy.crypto import generate_dek
+    def test_no_crypto_for_list(self):
+        log = RequestLog(maxlen=10)
+        log.record("GET", "/bucket/", "ListObjects", 200, 0.02, 0)
+        assert log.recent()[0]["crypto"] == ""
 
-        manager = MultipartStateManager()
-        dek = generate_dek()
-        await manager.create_upload("mybucket", "mykey.txt", "upload-123", dek)
-        uploads = await manager.list_active_uploads()
-        assert len(uploads) == 1
-        assert uploads[0]["bucket"] == "mybucket"
-        assert uploads[0]["key"] == "mykey.txt"
-        assert uploads[0]["parts_count"] == 0
-        # DEK must never be in the response
-        upload_str = str(uploads[0])
-        assert base64.b64encode(dek).decode() not in upload_str
-        assert dek.hex() not in upload_str
+    def test_maxlen_eviction(self):
+        log = RequestLog(maxlen=5)
+        for i in range(10):
+            log.record("GET", f"/b/k{i}", "GetObject", 200, 0.01, 0)
+        entries = log.recent(10)
+        assert len(entries) == 5
+        # Newest first
+        assert entries[0]["path"] == "/b/k9"
+
+    def test_newest_first(self):
+        log = RequestLog(maxlen=10)
+        log.record("GET", "/first", "GetObject", 200, 0.01, 0)
+        log.record("PUT", "/second", "PutObject", 200, 0.01, 0)
+        entries = log.recent()
+        assert entries[0]["path"] == "/second"
+        assert entries[1]["path"] == "/first"
+
+    def test_record_request_function(self):
+        from s3proxy.admin.collectors import _request_log
+
+        initial = len(_request_log.recent(200))
+        record_request("HEAD", "/bucket/key", "HeadObject", 200, 0.003, 0)
+        assert len(_request_log.recent(200)) == initial + 1

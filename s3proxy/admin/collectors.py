@@ -7,7 +7,7 @@ import json
 import os
 import time
 from collections import deque
-from datetime import UTC, datetime
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 
 import structlog
@@ -75,6 +75,84 @@ class RateTracker:
 
 
 _rate_tracker = RateTracker(window_seconds=600)
+
+
+# ---------------------------------------------------------------------------
+# Request log — ring buffer for live feed
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True, frozen=True)
+class RequestEntry:
+    """Single request log entry for the live feed."""
+
+    timestamp: float
+    method: str
+    path: str
+    operation: str
+    status: int
+    duration_ms: float
+    size: int
+    crypto: str
+
+
+class RequestLog:
+    """Fixed-size ring buffer of recent requests for the live feed."""
+
+    ENCRYPT_OPS = frozenset({
+        "PutObject", "UploadPart", "UploadPartCopy",
+        "CompleteMultipartUpload", "CopyObject",
+    })
+    DECRYPT_OPS = frozenset({"GetObject"})
+
+    def __init__(self, maxlen: int = 200):
+        self._entries: deque[RequestEntry] = deque(maxlen=maxlen)
+
+    def record(
+        self,
+        method: str,
+        path: str,
+        operation: str,
+        status: int,
+        duration: float,
+        size: int,
+    ) -> None:
+        crypto = ""
+        if operation in self.ENCRYPT_OPS:
+            crypto = "encrypt"
+        elif operation in self.DECRYPT_OPS:
+            crypto = "decrypt"
+        self._entries.append(RequestEntry(
+            timestamp=time.time(),
+            method=method,
+            path=path[:120],
+            operation=operation,
+            status=status,
+            duration_ms=round(duration * 1000, 1),
+            size=size,
+            crypto=crypto,
+        ))
+
+    def recent(self, limit: int = 50) -> list[dict]:
+        """Return most recent entries as dicts, newest first."""
+        entries = list(self._entries)
+        entries.reverse()
+        return [asdict(e) for e in entries[:limit]]
+
+
+_request_log = RequestLog(maxlen=200)
+
+
+def record_request(
+    method: str,
+    path: str,
+    operation: str,
+    status: int,
+    duration: float,
+    size: int,
+) -> None:
+    """Record a completed request to the live feed log."""
+    _request_log.record(method, path, operation, status, duration, size)
 
 
 # ---------------------------------------------------------------------------
@@ -206,23 +284,6 @@ def collect_throughput() -> dict:
     }
 
 
-async def collect_upload_status(handler: S3ProxyHandler) -> dict:
-    """Collect active multipart upload status with stale detection."""
-    uploads = await handler.multipart_manager.list_active_uploads()
-    now = datetime.now(UTC)
-    for upload in uploads:
-        created = datetime.fromisoformat(upload["created_at"])
-        if created.tzinfo is None:
-            created = created.replace(tzinfo=UTC)
-        age_seconds = (now - created).total_seconds()
-        upload["is_stale"] = age_seconds > 1800
-        upload["total_plaintext_size_formatted"] = _format_bytes(upload["total_plaintext_size"])
-    return {
-        "active_count": len(uploads),
-        "uploads": uploads,
-    }
-
-
 # ---------------------------------------------------------------------------
 # Redis pod metrics publishing (multi-pod view)
 # ---------------------------------------------------------------------------
@@ -301,7 +362,6 @@ async def collect_all(
     pod = collect_pod_identity(settings, start_time)
     health = collect_health()
     throughput = collect_throughput()
-    upload_status = await collect_upload_status(handler)
 
     local_data = {
         "pod": pod,
@@ -328,6 +388,6 @@ async def collect_all(
 
     return {
         **local_data,
-        "uploads": upload_status,
+        "request_log": _request_log.recent(50),
         "all_pods": all_pods,
     }
