@@ -99,10 +99,15 @@ class RequestEntry:
 class RequestLog:
     """Fixed-size ring buffer of recent requests for the live feed."""
 
-    ENCRYPT_OPS = frozenset({
-        "PutObject", "UploadPart", "UploadPartCopy",
-        "CompleteMultipartUpload", "CopyObject",
-    })
+    ENCRYPT_OPS = frozenset(
+        {
+            "PutObject",
+            "UploadPart",
+            "UploadPartCopy",
+            "CompleteMultipartUpload",
+            "CopyObject",
+        }
+    )
     DECRYPT_OPS = frozenset({"GetObject"})
 
     def __init__(self, maxlen: int = 200):
@@ -122,16 +127,18 @@ class RequestLog:
             crypto = "encrypt"
         elif operation in self.DECRYPT_OPS:
             crypto = "decrypt"
-        self._entries.append(RequestEntry(
-            timestamp=time.time(),
-            method=method,
-            path=path[:120],
-            operation=operation,
-            status=status,
-            duration_ms=round(duration * 1000, 1),
-            size=size,
-            crypto=crypto,
-        ))
+        self._entries.append(
+            RequestEntry(
+                timestamp=time.time(),
+                method=method,
+                path=path[:120],
+                operation=operation,
+                status=status,
+                duration_ms=round(duration * 1000, 1),
+                size=size,
+                crypto=crypto,
+            )
+        )
 
     def recent(self, limit: int = 50) -> list[dict]:
         """Return most recent entries as dicts, newest first."""
@@ -232,6 +239,42 @@ def collect_health() -> dict:
         "errors_4xx": int(errors_4xx),
         "errors_5xx": int(errors_5xx),
         "errors_503": int(errors_503),
+    }
+
+
+def collect_latency() -> dict:
+    """Compute approximate p50/p95/p99 from REQUEST_DURATION histogram buckets."""
+    buckets: list[tuple[float, float]] = []  # (upper_bound, cumulative_count)
+    total_count = 0.0
+
+    for sample in metrics.REQUEST_DURATION.collect()[0].samples:
+        if sample.name.endswith("_bucket"):
+            le = sample.labels.get("le", "")
+            if le == "+Inf":
+                total_count = sample.value
+            else:
+                try:
+                    buckets.append((float(le), sample.value))
+                except ValueError:
+                    continue
+
+    if total_count < 1:
+        return {"p50_ms": 0, "p95_ms": 0, "p99_ms": 0, "count": 0}
+
+    buckets.sort(key=lambda b: b[0])
+
+    def _percentile(p: float) -> float:
+        threshold = total_count * p
+        for upper, count in buckets:
+            if count >= threshold:
+                return round(upper * 1000, 1)  # seconds → ms
+        return round(buckets[-1][0] * 1000, 1) if buckets else 0
+
+    return {
+        "p50_ms": _percentile(0.5),
+        "p95_ms": _percentile(0.95),
+        "p99_ms": _percentile(0.99),
+        "count": int(total_count),
     }
 
 
@@ -362,11 +405,13 @@ async def collect_all(
     pod = collect_pod_identity(settings, start_time)
     health = collect_health()
     throughput = collect_throughput()
+    latency = collect_latency()
 
     local_data = {
         "pod": pod,
         "health": health,
         "throughput": throughput,
+        "latency": latency,
         "formatted": {
             "memory_reserved": _format_bytes(health["memory_reserved_bytes"]),
             "memory_limit": _format_bytes(health["memory_limit_bytes"]),
@@ -388,6 +433,6 @@ async def collect_all(
 
     return {
         **local_data,
-        "request_log": _request_log.recent(50),
+        "request_log": _request_log.recent(10),
         "all_pods": all_pods,
     }

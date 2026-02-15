@@ -15,6 +15,7 @@ from s3proxy.admin.collectors import (
     _format_bytes,
     _format_uptime,
     collect_health,
+    collect_latency,
     collect_pod_identity,
     collect_throughput,
     record_request,
@@ -160,9 +161,11 @@ class TestDashboardHTML:
         headers = _basic_auth_header(admin_credentials[0], admin_credentials[1])
         html = client.get("/admin/", headers=headers).text
         assert "S3Proxy Admin" in html
-        assert "Health" in html
+        assert "Pods" in html
         assert "Throughput" in html
-        assert "Live Feed" in html
+        assert "Errors" in html
+        assert "Latency" in html
+        assert "Recent Requests" in html
 
     def test_no_sensitive_data_in_html(self, client, admin_credentials, admin_settings):
         headers = _basic_auth_header(admin_credentials[0], admin_credentials[1])
@@ -194,6 +197,7 @@ class TestApiStatus:
         assert "pod" in data
         assert "health" in data
         assert "throughput" in data
+        assert "latency" in data
         assert "request_log" in data
         assert "formatted" in data
         assert "all_pods" in data
@@ -306,6 +310,30 @@ class TestCollectors:
         assert _format_uptime(60) == "1m"
         assert _format_uptime(3661) == "1h 1m"
         assert _format_uptime(90061) == "1d 1h 1m"
+
+
+# ============================================================================
+# Latency Collector Tests
+# ============================================================================
+
+
+class TestLatencyCollector:
+    def test_latency_keys(self):
+        result = collect_latency()
+        assert "p50_ms" in result
+        assert "p95_ms" in result
+        assert "p99_ms" in result
+        assert "count" in result
+
+    def test_latency_values_are_numeric(self):
+        result = collect_latency()
+        assert isinstance(result["p50_ms"], (int, float))
+        assert isinstance(result["p95_ms"], (int, float))
+        assert isinstance(result["p99_ms"], (int, float))
+        assert isinstance(result["count"], int)
+        assert result["p50_ms"] >= 0
+        assert result["p95_ms"] >= result["p50_ms"]
+        assert result["p99_ms"] >= result["p95_ms"]
 
 
 # ============================================================================

@@ -135,7 +135,11 @@ async def handle_proxy_request(
         REQUEST_COUNT.labels(method=method, operation=operation, status=status_code).inc()
         REQUEST_DURATION.labels(method=method, operation=operation).observe(duration)
         record_request(
-            method, path, operation, status_code, duration,
+            method,
+            path,
+            operation,
+            status_code,
+            duration,
             int(request.headers.get("content-length", "0") or "0"),
         )
 

@@ -1,4 +1,4 @@
-.PHONY: test test-all test-unit test-integration test-run test-oom e2e cluster lint
+.PHONY: test test-all test-unit test-integration test-run test-oom e2e cluster lint ui sim
 
 # Lint: ruff check + format check
 lint:
@@ -53,6 +53,23 @@ test-oom:
 		EXIT_CODE=$$?; \
 		docker compose -f tests/docker-compose.yml --profile oom down; \
 		exit $$EXIT_CODE
+
+# Run admin dashboard locally (http://localhost:4433/admin/ — minioadmin:minioadmin)
+ui:
+	S3PROXY_HOST=http://localhost:9000 S3PROXY_ENCRYPT_KEY=dev-key S3PROXY_ADMIN_UI=true \
+		AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin \
+		uv run uvicorn s3proxy.app:app --port 4433 --reload
+
+# Simulate S3 traffic against the local proxy (run alongside `make ui`)
+sim:
+	@echo "Sending traffic to localhost:4433..."
+	@while true; do \
+		curl -s -X PUT -d "testdata" http://minioadmin:minioadmin@localhost:4433/bucket/file$$((RANDOM)).dat > /dev/null 2>&1; \
+		curl -s http://minioadmin:minioadmin@localhost:4433/bucket/file1.dat > /dev/null 2>&1; \
+		curl -s -X HEAD http://minioadmin:minioadmin@localhost:4433/bucket/ > /dev/null 2>&1; \
+		curl -s http://minioadmin:minioadmin@localhost:4433/bucket/ > /dev/null 2>&1; \
+		sleep 0.3; \
+	done
 
 # E2E cluster commands
 e2e:
