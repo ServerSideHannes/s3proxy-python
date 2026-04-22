@@ -95,19 +95,57 @@ def _make_app(settings: Settings):
     return app
 
 
-def test_dashboard_requires_auth(admin_settings) -> None:
-    client = TestClient(_make_app(admin_settings))
+def test_dashboard_redirects_to_login_without_auth(admin_settings) -> None:
+    client = TestClient(_make_app(admin_settings), follow_redirects=False)
     r = client.get("/admin/")
-    assert r.status_code == 401
-    assert r.headers.get("WWW-Authenticate", "").lower().startswith("basic")
+    assert r.status_code == 303
+    assert r.headers["location"].endswith("/admin/login")
 
 
-def test_dashboard_html_served_with_auth(admin_settings) -> None:
+def test_dashboard_html_served_with_basic_auth(admin_settings) -> None:
     client = TestClient(_make_app(admin_settings))
     r = client.get("/admin/", auth=("admin", "secret"))
     assert r.status_code == 200
     assert "S3 Encryption Proxy" in r.text
     assert "Recent Activity" in r.text
+
+
+def test_login_page_renders(admin_settings) -> None:
+    client = TestClient(_make_app(admin_settings))
+    r = client.get("/admin/login")
+    assert r.status_code == 200
+    assert "Sign in to the admin dashboard" in r.text
+
+
+def test_login_post_sets_cookie_and_redirects(admin_settings) -> None:
+    client = TestClient(_make_app(admin_settings), follow_redirects=False)
+    r = client.post("/admin/login", data={"username": "admin", "password": "secret"})
+    assert r.status_code == 303
+    assert r.headers["location"].endswith("/admin/")
+    assert "s3proxy_session=" in r.headers.get("set-cookie", "")
+
+
+def test_login_post_rejects_bad_credentials(admin_settings) -> None:
+    client = TestClient(_make_app(admin_settings), follow_redirects=False)
+    r = client.post("/admin/login", data={"username": "admin", "password": "wrong"})
+    assert r.status_code == 303
+    assert "error=1" in r.headers["location"]
+
+
+def test_session_cookie_authenticates_dashboard(admin_settings) -> None:
+    client = TestClient(_make_app(admin_settings), follow_redirects=False)
+    r = client.post("/admin/login", data={"username": "admin", "password": "secret"})
+    cookie = r.headers["set-cookie"].split(";")[0]
+    r2 = client.get("/admin/", headers={"Cookie": cookie})
+    assert r2.status_code == 200
+
+
+def test_logout_clears_cookie(admin_settings) -> None:
+    client = TestClient(_make_app(admin_settings), follow_redirects=False)
+    r = client.get("/admin/logout")
+    assert r.status_code == 303
+    assert r.headers["location"].endswith("/admin/login")
+    assert "s3proxy_session=" in r.headers.get("set-cookie", "")
 
 
 def test_status_api_returns_expected_shape(admin_settings) -> None:
@@ -119,6 +157,13 @@ def test_status_api_returns_expected_shape(admin_settings) -> None:
     assert payload["footer"]["version"] == "1.2.3"
     for key in ("requests", "data_encrypted", "errors", "active_buckets"):
         assert key in payload["cards"]
+        assert "breakdown" in payload["cards"][key]
+
+
+def test_status_api_401_without_auth(admin_settings) -> None:
+    client = TestClient(_make_app(admin_settings))
+    r = client.get("/admin/api/status")
+    assert r.status_code == 401
 
 
 def test_auth_falls_back_to_aws_credentials() -> None:

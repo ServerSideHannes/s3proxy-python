@@ -1,14 +1,10 @@
-"""HTML template for the admin dashboard."""
+"""HTML templates for the admin dashboard — login + dashboard."""
 
 from __future__ import annotations
 
-_DASHBOARD_HTML = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>S3 Encryption Proxy</title>
-<style>
+from html import escape as _esc
+
+_SHARED_CSS = """
   :root {
     --bg: #fafafa;
     --surface: #ffffff;
@@ -35,66 +31,209 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     line-height: 1.4;
     -webkit-font-smoothing: antialiased;
   }
-  .page {
-    max-width: 1080px;
-    margin: 0 auto;
-    padding: 32px 24px 96px 24px;
-  }
-  /* ---- Header ---- */
-  .app-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    padding-bottom: 20px;
-    border-bottom: 1px solid var(--border);
-    margin-bottom: 24px;
-  }
-  .brand { display: flex; align-items: center; gap: 12px; }
+  a { color: inherit; }
   .brand-mark {
     width: 40px; height: 40px;
     background: var(--dark);
     border-radius: 10px;
     display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
   }
   .brand-mark svg { color: #fff; }
   .brand-name { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
-  .head-right { display: flex; align-items: center; gap: 16px; }
+  .btn-dark {
+    background: #111827; color: #fff;
+    border: none; border-radius: 8px;
+    padding: 8px 14px; font-size: 13px; font-weight: 500;
+    cursor: pointer;
+  }
+  .btn-dark:hover { background: #1f2937; }
+  .btn-dark:disabled { opacity: .6; cursor: not-allowed; }
+  .btn-ghost {
+    background: transparent; color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: 8px; padding: 5px 10px;
+    font-size: 12px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 4px;
+  }
+  .btn-ghost:hover { background: var(--icon-bg); }
+"""
+
+
+_LOGIN_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · S3 Encryption Proxy</title>
+<style>
+  __SHARED_CSS__
+  .login-page {
+    min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+  }
+  .login-card {
+    width: 100%;
+    max-width: 380px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px;
+  }
+  .login-head {
+    display: flex; align-items: center; gap: 12px;
+    margin-bottom: 20px;
+  }
+  .login-title { font-size: 18px; font-weight: 600; }
+  .login-subtitle { color: var(--text-muted); font-size: 13px; margin-top: 2px; }
+  .field { margin-bottom: 14px; }
+  .field label {
+    display: block; margin-bottom: 6px;
+    font-size: 12px; font-weight: 500;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .field input {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    font-size: 14px;
+    background: #fff;
+    font-family: inherit;
+    color: var(--text);
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .field input:focus {
+    outline: none;
+    border-color: var(--dark);
+    box-shadow: 0 0 0 3px rgba(17,24,39,0.08);
+  }
+  .login-error {
+    background: var(--err-bg);
+    color: var(--err);
+    border: 1px solid rgba(239,68,68,0.2);
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 13px;
+    margin-bottom: 14px;
+  }
+  .login-submit { width: 100%; margin-top: 6px; }
+  .login-hint {
+    margin-top: 18px;
+    font-size: 12px;
+    color: var(--text-subtle);
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<main class="login-page">
+  <form class="login-card" method="post" action="__LOGIN_ACTION__" autocomplete="on">
+    <div class="login-head">
+      <span class="brand-mark" aria-hidden="true">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <rect x="4" y="11" width="16" height="10" rx="2"></rect>
+          <path d="M8 11V7a4 4 0 0 1 8 0v4"></path>
+        </svg>
+      </span>
+      <div>
+        <div class="login-title">S3 Encryption Proxy</div>
+        <div class="login-subtitle">Sign in to the admin dashboard</div>
+      </div>
+    </div>
+
+    __ERROR_BLOCK__
+
+    <div class="field">
+      <label for="u">Username</label>
+      <input id="u" name="username" type="text" autocomplete="username" autofocus required>
+    </div>
+    <div class="field">
+      <label for="p">Password</label>
+      <input id="p" name="password" type="password" autocomplete="current-password" required>
+    </div>
+
+    <button type="submit" class="btn-dark login-submit">Sign in</button>
+    <div class="login-hint">Credentials default to your AWS access key / secret.</div>
+  </form>
+</main>
+</body>
+</html>
+"""
+
+
+_DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>S3 Encryption Proxy</title>
+<style>
+  __SHARED_CSS__
+  .page {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 32px 24px 96px 24px;
+  }
+  .app-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 24px;
+  }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .head-right { display: flex; align-items: center; gap: 14px; }
   .status-pill {
     display: inline-flex; align-items: center; gap: 6px;
     padding: 4px 10px;
     border: 1px solid var(--ok);
     border-radius: 999px;
     color: var(--ok);
-    font-size: 13px;
-    background: transparent;
+    font-size: 13px; background: transparent;
   }
   .status-pill .dot {
     width: 7px; height: 7px; border-radius: 50%;
     background: var(--ok);
   }
   .uptime { color: var(--text-muted); font-size: 13px; }
-  /* ---- Grid of summary cards ---- */
+  .head-user {
+    color: var(--text-muted); font-size: 12px;
+    border-left: 1px solid var(--border);
+    padding-left: 14px;
+  }
+  .head-user a {
+    color: var(--text); text-decoration: none; margin-left: 6px;
+  }
+  .head-user a:hover { text-decoration: underline; }
+
+  /* ---- Cards ---- */
   .cards {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 16px;
-    margin-bottom: 20px;
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    gap: 16px; margin-bottom: 20px;
   }
   .card {
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 18px;
+    cursor: pointer;
+    transition: border-color .15s, box-shadow .15s;
+    position: relative;
+    user-select: none;
   }
+  .card:hover { border-color: var(--border-strong); }
+  .card.open { border-color: var(--dark); box-shadow: 0 0 0 3px rgba(17,24,39,0.04); }
   .card-head {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    color: var(--text-muted);
-    font-size: 13px;
+    display: flex; align-items: center; justify-content: space-between;
+    color: var(--text-muted); font-size: 13px;
     margin-bottom: 10px;
   }
+  .card-head-left { display: flex; align-items: center; gap: 10px; }
   .card-icon {
     width: 30px; height: 30px;
     background: var(--icon-bg);
@@ -102,42 +241,54 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     display: flex; align-items: center; justify-content: center;
     color: var(--text);
   }
+  .card-chevron {
+    color: var(--text-subtle);
+    transition: transform .15s;
+  }
+  .card.open .card-chevron { transform: rotate(180deg); color: var(--text); }
   .card-value {
-    font-size: 34px;
-    font-weight: 600;
-    letter-spacing: -0.02em;
-    line-height: 1.1;
+    font-size: 34px; font-weight: 600;
+    letter-spacing: -0.02em; line-height: 1.1;
   }
   .card-unit {
-    font-size: 16px;
-    font-weight: 500;
-    color: var(--text-muted);
-    margin-left: 4px;
+    font-size: 16px; font-weight: 500;
+    color: var(--text-muted); margin-left: 4px;
   }
   .card-delta { margin-top: 6px; font-size: 12px; color: var(--text-muted); }
-  .card-delta .up   { color: var(--ok); }
-  .card-delta .down { color: var(--ok); }  /* down is good for errors */
   .spark {
-    margin-top: 12px;
-    width: 100%;
-    height: 28px;
-    display: block;
-    color: var(--text-subtle);
+    margin-top: 12px; width: 100%; height: 28px;
+    display: block; color: var(--text-subtle);
   }
-  /* ---- Section card ---- */
+  .card-expand {
+    display: none;
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px dashed var(--border);
+  }
+  .card.open .card-expand { display: block; }
+  .kv {
+    display: flex; justify-content: space-between;
+    padding: 6px 0;
+    font-size: 13px;
+    border-bottom: 1px solid var(--border);
+  }
+  .kv:last-child { border-bottom: none; }
+  .kv .k { color: var(--text-muted); }
+  .kv .v { font-variant-numeric: tabular-nums; }
+
+  /* ---- Sections ---- */
   .section {
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
-    padding: 20px;
-    margin-bottom: 20px;
+    padding: 20px; margin-bottom: 20px;
   }
   .section-head {
     display: flex; align-items: center; justify-content: space-between;
-    margin-bottom: 14px;
+    margin-bottom: 14px; gap: 12px;
   }
   .section-title { font-size: 16px; font-weight: 600; }
-  .section-actions { display: flex; align-items: center; gap: 18px; }
+  .section-actions { display: flex; align-items: center; gap: 14px; }
   .live {
     display: inline-flex; align-items: center; gap: 6px;
     color: var(--text-muted); font-size: 13px;
@@ -146,21 +297,21 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     width: 7px; height: 7px; border-radius: 50%;
     background: var(--ok); box-shadow: 0 0 0 3px rgba(16,185,129,0.15);
   }
-  .link-action {
-    color: var(--text); font-size: 13px; text-decoration: none;
+  .back-link {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--text); font-size: 13px;
+    text-decoration: none; cursor: pointer;
   }
-  .link-action:hover { text-decoration: underline; }
+  .back-link:hover { text-decoration: underline; }
+
   /* ---- Tables ---- */
   table { width: 100%; border-collapse: collapse; }
   th, td {
-    text-align: left;
-    padding: 10px 8px;
-    font-size: 13px;
-    white-space: nowrap;
+    text-align: left; padding: 10px 8px;
+    font-size: 13px; white-space: nowrap;
   }
   th {
-    color: var(--text-muted);
-    font-weight: 500;
+    color: var(--text-muted); font-weight: 500;
     border-bottom: 1px solid var(--border);
   }
   td {
@@ -169,72 +320,53 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   }
   tr:last-child td { border-bottom: none; }
   td.truncate {
-    max-width: 200px;
+    max-width: 220px;
     overflow: hidden; text-overflow: ellipsis;
   }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .pill {
     display: inline-block;
-    padding: 2px 10px;
-    border-radius: 999px;
-    font-size: 12px;
-    font-weight: 500;
+    padding: 2px 10px; border-radius: 999px;
+    font-size: 12px; font-weight: 500;
   }
   .pill.ok  { background: var(--ok-bg);  color: var(--ok); }
   .pill.err { background: var(--err-bg); color: var(--err); }
   .enc-cell { display: inline-flex; align-items: center; gap: 6px; }
   .enc-cell.on  { color: var(--ok); }
   .enc-cell.off { color: var(--text-muted); }
-  /* ---- Two-column bottom row ---- */
+  .linkish {
+    color: var(--text); text-decoration: none;
+    border-bottom: 1px dashed var(--text-subtle);
+    cursor: pointer;
+  }
+  .linkish:hover {
+    border-bottom-color: var(--text);
+    color: #000;
+  }
+
   .split {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 20px;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 20px;
   }
-  .btn-dark {
-    background: #111827;
-    color: #fff;
-    border: none;
-    border-radius: 8px;
-    padding: 6px 12px;
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    display: inline-flex; align-items: center; gap: 4px;
+
+  /* ---- Detail views ---- */
+  .detail-sub { color: var(--text-muted); font-size: 13px; margin-top: 2px; }
+  .empty-state {
+    color: var(--text-muted); font-size: 13px;
+    padding: 24px; text-align: center;
   }
-  .btn-dark:hover { background: #1f2937; }
-  .btn-ghost {
-    background: transparent;
-    color: var(--text);
-    border: 1px solid var(--border-strong);
-    border-radius: 8px;
-    padding: 5px 10px;
-    font-size: 12px;
-    cursor: pointer;
-    display: inline-flex; align-items: center; gap: 4px;
-  }
-  .btn-ghost:hover { background: var(--icon-bg); }
-  .view-more {
-    display: inline-block;
-    color: var(--text);
-    font-size: 13px;
-    margin-top: 10px;
-    text-decoration: none;
-  }
-  .view-more:hover { text-decoration: underline; }
-  /* ---- Footer bar ---- */
+
+  /* ---- Footer ---- */
   .footer {
     position: fixed; left: 0; right: 0; bottom: 0;
     border-top: 1px solid var(--border);
     background: var(--surface);
     padding: 10px 24px;
-    font-size: 12px;
-    color: var(--text-muted);
+    font-size: 12px; color: var(--text-muted);
     display: flex; align-items: center; gap: 28px;
   }
   .footer .brand-mini { display: inline-flex; align-items: center; gap: 6px; }
   .footer .spacer { flex: 1; }
-  /* ---- Responsive ---- */
+
   @media (max-width: 880px) {
     .cards { grid-template-columns: repeat(2, 1fr); }
     .split { grid-template-columns: 1fr; }
@@ -250,7 +382,6 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <header class="app-head">
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">
-        <!-- lock icon -->
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
              stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round">
@@ -263,129 +394,106 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="head-right">
       <span class="status-pill"><span class="dot"></span><span id="h-status">Running</span></span>
       <span class="uptime">Uptime: <span id="h-uptime">—</span></span>
+      <span class="head-user">Signed in · <a href="__LOGOUT_URL__">Logout</a></span>
     </div>
   </header>
 
-  <section class="cards">
-    <div class="card">
-      <div class="card-head">
-        <span class="card-icon">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2"
-               stroke-linecap="round" stroke-linejoin="round">
-            <path d="M7 7h11l-3-3"></path><path d="M17 17H6l3 3"></path>
-          </svg>
-        </span>
-        <span id="c1-label">Requests</span>
-      </div>
-      <div><span class="card-value" id="c1-value">—</span><span class="card-unit" id="c1-unit"></span></div>
-      <div class="card-delta" id="c1-delta">&nbsp;</div>
-      <svg class="spark" id="c1-spark" viewBox="0 0 100 28" preserveAspectRatio="none"></svg>
-    </div>
+  <!-- ================== DASHBOARD VIEW ================== -->
+  <div id="view-dashboard">
+    <section class="cards">
+      __CARD_REQUESTS__
+      __CARD_DATA__
+      __CARD_ERRORS__
+      __CARD_BUCKETS__
+    </section>
 
-    <div class="card">
-      <div class="card-head">
-        <span class="card-icon">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2"
-               stroke-linecap="round" stroke-linejoin="round">
-            <rect x="4" y="11" width="16" height="10" rx="2"></rect>
-            <path d="M8 11V7a4 4 0 0 1 8 0v4"></path>
-          </svg>
-        </span>
-        <span id="c2-label">Data Encrypted</span>
-      </div>
-      <div><span class="card-value" id="c2-value">—</span><span class="card-unit" id="c2-unit"></span></div>
-      <div class="card-delta" id="c2-delta">&nbsp;</div>
-      <svg class="spark" id="c2-spark" viewBox="0 0 100 28" preserveAspectRatio="none"></svg>
-    </div>
-
-    <div class="card">
-      <div class="card-head">
-        <span class="card-icon">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2"
-               stroke-linecap="round" stroke-linejoin="round">
-            <path d="M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6A2 2 0 0 0 22 18L13.7 3.9a2 2 0 0 0-3.4 0z"></path>
-            <line x1="12" y1="9" x2="12" y2="13"></line>
-            <line x1="12" y1="17" x2="12.01" y2="17"></line>
-          </svg>
-        </span>
-        <span id="c3-label">Errors</span>
-      </div>
-      <div><span class="card-value" id="c3-value">—</span><span class="card-unit" id="c3-unit"></span></div>
-      <div class="card-delta" id="c3-delta">&nbsp;</div>
-      <svg class="spark" id="c3-spark" viewBox="0 0 100 28" preserveAspectRatio="none"></svg>
-    </div>
-
-    <div class="card">
-      <div class="card-head">
-        <span class="card-icon">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2"
-               stroke-linecap="round" stroke-linejoin="round">
-            <path d="M4 8c0-2.2 3.6-4 8-4s8 1.8 8 4-3.6 4-8 4-8-1.8-8-4z"></path>
-            <path d="M4 8v8c0 2.2 3.6 4 8 4s8-1.8 8-4V8"></path>
-          </svg>
-        </span>
-        <span id="c4-label">Active Buckets</span>
-      </div>
-      <div><span class="card-value" id="c4-value">—</span></div>
-      <div class="card-delta" id="c4-delta">&nbsp;</div>
-    </div>
-  </section>
-
-  <section class="section">
-    <div class="section-head">
-      <div class="section-title">Recent Activity</div>
-      <div class="section-actions">
-        <span class="live"><span class="dot"></span>Live</span>
-      </div>
-    </div>
-    <table>
-      <thead>
-        <tr>
-          <th>Time</th><th>Operation</th><th>Bucket</th><th>Object</th>
-          <th>Status</th><th>Size</th><th>Client IP</th><th>Latency</th>
-        </tr>
-      </thead>
-      <tbody id="activity-body">
-        <tr><td colspan="8" style="color:var(--text-muted);padding:18px 8px">
-          No requests yet — traffic will appear here.
-        </td></tr>
-      </tbody>
-    </table>
-  </section>
-
-  <section class="split">
-    <div class="section" style="margin-bottom:0">
+    <section class="section">
       <div class="section-head">
-        <div class="section-title">Buckets</div>
+        <div class="section-title">Recent Activity</div>
+        <div class="section-actions">
+          <span class="live"><span class="dot"></span>Live</span>
+        </div>
       </div>
       <table>
         <thead>
-          <tr><th>Name</th><th>Encryption</th><th>Objects</th><th>Size</th></tr>
+          <tr>
+            <th>Time</th><th>Operation</th><th>Bucket</th><th>Object</th>
+            <th>Status</th><th>Size</th><th>Client IP</th><th>Latency</th>
+          </tr>
         </thead>
-        <tbody id="buckets-body">
-          <tr><td colspan="4" style="color:var(--text-muted);padding:14px 8px">
-            No buckets observed yet.
-          </td></tr>
+        <tbody id="activity-body">
+          <tr><td colspan="8" class="empty-state">No requests yet — traffic will appear here.</td></tr>
         </tbody>
       </table>
-    </div>
+    </section>
 
-    <div class="section" style="margin-bottom:0">
+    <section class="split">
+      <div class="section" style="margin-bottom:0">
+        <div class="section-head">
+          <div class="section-title">Buckets</div>
+        </div>
+        <table>
+          <thead>
+            <tr><th>Name</th><th>Encryption</th><th>Objects</th><th>Size</th></tr>
+          </thead>
+          <tbody id="buckets-body">
+            <tr><td colspan="4" class="empty-state">No buckets observed yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="section" style="margin-bottom:0">
+        <div class="section-head">
+          <div class="section-title">Keys</div>
+        </div>
+        <table>
+          <thead>
+            <tr><th>Key ID</th><th>Type</th><th>Status</th><th>Created</th></tr>
+          </thead>
+          <tbody id="keys-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <!-- ================== BUCKET DETAIL VIEW ================== -->
+  <div id="view-bucket" style="display:none">
+    <section class="section">
       <div class="section-head">
-        <div class="section-title">Keys</div>
+        <div>
+          <a class="back-link" data-goto="">← Back to dashboard</a>
+          <div class="section-title" style="margin-top:6px" id="bv-title">Bucket</div>
+          <div class="detail-sub" id="bv-sub">—</div>
+        </div>
       </div>
       <table>
         <thead>
-          <tr><th>Key ID</th><th>Type</th><th>Status</th><th>Created</th></tr>
+          <tr><th>Key</th><th>Size</th><th>Last Modified</th></tr>
         </thead>
-        <tbody id="keys-body"></tbody>
+        <tbody id="bv-body">
+          <tr><td colspan="3" class="empty-state">Loading…</td></tr>
+        </tbody>
       </table>
-    </div>
-  </section>
+    </section>
+  </div>
+
+  <!-- ================== OBJECT DETAIL VIEW ================== -->
+  <div id="view-object" style="display:none">
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <a class="back-link" id="ov-back" data-goto="">← Back</a>
+          <div class="section-title" style="margin-top:6px" id="ov-title">Object</div>
+          <div class="detail-sub mono" id="ov-sub">—</div>
+        </div>
+      </div>
+      <table>
+        <tbody id="ov-body">
+          <tr><td colspan="2" class="empty-state">Loading…</td></tr>
+        </tbody>
+      </table>
+    </section>
+  </div>
 
 </div>
 
@@ -414,10 +522,17 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 </footer>
 
 <script>
-  const API = "__API_URL__";
+  const API_STATUS = "__STATUS_URL__";
+  const API_BUCKET = "__BUCKET_URL__";      // expects /bucket appended
+  const API_OBJECT = "__OBJECT_URL__";      // expects /bucket/key appended
   const $ = (id) => document.getElementById(id);
 
   function setText(id, v) { const el = $(id); if (el) el.textContent = v; }
+  function escapeHtml(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
 
   function drawSpark(id, values) {
     const svg = $(id);
@@ -439,44 +554,97 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     svg.appendChild(line);
   }
 
-  function escapeHtml(s) {
-    return String(s == null ? "" : s)
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  // ------------------- Hash routing: #, #bucket=X, #bucket=X&object=Y -------------------
+  function parseHash() {
+    const h = (location.hash || "").replace(/^#/, "");
+    if (!h) return {view: "dashboard"};
+    const params = new URLSearchParams(h);
+    const bucket = params.get("bucket");
+    const object = params.get("object");
+    if (bucket && object) return {view: "object", bucket, object};
+    if (bucket) return {view: "bucket", bucket};
+    return {view: "dashboard"};
+  }
+
+  function showView(name) {
+    for (const v of ["dashboard", "bucket", "object"]) {
+      const el = $("view-" + v);
+      if (el) el.style.display = (v === name) ? "" : "none";
+    }
+  }
+
+  async function navigateFromHash() {
+    const route = parseHash();
+    showView(route.view);
+    if (route.view === "bucket")  await loadBucket(route.bucket);
+    if (route.view === "object")  await loadObject(route.bucket, route.object);
+  }
+
+  function gotoDashboard() { location.hash = ""; }
+  function gotoBucket(bucket)         { location.hash = "bucket=" + encodeURIComponent(bucket); }
+  function gotoObject(bucket, object) {
+    location.hash = "bucket=" + encodeURIComponent(bucket) + "&object=" + encodeURIComponent(object);
+  }
+
+  // ------------------- Dashboard rendering -------------------
+  function renderCard(prefix, card) {
+    setText(prefix + "-label", card.label + (prefix === "c4" ? "" : " (24h)"));
+    setText(prefix + "-value", card.value);
+    setText(prefix + "-unit", card.unit || "");
+    if (card.spark !== undefined) drawSpark(prefix + "-spark", card.spark);
+    setText(prefix + "-delta", card.detail || "");
+
+    const expand = $(prefix + "-expand");
+    if (expand && card.breakdown) {
+      expand.innerHTML = card.breakdown.length === 0
+        ? '<div class="empty-state" style="padding:8px 0">Nothing to show.</div>'
+        : card.breakdown.map(b =>
+            `<div class="kv"><span class="k">${escapeHtml(b.label)}</span><span class="v">${escapeHtml(b.value)}</span></div>`
+          ).join("");
+    }
   }
 
   function renderActivity(rows) {
     const tbody = $("activity-body");
     if (!tbody) return;
     if (!rows || rows.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="8" style="color:var(--text-muted);padding:18px 8px">No requests yet — traffic will appear here.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No requests yet — traffic will appear here.</td></tr>';
       return;
     }
-    tbody.innerHTML = rows.map(r => `
-      <tr>
-        <td style="color:var(--text-muted)">${escapeHtml(r.time)}</td>
-        <td class="mono">${escapeHtml(r.operation)}</td>
-        <td>${escapeHtml(r.bucket)}</td>
-        <td class="truncate mono" title="${escapeHtml(r.object)}">${escapeHtml(r.object)}</td>
-        <td><span class="pill ${r.status === "Success" ? "ok" : "err"}">${escapeHtml(r.status)}</span></td>
-        <td>${escapeHtml(r.size)}</td>
-        <td class="mono">${escapeHtml(r.client_ip)}</td>
-        <td>${escapeHtml(r.latency)}</td>
-      </tr>
-    `).join("");
+    tbody.innerHTML = rows.map(r => {
+      const hasBucket = r.bucket && r.bucket !== "—";
+      const hasObject = hasBucket && r.object && r.object !== "—";
+      const bucketCell = hasBucket
+        ? `<a class="linkish" href="#bucket=${encodeURIComponent(r.bucket)}">${escapeHtml(r.bucket)}</a>`
+        : escapeHtml(r.bucket);
+      const objectCell = hasObject
+        ? `<a class="linkish mono" href="#bucket=${encodeURIComponent(r.bucket)}&object=${encodeURIComponent(r.object)}" title="${escapeHtml(r.object)}">${escapeHtml(r.object)}</a>`
+        : `<span class="mono">${escapeHtml(r.object)}</span>`;
+      return `
+        <tr>
+          <td style="color:var(--text-muted)">${escapeHtml(r.time)}</td>
+          <td class="mono">${escapeHtml(r.operation)}</td>
+          <td>${bucketCell}</td>
+          <td class="truncate">${objectCell}</td>
+          <td><span class="pill ${r.status === "Success" ? "ok" : "err"}">${escapeHtml(r.status)}</span></td>
+          <td>${escapeHtml(r.size)}</td>
+          <td class="mono">${escapeHtml(r.client_ip)}</td>
+          <td>${escapeHtml(r.latency)}</td>
+        </tr>`;
+    }).join("");
   }
 
   function renderBuckets(rows) {
     const tbody = $("buckets-body");
     if (!tbody) return;
     if (!rows || rows.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="4" style="color:var(--text-muted);padding:14px 8px">No buckets observed yet.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No buckets observed yet.</td></tr>';
       return;
     }
     const lock = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg>';
     tbody.innerHTML = rows.map(b => `
       <tr>
-        <td>${escapeHtml(b.name)}</td>
+        <td><a class="linkish" href="#bucket=${encodeURIComponent(b.name)}">${escapeHtml(b.name)}</a></td>
         <td><span class="enc-cell ${b.encrypted ? "on" : "off"}">${lock}${b.encrypted ? "Encrypted" : "Not Encrypted"}</span></td>
         <td>${escapeHtml(b.objects)}</td>
         <td>${escapeHtml(b.size)}</td>
@@ -499,57 +667,191 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 
   async function refresh() {
     try {
-      const r = await fetch(API, {credentials: "same-origin"});
+      const r = await fetch(API_STATUS, {credentials: "same-origin"});
+      if (r.status === 401) { location.href = "__LOGIN_URL__"; return; }
       if (!r.ok) return;
       const d = await r.json();
-
       setText("h-title", d.header.title);
       setText("h-status", d.header.status);
       setText("h-uptime", d.header.uptime);
-
-      const c = d.cards;
-      setText("c1-label", c.requests.label + " (24h)");
-      setText("c1-value", c.requests.value);
-      setText("c1-unit", c.requests.unit);
-      drawSpark("c1-spark", c.requests.spark);
-
-      setText("c2-label", c.data_encrypted.label + " (24h)");
-      setText("c2-value", c.data_encrypted.value);
-      setText("c2-unit", c.data_encrypted.unit);
-      drawSpark("c2-spark", c.data_encrypted.spark);
-
-      setText("c3-label", c.errors.label + " (24h)");
-      setText("c3-value", c.errors.value);
-      setText("c3-unit", c.errors.unit);
-      drawSpark("c3-spark", c.errors.spark);
-
-      setText("c4-label", c.active_buckets.label);
-      setText("c4-value", c.active_buckets.value);
-      setText("c4-delta", c.active_buckets.detail || "");
-
+      renderCard("c1", d.cards.requests);
+      renderCard("c2", d.cards.data_encrypted);
+      renderCard("c3", d.cards.errors);
+      renderCard("c4", d.cards.active_buckets);
       renderActivity(d.activity);
       renderBuckets(d.buckets);
       renderKeys(d.keys);
-
       setText("f-version", "v" + d.footer.version);
       setText("f-rps", d.footer.req_per_s);
       setText("f-throughput", d.footer.throughput);
       setText("f-lasterr", d.footer.last_error);
+    } catch (e) { /* retry next tick */ }
+  }
+
+  // ------------------- Bucket detail -------------------
+  async function loadBucket(bucket) {
+    setText("bv-title", bucket);
+    setText("bv-sub", "Listing objects…");
+    const tbody = $("bv-body");
+    tbody.innerHTML = '<tr><td colspan="3" class="empty-state">Loading…</td></tr>';
+    try {
+      const r = await fetch(API_BUCKET + "/" + encodeURIComponent(bucket), {credentials:"same-origin"});
+      if (r.status === 401) { location.href = "__LOGIN_URL__"; return; }
+      if (!r.ok) {
+        tbody.innerHTML = `<tr><td colspan="3" class="empty-state">Failed to load: ${r.status}</td></tr>`;
+        return;
+      }
+      const d = await r.json();
+      setText("bv-sub", `${d.count} object${d.count === 1 ? "" : "s"}${d.is_truncated ? " (truncated — showing first 500)" : ""}`);
+      if (!d.objects.length) {
+        tbody.innerHTML = '<tr><td colspan="3" class="empty-state">No objects.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = d.objects.map(o => `
+        <tr>
+          <td><a class="linkish mono" href="#bucket=${encodeURIComponent(bucket)}&object=${encodeURIComponent(o.key)}">${escapeHtml(o.key)}</a></td>
+          <td>${escapeHtml(o.size_h)}</td>
+          <td class="mono" style="color:var(--text-muted)">${escapeHtml(o.last_modified)}</td>
+        </tr>
+      `).join("");
     } catch (e) {
-      // swallow; next tick will retry
+      tbody.innerHTML = '<tr><td colspan="3" class="empty-state">Network error.</td></tr>';
     }
   }
 
-  document.getElementById("refresh-btn").addEventListener("click", refresh);
+  // ------------------- Object detail -------------------
+  async function loadObject(bucket, object) {
+    setText("ov-title", object.split("/").pop() || object);
+    setText("ov-sub", bucket + " / " + object);
+    $("ov-back").setAttribute("href", "#bucket=" + encodeURIComponent(bucket));
+    const tbody = $("ov-body");
+    tbody.innerHTML = '<tr><td colspan="2" class="empty-state">Loading…</td></tr>';
+    try {
+      const url = API_OBJECT + "/" + encodeURIComponent(bucket) + "/" + encodeURI(object);
+      const r = await fetch(url, {credentials: "same-origin"});
+      if (r.status === 401) { location.href = "__LOGIN_URL__"; return; }
+      if (!r.ok) {
+        tbody.innerHTML = `<tr><td colspan="2" class="empty-state">Failed to load: ${r.status}</td></tr>`;
+        return;
+      }
+      const d = await r.json();
+      const rows = [
+        ["Bucket", d.bucket],
+        ["Key", d.key],
+        ["Size (stored)", d.size_h],
+        ["Content-Type", d.content_type || "—"],
+        ["ETag", d.etag || "—"],
+        ["Last Modified", d.last_modified || "—"],
+        ["Encrypted", d.encrypted ? "Yes (AES-256-GCM)" : "No"],
+      ];
+      for (const [k, v] of Object.entries(d.metadata || {})) {
+        rows.push(["x-amz-meta-" + k, v]);
+      }
+      tbody.innerHTML = rows.map(([k, v]) =>
+        `<tr><td style="color:var(--text-muted);width:200px">${escapeHtml(k)}</td><td class="mono">${escapeHtml(v)}</td></tr>`
+      ).join("");
+    } catch (e) {
+      tbody.innerHTML = '<tr><td colspan="2" class="empty-state">Network error.</td></tr>';
+    }
+  }
+
+  // ------------------- Wire up ------------------
+  document.querySelectorAll(".card").forEach(card => {
+    card.addEventListener("click", () => card.classList.toggle("open"));
+  });
+  document.querySelectorAll("[data-goto]").forEach(el => {
+    el.addEventListener("click", (e) => { e.preventDefault(); gotoDashboard(); });
+  });
+  $("refresh-btn").addEventListener("click", refresh);
+  window.addEventListener("hashchange", navigateFromHash);
+
   refresh();
-  setInterval(refresh, 5000);
+  navigateFromHash();
+  setInterval(() => {
+    // Only refresh dashboard while we're actually on it
+    if (parseHash().view === "dashboard") refresh();
+  }, 5000);
 </script>
 </body>
 </html>
 """
 
 
+def _card_html(num: str, label: str, icon_svg: str) -> str:
+    return f"""
+      <div class="card" data-card="{num}">
+        <div class="card-head">
+          <div class="card-head-left">
+            <span class="card-icon">{icon_svg}</span>
+            <span id="c{num}-label">{label}</span>
+          </div>
+          <svg class="card-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
+        </div>
+        <div><span class="card-value" id="c{num}-value">—</span><span class="card-unit" id="c{num}-unit"></span></div>
+        <div class="card-delta" id="c{num}-delta">&nbsp;</div>
+        <svg class="spark" id="c{num}-spark" viewBox="0 0 100 28" preserveAspectRatio="none"></svg>
+        <div class="card-expand" id="c{num}-expand"></div>
+      </div>
+    """
+
+
+_ICON_REQUESTS = (
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+    ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M7 7h11l-3-3"/><path d="M17 17H6l3 3"/></svg>'
+)
+_ICON_LOCK = (
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+    ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+    '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>'
+)
+_ICON_ERR = (
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+    ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6A2 2 0 0 0 22 18L13.7 3.9a2 2 0 0 0-3.4 0z"/>'
+    '<line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>'
+)
+_ICON_BUCKET = (
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+    ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M4 8c0-2.2 3.6-4 8-4s8 1.8 8 4-3.6 4-8 4-8-1.8-8-4z"/>'
+    '<path d="M4 8v8c0 2.2 3.6 4 8 4s8-1.8 8-4V8"/></svg>'
+)
+
+
 def render_dashboard(admin_path: str = "/admin") -> str:
-    """Return the dashboard HTML with the API URL substituted."""
-    api_url = admin_path.rstrip("/") + "/api/status"
-    return _DASHBOARD_HTML.replace("__API_URL__", api_url)
+    """Render the dashboard HTML with API URLs + logout link substituted."""
+    prefix = admin_path.rstrip("/")
+    html = _DASHBOARD_HTML
+    html = html.replace("__SHARED_CSS__", _SHARED_CSS)
+    html = html.replace("__STATUS_URL__", f"{prefix}/api/status")
+    html = html.replace("__BUCKET_URL__", f"{prefix}/api/buckets")
+    html = html.replace("__OBJECT_URL__", f"{prefix}/api/objects")
+    html = html.replace("__LOGIN_URL__", f"{prefix}/login")
+    html = html.replace("__LOGOUT_URL__", f"{prefix}/logout")
+    html = html.replace("__CARD_REQUESTS__", _card_html("1", "Requests", _ICON_REQUESTS))
+    html = html.replace("__CARD_DATA__", _card_html("2", "Data Encrypted", _ICON_LOCK))
+    html = html.replace("__CARD_ERRORS__", _card_html("3", "Errors", _ICON_ERR))
+    html = html.replace("__CARD_BUCKETS__", _card_html("4", "Active Buckets", _ICON_BUCKET))
+    return html
+
+
+def render_login(admin_path: str = "/admin", error: str | None = None) -> str:
+    """Render the sign-in page."""
+    prefix = admin_path.rstrip("/")
+    error_block = (
+        f'<div class="login-error">{_esc(_login_error_text(error))}</div>' if error else ""
+    )
+    html = _LOGIN_HTML
+    html = html.replace("__SHARED_CSS__", _SHARED_CSS)
+    html = html.replace("__LOGIN_ACTION__", f"{prefix}/login")
+    html = html.replace("__ERROR_BLOCK__", error_block)
+    return html
+
+
+def _login_error_text(err: str) -> str:
+    mapping = {"1": "Invalid username or password."}
+    return mapping.get(err, "Sign in failed. Please try again.")

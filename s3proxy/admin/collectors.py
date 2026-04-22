@@ -179,6 +179,66 @@ def _read_errors_total() -> float:
     return errs
 
 
+def _read_error_breakdown() -> dict[str, float]:
+    """Break errors down by status class (4xx / 5xx / 503)."""
+    out = {"4xx": 0.0, "5xx": 0.0, "503": 0.0}
+    for sample in metrics.REQUEST_COUNT.collect()[0].samples:
+        if not sample.name.endswith("_total"):
+            continue
+        status = str(sample.labels.get("status", ""))
+        if status == "503":
+            out["503"] += sample.value
+            out["5xx"] += sample.value
+        elif status.startswith("5"):
+            out["5xx"] += sample.value
+        elif status.startswith("4"):
+            out["4xx"] += sample.value
+    return out
+
+
+def _read_method_breakdown() -> dict[str, float]:
+    out: dict[str, float] = {}
+    for sample in metrics.REQUEST_COUNT.collect()[0].samples:
+        if not sample.name.endswith("_total"):
+            continue
+        method = str(sample.labels.get("method", "?"))
+        out[method] = out.get(method, 0.0) + sample.value
+    return out
+
+
+def _latency_percentiles() -> dict[str, float]:
+    """Approximate p50/p95/p99 by walking the histogram cumulative buckets."""
+    buckets: list[tuple[float, float]] = []
+    total = 0.0
+    for sample in metrics.REQUEST_DURATION.collect()[0].samples:
+        if sample.name.endswith("_bucket"):
+            le = sample.labels.get("le", "")
+            if le == "+Inf":
+                total = sample.value
+            else:
+                try:
+                    buckets.append((float(le), sample.value))
+                except ValueError:
+                    continue
+    if total < 1 or not buckets:
+        return {"p50_ms": 0.0, "p95_ms": 0.0, "p99_ms": 0.0, "count": 0}
+    buckets.sort(key=lambda b: b[0])
+
+    def _pct(p: float) -> float:
+        threshold = total * p
+        for upper, count in buckets:
+            if count >= threshold:
+                return round(upper * 1000, 1)
+        return round(buckets[-1][0] * 1000, 1)
+
+    return {
+        "p50_ms": _pct(0.5),
+        "p95_ms": _pct(0.95),
+        "p99_ms": _pct(0.99),
+        "count": int(total),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Formatters
 # ---------------------------------------------------------------------------
@@ -322,26 +382,46 @@ def collect_all(settings: Settings, start_time: float, version: str = "1.0.0") -
                 "value": f"{int(total_requests):,}",
                 "unit": "",
                 "spark": _rate_tracker.sparkline("requests"),
+                "breakdown": [
+                    {"label": m, "value": f"{int(v):,}"}
+                    for m, v in sorted(
+                        _read_method_breakdown().items(), key=lambda kv: -kv[1]
+                    )
+                    if v > 0
+                ],
             },
             "data_encrypted": {
                 "label": "Data Encrypted",
                 "value": num_enc,
                 "unit": unit_enc,
                 "spark": _rate_tracker.sparkline("bytes_crypto"),
+                "breakdown": [
+                    {"label": "Encrypted (PUT)", "value": " ".join(_format_bytes(bytes_encrypted))},
+                    {"label": "Decrypted (GET)", "value": " ".join(_format_bytes(bytes_decrypted))},
+                ],
             },
             "errors": {
                 "label": "Errors",
                 "value": f"{int(errors_total):,}",
                 "unit": "",
                 "spark": _rate_tracker.sparkline("errors"),
+                "breakdown": [
+                    {"label": k, "value": f"{int(v):,}"}
+                    for k, v in _read_error_breakdown().items()
+                ],
             },
             "active_buckets": {
                 "label": "Active Buckets",
                 "value": str(len(buckets)),
                 "unit": "",
                 "detail": f"seen in last {len(entries)} reqs",
+                "breakdown": [
+                    {"label": b["name"], "value": f"{b['objects']} obj · {b['size']}"}
+                    for b in buckets[:8]
+                ],
             },
         },
+        "latency": _latency_percentiles(),
         "activity": [
             {
                 "time": _format_relative(e["timestamp"], now),
@@ -378,3 +458,89 @@ def collect_all(settings: Settings, start_time: float, version: str = "1.0.0") -
 def _operation_display(method: str, operation: str) -> str:
     """Shorten operation names for the feed (GET, PUT, DELETE, etc.)."""
     return method or operation
+
+
+# ---------------------------------------------------------------------------
+# S3-backed drill-down helpers (bucket list, object head)
+# ---------------------------------------------------------------------------
+
+
+async def list_bucket_objects(
+    settings: Settings,
+    credentials_store: dict[str, str],
+    bucket: str,
+    prefix: str = "",
+    max_keys: int = 500,
+) -> dict:
+    """List objects in a bucket using the configured AWS credentials.
+
+    The admin UI authenticates out-of-band (session cookie / Basic Auth) and
+    uses the proxy's own S3 credentials to issue the ListObjectsV2.
+    """
+    from ..client import S3Client, S3Credentials
+
+    if not credentials_store:
+        raise RuntimeError("No S3 credentials available")
+    access = next(iter(credentials_store))
+    creds = S3Credentials(access, credentials_store[access], settings.region)
+
+    async with S3Client(settings, creds) as client:
+        result = await client.list_objects_v2(
+            bucket=bucket, prefix=prefix or None, max_keys=max_keys
+        )
+    objects = []
+    for o in result.get("Contents", []) or []:
+        lm = o.get("LastModified")
+        objects.append(
+            {
+                "key": o.get("Key", ""),
+                "size": int(o.get("Size", 0)),
+                "size_h": _format_size(int(o.get("Size", 0))),
+                "last_modified": lm.isoformat() if lm else "",
+                "etag": (o.get("ETag") or "").strip('"'),
+            }
+        )
+    return {
+        "bucket": bucket,
+        "prefix": prefix,
+        "objects": objects,
+        "count": len(objects),
+        "is_truncated": bool(result.get("IsTruncated", False)),
+    }
+
+
+async def head_object_detail(
+    settings: Settings,
+    credentials_store: dict[str, str],
+    bucket: str,
+    key: str,
+) -> dict:
+    """HEAD an object and return user-facing metadata."""
+    from ..client import S3Client, S3Credentials
+
+    if not credentials_store:
+        raise RuntimeError("No S3 credentials available")
+    access = next(iter(credentials_store))
+    creds = S3Credentials(access, credentials_store[access], settings.region)
+
+    async with S3Client(settings, creds) as client:
+        md = await client.head_object(bucket, key)
+
+    user_metadata = dict(md.get("Metadata") or {})
+    # Redact the binary envelope (encrypted DEK) — it's opaque to humans.
+    isec = user_metadata.pop(settings.dektag_name, None)
+    if isec is not None:
+        user_metadata["_encrypted_dek"] = f"<{len(isec)} bytes>"
+
+    lm = md.get("LastModified")
+    return {
+        "bucket": bucket,
+        "key": key,
+        "content_length": int(md.get("ContentLength", 0)),
+        "size_h": _format_size(int(md.get("ContentLength", 0))),
+        "content_type": md.get("ContentType", ""),
+        "etag": (md.get("ETag") or "").strip('"'),
+        "last_modified": lm.isoformat() if lm else "",
+        "metadata": user_metadata,
+        "encrypted": isec is not None,
+    }
