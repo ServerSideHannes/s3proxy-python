@@ -45,8 +45,8 @@ services:
 
         echo "=== Installing kind, kubectl, helm (parallel) ==="
         wget -qO /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/v0.31.0/kind-linux-$${ARCH}" &
-        wget -qO /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.32.2/bin/linux/$${ARCH}/kubectl" &
-        wget -qO- "https://get.helm.sh/helm-v3.14.0-linux-$${ARCH}.tar.gz" | tar xz -C /tmp &
+        wget -qO /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.34.3/bin/linux/$${ARCH}/kubectl" &
+        wget -qO- "https://get.helm.sh/helm-v3.20.2-linux-$${ARCH}.tar.gz" | tar xz -C /tmp &
         wait
         chmod +x /usr/local/bin/kind /usr/local/bin/kubectl
         mv /tmp/linux-$${ARCH}/helm /usr/local/bin/helm
@@ -61,7 +61,7 @@ services:
         # Build esrally image with dependencies pre-installed (parallel)
         (
           printf '%s\n' \
-            'FROM python:3.12-slim' \
+            'FROM python:3.14-slim' \
             'RUN apt-get update && apt-get install -y --no-install-recommends gcc python3-dev git curl && rm -rf /var/lib/apt/lists/*' \
             'RUN pip install --no-cache-dir esrally' \
             | docker build -t esrally:latest -f - /tmp
@@ -118,22 +118,22 @@ services:
           "    config_path = \"/etc/containerd/certs.d\"" \
           "nodes:" \
           "  - role: control-plane" \
-          "    image: kindest/node:v1.32.2" \
+          "    image: kindest/node:v1.34.3" \
           "    extraMounts:" \
           "      - hostPath: $$HOST_PATH" \
           "        containerPath: /repo" \
           "  - role: worker" \
-          "    image: kindest/node:v1.32.2" \
+          "    image: kindest/node:v1.34.3" \
           "    extraMounts:" \
           "      - hostPath: $$HOST_PATH" \
           "        containerPath: /repo" \
           "  - role: worker" \
-          "    image: kindest/node:v1.32.2" \
+          "    image: kindest/node:v1.34.3" \
           "    extraMounts:" \
           "      - hostPath: $$HOST_PATH" \
           "        containerPath: /repo" \
           "  - role: worker" \
-          "    image: kindest/node:v1.32.2" \
+          "    image: kindest/node:v1.34.3" \
           "    extraMounts:" \
           "      - hostPath: $$HOST_PATH" \
           "        containerPath: /repo" \
@@ -206,7 +206,7 @@ services:
         (
           echo "Installing ECK CRDs..."
           for i in 1 2 3; do
-            kubectl apply -f https://download.elastic.co/downloads/eck/3.2.0/crds.yaml && break
+            kubectl apply -f https://download.elastic.co/downloads/eck/3.3.2/crds.yaml && break
             echo "ECK CRDs apply failed, retry $$i..."
             sleep 5
           done
@@ -216,7 +216,7 @@ services:
           kubectl wait --for=condition=Established crd/kibanas.kibana.k8s.elastic.co --timeout=60s
           echo "Installing ECK operator..."
           for i in 1 2 3; do
-            kubectl apply -f https://download.elastic.co/downloads/eck/3.2.0/operator.yaml && break
+            kubectl apply -f https://download.elastic.co/downloads/eck/3.3.2/operator.yaml && break
             echo "ECK operator apply failed, retry $$i..."
             sleep 5
           done
@@ -245,12 +245,12 @@ services:
         # 4. cert-manager + Scylla Operator + Scylla Manager (sequential chain in single background job)
         (
           # cert-manager
-          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.17.2/cert-manager.yaml
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.19.0/cert-manager.yaml
           kubectl wait --namespace cert-manager --for=condition=ready pod --all --timeout=300s
           echo "✓ cert-manager ready"
 
           # Scylla Operator (requires cert-manager)
-          kubectl apply --server-side -f https://raw.githubusercontent.com/scylladb/scylla-operator/v1.19.0/deploy/operator.yaml
+          kubectl apply --server-side -f https://raw.githubusercontent.com/scylladb/scylla-operator/v1.20.2/deploy/operator.yaml
           kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=scylla-operator -n scylla-operator --timeout=300s
           kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=webhook-server -n scylla-operator --timeout=300s
           # Wait for webhook to be fully ready
@@ -275,7 +275,7 @@ services:
             | kubectl apply -f -
 
           # manager-prod.yaml creates a ScyllaCluster backend for the manager
-          kubectl apply --server-side -f https://raw.githubusercontent.com/scylladb/scylla-operator/v1.19.0/deploy/manager-prod.yaml
+          kubectl apply --server-side -f https://raw.githubusercontent.com/scylladb/scylla-operator/v1.20.2/deploy/manager-prod.yaml
 
           # Wait for backend DB pods to appear
           echo "Waiting for Scylla Manager backend DB pods..."
