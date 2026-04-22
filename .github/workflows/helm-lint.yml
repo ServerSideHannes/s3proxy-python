@@ -2,8 +2,6 @@ name: Helm Lint
 
 on:
   pull_request:
-    paths:
-      - 'chart/**'
 
 jobs:
   helm-lint:
