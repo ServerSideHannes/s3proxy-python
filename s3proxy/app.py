@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -78,8 +79,10 @@ def create_lifespan(settings: Settings, credentials_store: dict[str, str]) -> As
         handler = S3ProxyHandler(settings, credentials_store, multipart_manager)
 
         # Store in app.state for route access
+        app.state.settings = settings
         app.state.handler = handler
         app.state.verifier = verifier
+        app.state.start_time = time.monotonic()
 
         yield
 
@@ -106,6 +109,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="S3Proxy", lifespan=lifespan, docs_url=None, redoc_url=None)
 
     _register_exception_handlers(app)
+
+    if settings.admin_ui:
+        from .admin import create_admin_router
+
+        app.include_router(
+            create_admin_router(settings, credentials_store),
+            prefix=settings.admin_path,
+        )
+
     _register_routes(app)
 
     return app
@@ -116,7 +128,20 @@ def _register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(HTTPException)
     async def s3_exception_handler(request: Request, exc: HTTPException):
-        """Return S3-compatible error response with request ID."""
+        """Return S3-compatible error response with request ID.
+
+        Non-S3 exceptions that carry their own headers (e.g. admin auth 401 with
+        WWW-Authenticate) are passed through so browsers can prompt for credentials.
+        """
+        if not isinstance(exc, S3Error) and getattr(exc, "headers", None):
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
+                headers=exc.headers,
+            )
+
         request_id = str(uuid.uuid4()).replace("-", "").upper()[:16]
 
         if isinstance(exc, S3Error):
