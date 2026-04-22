@@ -176,6 +176,12 @@ def _register_routes(app: FastAPI) -> None:
     async def health():
         return PlainTextResponse("ok")
 
+    @app.get("/favicon.ico")
+    async def favicon() -> Response:
+        # Silence browser favicon probes so they don't fall through to the
+        # S3 catch-all and pollute the admin activity feed as a "bucket".
+        return Response(status_code=204)
+
     @app.get("/metrics")
     async def metrics():
         return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)

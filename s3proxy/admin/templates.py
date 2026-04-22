@@ -340,7 +340,6 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="section-title">Recent Activity</div>
       <div class="section-actions">
         <span class="live"><span class="dot"></span>Live</span>
-        <a href="#" class="link-action">View all logs →</a>
       </div>
     </div>
     <table>
@@ -362,7 +361,6 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="section" style="margin-bottom:0">
       <div class="section-head">
         <div class="section-title">Buckets</div>
-        <button class="btn-dark" type="button">+ Add Bucket</button>
       </div>
       <table>
         <thead>
@@ -374,13 +372,11 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
           </td></tr>
         </tbody>
       </table>
-      <a href="#" class="view-more">View all buckets →</a>
     </div>
 
     <div class="section" style="margin-bottom:0">
       <div class="section-head">
         <div class="section-title">Keys</div>
-        <button class="btn-dark" type="button">+ Create Key</button>
       </div>
       <table>
         <thead>
@@ -388,7 +384,6 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         </thead>
         <tbody id="keys-body"></tbody>
       </table>
-      <a href="#" class="view-more">View all keys →</a>
     </div>
   </section>
 
