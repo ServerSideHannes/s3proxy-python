@@ -18,3 +18,13 @@ data:
   {{- end }}
   S3PROXY_REDIS_UPLOAD_TTL_HOURS: {{ .Values.externalRedis.uploadTtlHours | quote }}
   S3PROXY_LOG_LEVEL: {{ .Values.logLevel | quote }}
+  {{- if .Values.admin.enabled }}
+  S3PROXY_ADMIN_UI: "true"
+  S3PROXY_ADMIN_PATH: {{ .Values.admin.path | quote }}
+  {{- if .Values.admin.username }}
+  S3PROXY_ADMIN_USERNAME: {{ .Values.admin.username | quote }}
+  {{- end }}
+  {{- if .Values.admin.password }}
+  S3PROXY_ADMIN_PASSWORD: {{ .Values.admin.password | quote }}
+  {{- end }}
+  {{- end }}

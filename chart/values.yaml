@@ -97,6 +97,14 @@ secrets:
 
 logLevel: "DEBUG"
 
+# Admin dashboard — served on the main service port at `admin.path`.
+# When username/password are blank, auth falls back to the AWS access key / secret.
+admin:
+  enabled: false
+  path: "/admin"
+  username: ""
+  password: ""
+
 resources:
   requests:
     cpu: "100m"
