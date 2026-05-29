@@ -14,6 +14,13 @@ updates:
         applies-to: security-updates
         patterns:
           - "*"
+    ignore:
+      # aioboto3 (latest 15.5.0) pins aiobotocore==2.25.1, which caps
+      # botocore <1.40.62. boto3/botocore release far ahead of that, so
+      # bumping them independently makes resolution unsatisfiable. Let
+      # aioboto3 drive their versions; revisit when a newer aioboto3 ships.
+      - dependency-name: "boto3"
+      - dependency-name: "botocore"
 
   - package-ecosystem: "docker"
     directory: "/"
