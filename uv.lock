@@ -1289,7 +1289,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=46.0.0" },
     { name = "fakeredis", marker = "extra == 'dev'", specifier = ">=2.35.0" },
     { name = "fastapi", specifier = ">=0.136.0" },
-    { name = "httpx", extras = ["http2"], specifier = ">=0.28.0" },
+    { name = "httpx", extras = ["http2"], specifier = ">=0.28.1" },
     { name = "moto", extras = ["s3"], marker = "extra == 'dev'", specifier = ">=5.1.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.20.0" },
     { name = "orjson", specifier = ">=3.11.0" },
