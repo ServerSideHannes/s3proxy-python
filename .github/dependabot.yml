@@ -7,6 +7,11 @@ updates:
     open-pull-requests-limit: 10
     groups:
       all-dependencies:
+        applies-to: version-updates
+        patterns:
+          - "*"
+      security:
+        applies-to: security-updates
         patterns:
           - "*"
 
@@ -17,5 +22,10 @@ updates:
     open-pull-requests-limit: 10
     groups:
       docker:
+        applies-to: version-updates
+        patterns:
+          - "*"
+      docker-security:
+        applies-to: security-updates
         patterns:
           - "*"
