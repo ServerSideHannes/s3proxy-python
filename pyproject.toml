@@ -30,7 +30,7 @@ dependencies = [
     "pydantic-settings>=2.14.0",
     "structlog>=25.5.0",
     "httpx[http2]>=0.28.0",
-    "python-multipart>=0.0.26",
+    "python-multipart>=0.0.27",
     # Performance optimizations
     "uvloop>=0.22.0; sys_platform != 'win32'",
     "orjson>=3.11.0",
