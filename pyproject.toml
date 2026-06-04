@@ -21,7 +21,7 @@ keywords = [
 requires-python = ">=3.14"
 dependencies = [
     "fastapi>=0.136.3",
-    "uvicorn[standard]>=0.48.0",
+    "uvicorn[standard]>=0.49.0",
     "aioboto3>=15.5.0",
     "boto3>=1.40.0",
     "botocore>=1.40.0",
@@ -30,7 +30,7 @@ dependencies = [
     "pydantic-settings>=2.14.1",
     "structlog>=25.5.0",
     "httpx[http2]>=0.28.1",
-    "python-multipart>=0.0.29",
+    "python-multipart>=0.0.30",
     # Performance optimizations
     "uvloop>=0.22.0; sys_platform != 'win32'",
     "orjson>=3.11.9",
@@ -51,8 +51,8 @@ dev = [
     "moto[s3]>=5.2.1",
     "ruff>=0.15.15",
     "mypy>=2.1.0",
-    "boto3-stubs[s3]>=1.43.17",
-    "fakeredis>=2.35.0",
+    "boto3-stubs[s3]>=1.43.22",
+    "fakeredis>=2.36.0",
     "requests>=2.34.2",
 ]
 
