@@ -34,7 +34,7 @@ class TestPartOrdering:
         from s3proxy import crypto
 
         dek = crypto.generate_dek()
-        await manager.create_upload(bucket, key, upload_id, dek)
+        await manager.create_upload(bucket, key, upload_id, dek, kid="AKIAIOSFODNN7EXAMPLE")
 
         # Simulate parts uploaded out of order with direct client→internal mapping
         # (NEW: no splitting = use client part number as internal part number)
@@ -158,7 +158,7 @@ class TestPartOrdering:
         from s3proxy import crypto
 
         dek = crypto.generate_dek()
-        await manager.create_upload(bucket, key, upload_id, dek)
+        await manager.create_upload(bucket, key, upload_id, dek, kid="AKIAIOSFODNN7EXAMPLE")
 
         # Upload parts in order with sequential internal parts
         for i in range(1, 4):

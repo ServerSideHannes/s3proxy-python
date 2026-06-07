@@ -9,10 +9,10 @@ from .keyring import KeyRing, derive_kek
 
 
 class CredentialEntry(BaseModel):
-    """An AWS login with its own encryption key, supplied via S3PROXY_CREDENTIALS.
+    """An AWS credential with its own encryption key, via S3PROXY_CREDENTIALS.
 
     The proxy verifies the client's SigV4 signature with `secret_key`, then
-    encrypts/decrypts that login's objects with the KEK derived from `kek`.
+    encrypts/decrypts that credential's objects with the KEK derived from `kek`.
     """
 
     access_key: str
@@ -35,13 +35,13 @@ class Settings(BaseSettings):
         default="isec-kid", description="Metadata tag name for the key id that wrapped the DEK"
     )
 
-    # Per-access-key encryption. Each entry is an AWS login with its own KEK.
-    # The access key that wrote an object is stored as its kid; objects are
+    # Per-access-key encryption. Each entry is an AWS credential with its own
+    # KEK. The access key that wrote an object is stored as its kid; objects are
     # decrypted with the KEK of that access key. Replaces the single
     # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY credential.
     credentials: list[CredentialEntry] = Field(
         default_factory=list,
-        description="AWS logins with per-credential KEKs (JSON list)",
+        description="AWS credentials with per-credential KEKs (JSON list)",
     )
 
     # Server settings

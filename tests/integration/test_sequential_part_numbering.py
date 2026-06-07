@@ -32,7 +32,7 @@ class TestSequentialPartNumbering:
 
         # Create upload
         dek = crypto.generate_dek()
-        await manager.create_upload(bucket, key, upload_id, dek)
+        await manager.create_upload(bucket, key, upload_id, dek, kid="AKIAIOSFODNN7EXAMPLE")
 
         # Simulate Client Part 2 uploaded first (smaller, 4.24MB)
         # With exact allocation (no +5 buffer), should get internal part 1
@@ -110,8 +110,12 @@ class TestSequentialPartNumbering:
         dek = crypto.generate_dek()
 
         # Create two independent uploads
-        await manager.create_upload("bucket", "file-a.tar", "upload-a", dek)
-        await manager.create_upload("bucket", "file-b.tar", "upload-b", dek)
+        await manager.create_upload(
+            "bucket", "file-a.tar", "upload-a", dek, kid="AKIAIOSFODNN7EXAMPLE"
+        )
+        await manager.create_upload(
+            "bucket", "file-b.tar", "upload-b", dek, kid="AKIAIOSFODNN7EXAMPLE"
+        )
 
         # Upload A allocates parts
         start_a1 = await manager.allocate_internal_parts("bucket", "file-a.tar", "upload-a", 1)
@@ -145,7 +149,7 @@ class TestSequentialPartNumbering:
         upload_id = "test-eight-part"
 
         dek = crypto.generate_dek()
-        await manager.create_upload(bucket, key, upload_id, dek)
+        await manager.create_upload(bucket, key, upload_id, dek, kid="AKIAIOSFODNN7EXAMPLE")
 
         internal_numbers = []
         for part_num in range(1, 9):
@@ -196,7 +200,7 @@ class TestSequentialPartNumbering:
         upload_id = "test-buffer-demo"
 
         dek = crypto.generate_dek()
-        await manager.create_upload(bucket, key, upload_id, dek)
+        await manager.create_upload(bucket, key, upload_id, dek, kid="AKIAIOSFODNN7EXAMPLE")
 
         # Simulate OLD behavior: allocate with +5 buffer
         # Client Part 1 (estimated 1 part) → allocates 1+5=6 parts [1-6]

@@ -6,7 +6,7 @@
 helm install s3proxy oci://ghcr.io/serversidehannes/s3proxy-python/charts/s3proxy-python \
   --set secrets.credentials[0].accessKey="AKIA..." \
   --set secrets.credentials[0].secretKey="wJalr..." \
-  --set secrets.credentials[0].kek="this-login-kek-secret"
+  --set secrets.credentials[0].kek="this-credentials-encryption-secret"
 ```
 
 ## Values
@@ -23,7 +23,7 @@ helm install s3proxy oci://ghcr.io/serversidehannes/s3proxy-python/charts/s3prox
 | `server.noTls` | `true` | Disable TLS (in-cluster only) |
 | `performance.memoryLimitMb` | `64` | Memory budget for streaming |
 | `logLevel` | `DEBUG` | Log level |
-| `secrets.credentials` | `[]` | AWS logins, each `{accessKey, secretKey, kek}` — the login's KEK encrypts its objects |
+| `secrets.credentials` | `[]` | AWS credentials, each `{accessKey, secretKey, kek}` — the credential's KEK encrypts its objects |
 | `secrets.existingSecrets.enabled` | `false` | Use pre-created K8s secret |
 | `secrets.existingSecrets.name` | `""` | Existing secret name |
 | `secrets.existingSecrets.keys.credentials` | `S3PROXY_CREDENTIALS` | Credentials key name in existing secret |

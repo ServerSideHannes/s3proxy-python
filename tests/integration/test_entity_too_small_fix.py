@@ -30,7 +30,7 @@ class TestEntityTooSmallFix:
 
         # Create upload
         dek = crypto.generate_dek()
-        state = await manager.create_upload(bucket, key, upload_id, dek)
+        state = await manager.create_upload(bucket, key, upload_id, dek, kid="AKIAIOSFODNN7EXAMPLE")
 
         # Simulate Elasticsearch uploading a 50MB part (typical size)
         # With PART_SIZE=64MB, this should NOT be split
@@ -79,7 +79,7 @@ class TestEntityTooSmallFix:
 
         # Create upload
         dek = crypto.generate_dek()
-        await manager.create_upload(bucket, key, upload_id, dek)
+        await manager.create_upload(bucket, key, upload_id, dek, kid="AKIAIOSFODNN7EXAMPLE")
 
         # Upload 6 parts of ~50MB each (total ~300MB, similar to shard 3: 305MB)
         internal_part_num = 1
@@ -141,7 +141,7 @@ class TestEntityTooSmallFix:
 
         # Create upload
         dek = crypto.generate_dek()
-        await manager.create_upload(bucket, key, upload_id, dek)
+        await manager.create_upload(bucket, key, upload_id, dek, kid="AKIAIOSFODNN7EXAMPLE")
 
         # 100MB part splits into 64MB + 36MB
         part = PartMetadata(
@@ -197,7 +197,7 @@ class TestEntityTooSmallFix:
 
         # Create upload
         dek = crypto.generate_dek()
-        await manager.create_upload(bucket, key, upload_id, dek)
+        await manager.create_upload(bucket, key, upload_id, dek, kid="AKIAIOSFODNN7EXAMPLE")
 
         # 130MB part splits into 64MB + 64MB + 2MB
         part = PartMetadata(
@@ -261,7 +261,7 @@ class TestEntityTooSmallFix:
 
         # Create upload
         dek = crypto.generate_dek()
-        await manager.create_upload(bucket, key, upload_id, dek)
+        await manager.create_upload(bucket, key, upload_id, dek, kid="AKIAIOSFODNN7EXAMPLE")
 
         # Production showed parts 1, 2, 3, 4, 5 with total 305MB
         # Average ~61MB per part

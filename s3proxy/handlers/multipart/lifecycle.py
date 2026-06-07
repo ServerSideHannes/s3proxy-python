@@ -177,7 +177,14 @@ class LifecycleMixin(BaseHandler):
             # Order matters: if metadata save fails, state is preserved
             # so the upload can be retried. Deleting state first would
             # lose the DEK, making the object permanently undecryptable.
-            wrapped_dek = crypto.wrap_key(state.dek, self.keyring.key_by_id(state.kid))
+            # Prefer the kid recorded when the upload was created; if the state
+            # predates it (e.g. older recovered state), fall back to the
+            # completing credential's key.
+            if state.kid:
+                kid, kek = state.kid, self.keyring.key_by_id(state.kid)
+            else:
+                kid, kek = self.keyring.key_for(creds.access_key)
+            wrapped_dek = crypto.wrap_key(state.dek, kek)
             await save_multipart_metadata(
                 client,
                 bucket,
@@ -188,7 +195,7 @@ class LifecycleMixin(BaseHandler):
                     total_plaintext_size=total_plaintext,
                     parts=completed_parts,
                     wrapped_dek=wrapped_dek,
-                    kid=state.kid,
+                    kid=kid,
                 ),
             )
             await delete_upload_state(client, bucket, key, upload_id)
