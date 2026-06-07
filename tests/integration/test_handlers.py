@@ -16,10 +16,16 @@ def settings():
     """Create test settings."""
     return Settings(
         host="http://localhost:9000",
-        encrypt_key="test-encryption-key",
         region="us-east-1",
         no_tls=True,
         port=4433,
+        credentials=[
+            {
+                "access_key": "AKIAIOSFODNN7EXAMPLE",
+                "secret_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                "kek": "test-credential-kek",
+            }
+        ],
     )
 
 
@@ -89,11 +95,10 @@ class TestSettings:
 
     def test_default_settings(self):
         """Test default settings values."""
-        with patch.dict(os.environ, {"S3PROXY_ENCRYPT_KEY": "test-key"}):
-            settings = Settings()
-            assert settings.region == "us-east-1"
-            assert settings.no_tls is False
-            assert settings.port == 4433
+        settings = Settings()
+        assert settings.region == "us-east-1"
+        assert settings.no_tls is False
+        assert settings.port == 4433
 
 
 class TestRangeParsing:
@@ -281,7 +286,7 @@ class TestMultipartDownloadWithInternalParts:
     """Test downloading multipart objects with internal parts (streaming uploads)."""
 
     @pytest.mark.asyncio
-    async def test_download_multipart_with_internal_parts(self, settings, mock_s3):
+    async def test_download_multipart_with_internal_parts(self, settings, mock_s3, kek):
         """Test downloading an object that was uploaded with internal parts."""
         from unittest.mock import MagicMock
 
@@ -305,7 +310,7 @@ class TestMultipartDownloadWithInternalParts:
         # Part 1: 50MB plaintext split into 4 internal parts (16MB + 16MB + 16MB + 2MB)
         test_data = b"x" * (50 * 1024 * 1024)  # 50MB
         dek = crypto.generate_dek()
-        wrapped_dek = crypto.wrap_key(dek, settings.kek)
+        wrapped_dek = crypto.wrap_key(dek, kek)
 
         # Split into internal parts
         part_size = 16 * 1024 * 1024
@@ -353,6 +358,7 @@ class TestMultipartDownloadWithInternalParts:
             total_plaintext_size=len(test_data),
             parts=[part_meta],
             wrapped_dek=wrapped_dek,
+            kid="AKIAIOSFODNN7EXAMPLE",
         )
 
         # Upload concatenated ciphertext as the S3 object
@@ -386,7 +392,7 @@ class TestMultipartDownloadWithInternalParts:
         assert response.status_code == 200
 
     @pytest.mark.asyncio
-    async def test_download_multipart_with_range_request(self, settings, mock_s3):
+    async def test_download_multipart_with_range_request(self, settings, mock_s3, kek):
         """Test range download from object with internal parts."""
         from unittest.mock import MagicMock
 
@@ -409,7 +415,7 @@ class TestMultipartDownloadWithInternalParts:
         # Create test data with recognizable pattern
         test_data = b"".join([bytes([i % 256]) * 1024 for i in range(1024)])  # 1MB with pattern
         dek = crypto.generate_dek()
-        wrapped_dek = crypto.wrap_key(dek, settings.kek)
+        wrapped_dek = crypto.wrap_key(dek, kek)
 
         # Split into 2 internal parts
         part_size = len(test_data) // 2
@@ -455,6 +461,7 @@ class TestMultipartDownloadWithInternalParts:
             total_plaintext_size=len(test_data),
             parts=[part_meta],
             wrapped_dek=wrapped_dek,
+            kid="AKIAIOSFODNN7EXAMPLE",
         )
 
         # Upload concatenated ciphertext

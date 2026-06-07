@@ -36,6 +36,7 @@ def serialize_upload_state(state: MultipartUploadState) -> bytes:
         "created_at": state.created_at.isoformat(),
         "total_plaintext_size": state.total_plaintext_size,
         "next_internal_part_number": state.next_internal_part_number,
+        "kid": state.kid,
         "parts": {
             str(pn): {
                 "part_number": p.part_number,
@@ -132,6 +133,7 @@ def deserialize_upload_state(data: bytes) -> MultipartUploadState | None:
             created_at=datetime.fromisoformat(obj["created_at"]),
             total_plaintext_size=obj.get("total_plaintext_size", 0),
             next_internal_part_number=obj.get("next_internal_part_number", 1),
+            kid=obj.get("kid", ""),
         )
     except (KeyError, TypeError, ValueError) as e:
         logger.error(

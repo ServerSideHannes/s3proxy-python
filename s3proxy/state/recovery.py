@@ -7,6 +7,7 @@ import structlog
 from structlog.stdlib import BoundLogger
 
 from .. import crypto
+from ..keyring import KeyRing
 from .manager import MAX_INTERNAL_PARTS_PER_CLIENT
 from .metadata import load_upload_state
 from .models import InternalPartMetadata, MultipartUploadState, PartMetadata
@@ -30,12 +31,12 @@ async def reconstruct_upload_state_from_s3(
     bucket: str,
     key: str,
     upload_id: str,
-    kek: bytes,
+    keyring: KeyRing,
 ) -> MultipartUploadState | None:
     """Reconstruct upload state from S3 when Redis state is lost.
 
     This is a fallback recovery mechanism that:
-    1. Loads the DEK from S3 metadata
+    1. Loads the wrapped DEK + kid from S3 metadata, unwraps via the keyring
     2. Lists all uploaded parts from S3
     3. Reconstructs part metadata from the S3 response
 
@@ -49,9 +50,9 @@ async def reconstruct_upload_state_from_s3(
         upload_id=upload_id[:20] + "..." if len(upload_id) > 20 else upload_id,
     )
 
-    # Step 1: Load DEK from S3 metadata
-    dek = await load_upload_state(s3_client, bucket, key, upload_id, kek)
-    if not dek:
+    # Step 1: Load wrapped DEK + kid from S3 metadata, unwrap via keyring
+    state_data = await load_upload_state(s3_client, bucket, key, upload_id)
+    if not state_data:
         logger.warning(
             "RECONSTRUCT_FAILED_NO_DEK",
             bucket=bucket,
@@ -59,6 +60,8 @@ async def reconstruct_upload_state_from_s3(
             upload_id=upload_id,
         )
         return None
+    wrapped_dek, kid = state_data
+    dek = crypto.unwrap_key(wrapped_dek, keyring.key_by_id(kid))
 
     # Step 2: List all uploaded parts from S3
     try:
@@ -158,6 +161,7 @@ async def reconstruct_upload_state_from_s3(
         total_plaintext_size=total_plaintext_size,
         next_internal_part_number=max_internal_part_number + 1,
         created_at=datetime.now(UTC),
+        kid=kid,
     )
 
     logger.info(

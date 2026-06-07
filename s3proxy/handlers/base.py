@@ -70,6 +70,7 @@ class BaseHandler:
         self.settings = settings
         self.credentials_store = credentials_store
         self.multipart_manager = multipart_manager
+        self.keyring = settings.keyring
 
     def _client(self, creds: S3Credentials) -> S3Client:
         return S3Client(self.settings, creds)
@@ -216,13 +217,13 @@ class BaseHandler:
         return None
 
     async def _download_encrypted_single(
-        self, client: S3Client, bucket: str, key: str, wrapped_dek_b64: str
+        self, client: S3Client, bucket: str, key: str, wrapped_dek_b64: str, kid: str = ""
     ) -> bytes:
         resp = await client.get_object(bucket, key)
         async with resp["Body"] as body:
             ciphertext = await body.read()
         wrapped_dek = base64.b64decode(wrapped_dek_b64)
-        return crypto.decrypt_object(ciphertext, wrapped_dek, self.settings.kek)
+        return crypto.decrypt_object(ciphertext, wrapped_dek, self.keyring.key_by_id(kid))
 
     async def _download_encrypted_multipart(
         self,
@@ -234,7 +235,7 @@ class BaseHandler:
         range_end: int | None = None,
     ) -> bytes:
         """Download and decrypt multipart encrypted object, optionally with range."""
-        dek = crypto.unwrap_key(meta.wrapped_dek, self.settings.kek)
+        dek = crypto.unwrap_key(meta.wrapped_dek, self.keyring.key_by_id(meta.kid))
         sorted_parts = sorted(meta.parts, key=lambda p: p.part_number)
 
         plaintext_chunks = []

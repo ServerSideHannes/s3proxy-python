@@ -28,7 +28,7 @@ class TestElasticsearchRangeScenario:
     """Test the actual scenario from Elasticsearch backup logs."""
 
     @pytest.mark.asyncio
-    async def test_elasticsearch_backup_range_error(self, handler, settings):
+    async def test_elasticsearch_backup_range_error(self, handler, settings, kek):
         """
         Test scenario from logs: range bytes=53687203-70464446 fails.
 
@@ -94,7 +94,8 @@ class TestElasticsearchRangeScenario:
             part_count=1,
             total_plaintext_size=64 * 1024 * 1024,
             parts=[part_meta],
-            wrapped_dek=crypto.wrap_key(dek, settings.kek),
+            wrapped_dek=crypto.wrap_key(dek, kek),
+            kid="AKIAIOSFODNN7EXAMPLE",
         )
 
         with patch.object(handler, "_client", return_value=mock_client):
@@ -132,7 +133,7 @@ class TestElasticsearchRangeScenario:
                 )
 
     @pytest.mark.asyncio
-    async def test_partial_object_with_3_of_4_parts(self, handler, settings):
+    async def test_partial_object_with_3_of_4_parts(self, handler, settings, kek):
         """
         Test when metadata claims 4 internal parts but only 3 were uploaded.
 
@@ -207,7 +208,8 @@ class TestElasticsearchRangeScenario:
             part_count=1,
             total_plaintext_size=64 * 1024 * 1024,
             parts=[part_meta],
-            wrapped_dek=crypto.wrap_key(dek, settings.kek),
+            wrapped_dek=crypto.wrap_key(dek, kek),
+            kid="AKIAIOSFODNN7EXAMPLE",
         )
 
         with patch.object(handler, "_client", return_value=mock_client):
@@ -244,7 +246,7 @@ class TestElasticsearchRangeScenario:
                 )
 
     @pytest.mark.asyncio
-    async def test_successful_3_part_fetch(self, handler, settings):
+    async def test_successful_3_part_fetch(self, handler, settings, kek):
         """Test that fetching 3 complete parts works correctly."""
         mock_client = AsyncMock()
         # Make mock_client an async context manager
@@ -324,7 +326,8 @@ class TestElasticsearchRangeScenario:
             part_count=1,
             total_plaintext_size=3 * size_per_part,
             parts=[part_meta],
-            wrapped_dek=crypto.wrap_key(dek, settings.kek),
+            wrapped_dek=crypto.wrap_key(dek, kek),
+            kid="AKIAIOSFODNN7EXAMPLE",
         )
 
         with patch.object(handler, "_client", return_value=mock_client):

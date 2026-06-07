@@ -130,11 +130,13 @@ class PutObjectMixin(BaseHandler):
         if needs_chunked_decode:
             body = decode_aws_chunked(body)
 
-        encrypted = crypto.encrypt_object(body, self.settings.kek)
+        kid, kek = self.keyring.key_for(client.credentials.access_key)
+        encrypted = crypto.encrypt_object(body, kek)
         logger.debug(
             "PUT_ENCRYPTED",
             bucket=bucket,
             key=key,
+            kid=kid,
             plaintext_mb=round(len(body) / 1024 / 1024, 2),
             ciphertext_mb=round(len(encrypted.ciphertext) / 1024 / 1024, 2),
         )
@@ -146,6 +148,7 @@ class PutObjectMixin(BaseHandler):
             encrypted.ciphertext,
             metadata={
                 self.settings.dektag_name: base64.b64encode(encrypted.wrapped_dek).decode(),
+                self.settings.kidtag_name: kid,
                 "client-etag": etag,
                 "plaintext-size": str(len(body)),
             },
@@ -169,8 +172,9 @@ class PutObjectMixin(BaseHandler):
         expires: str | None = None,
         tagging: str | None = None,
     ) -> Response:
+        kid, kek = self.keyring.key_for(client.credentials.access_key)
         dek = crypto.generate_dek()
-        wrapped_dek = crypto.wrap_key(dek, self.settings.kek)
+        wrapped_dek = crypto.wrap_key(dek, kek)
 
         resp = await client.create_multipart_upload(
             bucket,
@@ -274,11 +278,12 @@ class PutObjectMixin(BaseHandler):
                 bucket,
                 key,
                 MultipartMetadata(
-                    version=1,
+                    version=2,
                     part_count=len(parts_meta),
                     total_plaintext_size=total_plaintext_size,
                     parts=parts_meta,
                     wrapped_dek=wrapped_dek,
+                    kid=kid,
                 ),
             )
 

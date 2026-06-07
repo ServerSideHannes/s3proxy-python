@@ -33,8 +33,8 @@ class AdminCredentials:
             )
         self.username = settings.admin_username
         self.password = settings.admin_password
-        # Derive a session-signing secret from the KEK so cookies survive pod restarts.
-        self.session_secret = hashlib.sha256(b"s3proxy-admin-session|" + settings.kek).digest()
+        # Stable session-signing secret (survives pod restarts, shared across replicas).
+        self.session_secret = settings.admin_session_secret
 
     def valid(self, username: str, password: str) -> bool:
         return secrets.compare_digest(username.encode(), self.username.encode()) and (

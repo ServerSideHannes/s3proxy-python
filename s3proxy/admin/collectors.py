@@ -338,15 +338,20 @@ def _derive_buckets(entries: list[RequestEntry]) -> list[dict]:
 
 
 def _derive_keys(settings: Settings) -> list[dict]:
-    fp = hashlib.sha256(settings.kek).hexdigest()[:8]
-    return [
-        {
-            "id": f"key-{fp}",
-            "type": "Local (KEK)",
-            "status": "Active",
-            "created": "—",
-        }
-    ]
+    # One KEK per configured AWS login (access key). The kek secret itself is
+    # never exposed - only a short fingerprint for identification.
+    keys = []
+    for entry in settings.credentials:
+        fp = hashlib.sha256(entry.kek.encode()).hexdigest()[:8]
+        keys.append(
+            {
+                "id": entry.access_key,
+                "type": f"Local (KEK · {fp})",
+                "status": "Active",
+                "created": "—",
+            }
+        )
+    return keys
 
 
 # ---------------------------------------------------------------------------

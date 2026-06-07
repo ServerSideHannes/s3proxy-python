@@ -31,7 +31,9 @@ class TestMultipartRangeValidation:
     """Test range validation for multipart downloads with internal parts."""
 
     @pytest.mark.asyncio
-    async def test_invalid_range_detected_before_fetch(self, handler, settings, mock_s3_client):
+    async def test_invalid_range_detected_before_fetch(
+        self, handler, settings, mock_s3_client, kek
+    ):
         """Test that invalid ranges are detected before making S3 requests."""
         # Create metadata with internal parts that exceed actual object size
         internal_parts = [
@@ -69,7 +71,8 @@ class TestMultipartRangeValidation:
             part_count=1,
             total_plaintext_size=48 * 1024 * 1024,
             parts=[part_meta],
-            wrapped_dek=crypto.wrap_key(crypto.generate_dek(), settings.kek),
+            wrapped_dek=crypto.wrap_key(crypto.generate_dek(), kek),
+            kid="AKIAIOSFODNN7EXAMPLE",
         )
 
         # Mock head_object to return a size smaller than what metadata expects
@@ -134,7 +137,7 @@ class TestMultipartRangeValidation:
                             )
 
     @pytest.mark.asyncio
-    async def test_handles_s3_invalid_range_error(self, handler, settings):
+    async def test_handles_s3_invalid_range_error(self, handler, settings, kek):
         """Test that S3 InvalidRange errors are caught and wrapped properly."""
         # Create a mock S3 client that raises InvalidRange
         mock_client = AsyncMock()
@@ -180,7 +183,8 @@ class TestMultipartRangeValidation:
             part_count=1,
             total_plaintext_size=1000,
             parts=[part_meta],
-            wrapped_dek=crypto.wrap_key(crypto.generate_dek(), settings.kek),
+            wrapped_dek=crypto.wrap_key(crypto.generate_dek(), kek),
+            kid="AKIAIOSFODNN7EXAMPLE",
         )
 
         with patch.object(handler, "_client", return_value=mock_client):
@@ -211,7 +215,7 @@ class TestMultipartRangeValidation:
                 )
 
     @pytest.mark.asyncio
-    async def test_valid_range_succeeds(self, handler, settings):
+    async def test_valid_range_succeeds(self, handler, settings, kek):
         """Test that valid ranges work correctly."""
         mock_client = AsyncMock()
         # Make mock_client an async context manager
@@ -262,7 +266,8 @@ class TestMultipartRangeValidation:
             part_count=1,
             total_plaintext_size=len(plaintext),
             parts=[part_meta],
-            wrapped_dek=crypto.wrap_key(dek, settings.kek),
+            wrapped_dek=crypto.wrap_key(dek, kek),
+            kid="AKIAIOSFODNN7EXAMPLE",
         )
 
         with patch.object(handler, "_client", return_value=mock_client):
@@ -287,7 +292,7 @@ class TestMultipartRangeValidation:
                 assert response.status_code == 200
 
     @pytest.mark.asyncio
-    async def test_multiple_internal_parts_validation(self, handler, settings):
+    async def test_multiple_internal_parts_validation(self, handler, settings, kek):
         """Test validation with multiple internal parts."""
         mock_client = AsyncMock()
         # Make mock_client an async context manager
@@ -333,7 +338,8 @@ class TestMultipartRangeValidation:
             part_count=1,
             total_plaintext_size=48 * 1024 * 1024,
             parts=[part_meta],
-            wrapped_dek=crypto.wrap_key(crypto.generate_dek(), settings.kek),
+            wrapped_dek=crypto.wrap_key(crypto.generate_dek(), kek),
+            kid="AKIAIOSFODNN7EXAMPLE",
         )
 
         with patch.object(handler, "_client", return_value=mock_client):

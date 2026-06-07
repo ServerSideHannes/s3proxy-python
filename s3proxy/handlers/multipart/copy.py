@@ -35,10 +35,12 @@ class CopyPartMixin(BaseHandler):
             # Get upload state
             state = await self.multipart_manager.get_upload(bucket, key, upload_id)
             if not state:
-                dek = await load_upload_state(client, bucket, key, upload_id, self.settings.kek)
-                if not dek:
+                state_data = await load_upload_state(client, bucket, key, upload_id)
+                if not state_data:
                     raise S3Error.no_such_upload(upload_id)
-                state = await self.multipart_manager.create_upload(bucket, key, upload_id, dek)
+                wrapped_dek, kid = state_data
+                dek = crypto.unwrap_key(wrapped_dek, self.keyring.key_by_id(kid))
+                state = await self.multipart_manager.create_upload(bucket, key, upload_id, dek, kid)
 
             # Get source data
             plaintext = await self._get_copy_source_data(

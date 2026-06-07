@@ -87,13 +87,16 @@ secrets:
     enabled: false
     name: ""
     keys:
-      encryptKey: "S3PROXY_ENCRYPT_KEY"
-      awsAccessKeyId: "AWS_ACCESS_KEY_ID"
-      awsSecretAccessKey: "AWS_SECRET_ACCESS_KEY"
+      credentials: "S3PROXY_CREDENTIALS"
 
-  encryptKey: ""
-  awsAccessKeyId: ""
-  awsSecretAccessKey: ""
+  # AWS logins, each with its own encryption key (KEK). The proxy verifies a
+  # client's signature with secretKey, then encrypts/decrypts that login's
+  # objects with the KEK derived from kek. Rendered into the S3PROXY_CREDENTIALS
+  # secret as a JSON array. At least one entry is required.
+  credentials: []
+  # - accessKey: "AKIAEXAMPLE"
+  #   secretKey: "wJalr...EXAMPLEKEY"
+  #   kek: "a-long-random-kek-secret"
 
 logLevel: "DEBUG"
 
@@ -105,10 +108,14 @@ admin:
   path: "/admin"
   username: "admin"
   password: "admin"
+  # Stable secret used to sign admin session cookies. Required when enabled.
+  # Override in production; keep it stable so logins survive pod restarts.
+  secret: "change-me"
   existingSecret:
     name: ""
     usernameKey: "S3PROXY_ADMIN_USERNAME"
     passwordKey: "S3PROXY_ADMIN_PASSWORD"
+    secretKey: "S3PROXY_ADMIN_SECRET"
 
   # Optional dedicated Ingress for the dashboard, separate from the S3 data-plane
   # ingress above. OFF by default — the admin UI should not be internet-facing

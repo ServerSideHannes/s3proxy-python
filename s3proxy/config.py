@@ -2,8 +2,22 @@
 
 import hashlib
 
-from pydantic import Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from .keyring import KeyRing, derive_kek
+
+
+class CredentialEntry(BaseModel):
+    """An AWS login with its own encryption key, supplied via S3PROXY_CREDENTIALS.
+
+    The proxy verifies the client's SigV4 signature with `secret_key`, then
+    encrypts/decrypts that login's objects with the KEK derived from `kek`.
+    """
+
+    access_key: str
+    secret_key: str
+    kek: str = Field(..., description="Per-credential KEK secret - SHA256 hashed into a KEK")
 
 
 class Settings(BaseSettings):
@@ -16,8 +30,19 @@ class Settings(BaseSettings):
     region: str = Field(default="us-east-1", description="AWS region")
 
     # Encryption settings
-    encrypt_key: str = Field(..., description="Key Encryption Key (KEK) - will be SHA256 hashed")
     dektag_name: str = Field(default="isec", description="Metadata tag name for encrypted DEK")
+    kidtag_name: str = Field(
+        default="isec-kid", description="Metadata tag name for the key id that wrapped the DEK"
+    )
+
+    # Per-access-key encryption. Each entry is an AWS login with its own KEK.
+    # The access key that wrote an object is stored as its kid; objects are
+    # decrypted with the KEK of that access key. Replaces the single
+    # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY credential.
+    credentials: list[CredentialEntry] = Field(
+        default_factory=list,
+        description="AWS logins with per-credential KEKs (JSON list)",
+    )
 
     # Server settings
     ip: str = Field(default="0.0.0.0", description="Bind address")
@@ -54,17 +79,42 @@ class Settings(BaseSettings):
     admin_path: str = Field(default="/admin", description="URL path prefix for the admin UI")
     admin_username: str = Field(default="", description="Admin dashboard username")
     admin_password: str = Field(default="", description="Admin dashboard password")
+    admin_secret: str = Field(
+        default="",
+        description="Stable secret for signing admin session cookies (required when admin_ui)",
+    )
 
-    # Cached KEK derived from encrypt_key (computed once in model_post_init)
-    _kek: bytes = PrivateAttr()
+    # Cached KeyRing + credentials store (computed once in model_post_init).
+    _keyring: KeyRing = PrivateAttr()
+    _credentials_store: dict[str, str] = PrivateAttr()
 
     def model_post_init(self, __context: object) -> None:
-        self._kek = hashlib.sha256(self.encrypt_key.encode()).digest()
+        self._credentials_store = {}
+        keys: dict[str, bytes] = {}
+        for entry in self.credentials:
+            if entry.access_key in self._credentials_store:
+                raise ValueError(f"Duplicate access key: {entry.access_key!r}")
+            self._credentials_store[entry.access_key] = entry.secret_key
+            keys[entry.access_key] = derive_kek(entry.kek)
+        self._keyring = KeyRing(keys=keys)
+
+        if self.admin_ui and not self.admin_secret:
+            raise ValueError("S3PROXY_ADMIN_SECRET is required when the admin dashboard is enabled")
 
     @property
-    def kek(self) -> bytes:
-        """Get the 32-byte Key Encryption Key (SHA256 of encrypt_key)."""
-        return self._kek
+    def admin_session_secret(self) -> bytes:
+        """Stable 32-byte secret for signing admin session cookies."""
+        return hashlib.sha256(b"s3proxy-admin-session|" + self.admin_secret.encode()).digest()
+
+    @property
+    def keyring(self) -> KeyRing:
+        """Get the KeyRing resolving per-access-key encryption keys."""
+        return self._keyring
+
+    @property
+    def credentials_store(self) -> dict[str, str]:
+        """Get the access_key -> secret_key map for signature verification."""
+        return self._credentials_store
 
     @property
     def s3_endpoint(self) -> str:

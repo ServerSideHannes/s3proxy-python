@@ -41,16 +41,6 @@ pod_name = os.environ.get("HOSTNAME", "unknown")
 logger: BoundLogger = structlog.get_logger(__name__).bind(pod=pod_name)
 
 
-def load_credentials() -> dict[str, str]:
-    """Load AWS credentials from environment variables."""
-    credentials_store: dict[str, str] = {}
-    access_key = os.environ.get("AWS_ACCESS_KEY_ID", "")
-    secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
-    if access_key and secret_key:
-        credentials_store[access_key] = secret_key
-    return credentials_store
-
-
 def create_lifespan(settings: Settings, credentials_store: dict[str, str]) -> AsyncIterator[None]:
     """Create lifespan context manager for FastAPI app.
 
@@ -103,7 +93,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         Configured FastAPI application instance.
     """
     settings = settings or Settings()
-    credentials_store = load_credentials()
+    credentials_store = settings.credentials_store
 
     lifespan = create_lifespan(settings, credentials_store)
     app = FastAPI(title="S3Proxy", lifespan=lifespan, docs_url=None, redoc_url=None)

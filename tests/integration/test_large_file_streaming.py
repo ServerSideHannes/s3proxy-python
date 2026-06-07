@@ -181,7 +181,7 @@ class TestLargeFileStreaming:
             assert len(put_object_calls) >= 1, "Should use single put_object for small files"
 
     @pytest.mark.asyncio
-    async def test_large_file_encryption_and_decryption(self, mock_s3, settings):
+    async def test_large_file_encryption_and_decryption(self, mock_s3, settings, kek):
         """Test full workflow: upload large file, download, decrypt, verify."""
         bucket = "test-bucket"
         key = "large-encrypted.bin"
@@ -193,7 +193,7 @@ class TestLargeFileStreaming:
 
         # Generate DEK and wrap it
         dek = crypto.generate_dek()
-        wrapped_dek = crypto.wrap_key(dek, settings.kek)
+        wrapped_dek = crypto.wrap_key(dek, kek)
 
         # Simulate multipart upload by encrypting in parts
         upload_id = "test-upload-123"
@@ -231,7 +231,7 @@ class TestLargeFileStreaming:
 
         # Unwrap DEK
         wrapped_dek_bytes = base64.b64decode(metadata[settings.dektag_name])
-        decrypted_dek = crypto.unwrap_key(wrapped_dek_bytes, settings.kek)
+        decrypted_dek = crypto.unwrap_key(wrapped_dek_bytes, kek)
 
         # Decrypt all parts
         # We need to track position in ciphertext since parts may have different sizes

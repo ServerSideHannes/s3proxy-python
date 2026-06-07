@@ -77,6 +77,7 @@ class GetObjectMixin(BaseHandler):
                 # Add user metadata (x-amz-meta-*), excluding internal keys
                 internal_keys = {
                     self.settings.dektag_name.lower(),
+                    self.settings.kidtag_name.lower(),
                     "client-etag",
                     "plaintext-size",
                 }
@@ -106,9 +107,10 @@ class GetObjectMixin(BaseHandler):
                 client, bucket, key, range_header, head_resp, last_modified
             )
 
-        # Encrypted single-object - decrypt in memory
+        # Encrypted single-object - decrypt in memory using the kid that wrapped it
+        kid = metadata.get(self.settings.kidtag_name, "")
         return await self._decrypt_single_object(
-            client, bucket, key, range_header, head_resp, last_modified, wrapped_dek_b64
+            client, bucket, key, range_header, head_resp, last_modified, wrapped_dek_b64, kid
         )
 
     async def _stream_unencrypted(
@@ -145,6 +147,7 @@ class GetObjectMixin(BaseHandler):
         head_resp: dict,
         last_modified: str | None,
         wrapped_dek_b64: str,
+        kid: str = "",
     ) -> Response:
         logger.info("GET_ENCRYPTED_SINGLE", bucket=bucket, key=key)
         resp = await client.get_object(bucket, key)
@@ -161,7 +164,7 @@ class GetObjectMixin(BaseHandler):
             wrapped_dek = base64.b64decode(wrapped_dek_b64)
             async with resp["Body"] as body:
                 ciphertext = await body.read()
-            plaintext = crypto.decrypt_object(ciphertext, wrapped_dek, self.settings.kek)
+            plaintext = crypto.decrypt_object(ciphertext, wrapped_dek, self.keyring.key_by_id(kid))
             del ciphertext
 
             content_type = head_resp.get("ContentType", "application/octet-stream")
@@ -204,7 +207,7 @@ class GetObjectMixin(BaseHandler):
         last_modified: str | None,
         creds: S3Credentials,
     ) -> Response:
-        dek = crypto.unwrap_key(meta.wrapped_dek, self.settings.kek)
+        dek = crypto.unwrap_key(meta.wrapped_dek, self.keyring.key_by_id(meta.kid))
         total = meta.total_plaintext_size
         start, end = self._parse_range(range_header, total) if range_header else (0, total - 1)
         parts = calculate_part_range(meta.parts, start, end)

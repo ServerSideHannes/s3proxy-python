@@ -45,8 +45,8 @@ def main():
     os.environ.setdefault("S3PROXY_REGION", args.region)
     os.environ.setdefault("S3PROXY_LOG_LEVEL", args.log_level)
 
-    if not os.environ.get("S3PROXY_ENCRYPT_KEY"):
-        sys.exit("Error: S3PROXY_ENCRYPT_KEY environment variable required")
+    if not os.environ.get("S3PROXY_CREDENTIALS"):
+        sys.exit("Error: S3PROXY_CREDENTIALS environment variable required")
 
     settings = Settings()
     application = create_app(settings)

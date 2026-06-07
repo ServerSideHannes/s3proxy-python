@@ -38,6 +38,7 @@ def encode_multipart_metadata(meta: MultipartMetadata) -> str:
         "pc": meta.part_count,
         "ts": meta.total_plaintext_size,
         "dek": base64.b64encode(meta.wrapped_dek).decode(),
+        "kid": meta.kid,
         "parts": [
             {
                 "pn": p.part_number,
@@ -90,6 +91,7 @@ def decode_multipart_metadata(encoded: str) -> MultipartMetadata:
         part_count=data.get("pc", 0),
         total_plaintext_size=data.get("ts", 0),
         wrapped_dek=base64.b64decode(data.get("dek", "")),
+        kid=data.get("kid", ""),
         parts=[
             PartMetadata(
                 part_number=p["pn"],
@@ -118,10 +120,11 @@ async def persist_upload_state(
     key: str,
     upload_id: str,
     wrapped_dek: bytes,
+    kid: str = "",
 ) -> None:
     """Persist DEK to S3 during upload (fallback for Redis failures)."""
     state_key = _internal_upload_key(key, upload_id)
-    data = {"dek": base64.b64encode(wrapped_dek).decode()}
+    data = {"dek": base64.b64encode(wrapped_dek).decode(), "kid": kid}
 
     logger.info(
         "PERSIST_UPLOAD_STATE",
@@ -151,14 +154,12 @@ async def load_upload_state(
     bucket: str,
     key: str,
     upload_id: str,
-    kek: bytes,
-) -> bytes | None:
-    """Load DEK from S3 for resumed upload.
+) -> tuple[bytes, str] | None:
+    """Load the wrapped DEK + kid from S3 for a resumed upload.
 
-    Returns the unwrapped DEK, or None if not found.
+    Returns (wrapped_dek, kid), or None if not found. Callers unwrap with the
+    key resolved from kid - this layer stays free of keyring knowledge.
     """
-    from .. import crypto
-
     state_key = _internal_upload_key(key, upload_id)
 
     logger.info(
@@ -181,7 +182,7 @@ async def load_upload_state(
             key=key,
             upload_id=upload_id[:20] + "...",
         )
-        return crypto.unwrap_key(wrapped_dek, kek)
+        return wrapped_dek, data.get("kid", "")
 
     except Exception as e:
         logger.warning(

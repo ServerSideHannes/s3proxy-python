@@ -10,8 +10,7 @@ from unittest.mock import patch
 import fakeredis.aioredis
 import pytest
 
-# Set required environment variables before importing s3proxy modules
-os.environ.setdefault("S3PROXY_ENCRYPT_KEY", "test-encryption-key-for-pytest")
+# Set environment variables before importing s3proxy modules
 os.environ.setdefault("S3PROXY_HOST", "http://localhost:9000")
 
 from s3proxy.config import Settings
@@ -42,20 +41,26 @@ async def mock_redis():
 
 @pytest.fixture
 def settings():
-    """Create test settings with encryption key."""
+    """Create test settings with encryption key and one credential."""
     return Settings(
         host="http://localhost:9000",
-        encrypt_key="test-encryption-key-32bytes!!!!",
         region="us-east-1",
         no_tls=True,
         port=4433,
+        credentials=[
+            {
+                "access_key": "AKIAIOSFODNN7EXAMPLE",
+                "secret_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                "kek": "test-credential-kek",
+            }
+        ],
     )
 
 
 @pytest.fixture
 def kek(settings):
-    """Get the Key Encryption Key derived from settings."""
-    return settings.kek
+    """Get the KEK for the standard test credential."""
+    return settings.keyring.key_for("AKIAIOSFODNN7EXAMPLE")[1]
 
 
 # ============================================================================
@@ -122,11 +127,17 @@ class MockS3Response:
 class MockS3Client:
     """Mock S3 client for testing without real S3 backend."""
 
-    def __init__(self):
+    def __init__(self, credentials: S3Credentials | None = None):
         self.objects: dict[str, dict[str, Any]] = {}  # bucket/key -> {body, metadata, ...}
         self.buckets: dict[str, dict] = {}
         self.multipart_uploads: dict[str, dict] = {}  # upload_id -> {bucket, key, parts}
         self.call_history: list[tuple[str, dict]] = []
+        # Handlers read client.credentials.access_key to resolve the per-login KEK.
+        self.credentials = credentials or S3Credentials(
+            access_key="AKIAIOSFODNN7EXAMPLE",
+            secret_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            region="us-east-1",
+        )
 
     async def __aenter__(self):
         """Async context manager entry - returns self."""
