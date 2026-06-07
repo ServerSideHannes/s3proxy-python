@@ -36,3 +36,18 @@ updates:
         applies-to: security-updates
         patterns:
           - "*"
+
+  - package-ecosystem: "helm"
+    directory: "/chart"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      helm:
+        applies-to: version-updates
+        patterns:
+          - "*"
+      helm-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
