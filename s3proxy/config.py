@@ -52,14 +52,8 @@ class Settings(BaseSettings):
     # Admin dashboard
     admin_ui: bool = Field(default=False, description="Enable the admin dashboard at admin_path")
     admin_path: str = Field(default="/admin", description="URL path prefix for the admin UI")
-    admin_username: str = Field(
-        default="",
-        description="Admin dashboard username (falls back to AWS access key when blank)",
-    )
-    admin_password: str = Field(
-        default="",
-        description="Admin dashboard password (falls back to AWS secret key when blank)",
-    )
+    admin_username: str = Field(default="", description="Admin dashboard username")
+    admin_password: str = Field(default="", description="Admin dashboard password")
 
     # Cached KEK derived from encrypt_key (computed once in model_post_init)
     _kek: bytes = PrivateAttr()

@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from s3proxy import metrics
 from s3proxy.admin import collectors, record_request
-from s3proxy.admin.auth import create_auth_dependency
+from s3proxy.admin.auth import AdminCredentials, create_auth_dependency
 from s3proxy.admin.router import create_admin_router
 from s3proxy.admin.templates import render_dashboard
 from s3proxy.config import Settings
@@ -166,21 +166,27 @@ def test_status_api_401_without_auth(admin_settings) -> None:
     assert r.status_code == 401
 
 
-def test_auth_falls_back_to_aws_credentials() -> None:
+def test_auth_uses_explicit_credentials_not_aws() -> None:
     settings = Settings(
         host="http://localhost:9000",
         encrypt_key="test-kek",
         admin_ui=True,
+        admin_username="admin",
+        admin_password="admin",
     )
-    dep = create_auth_dependency(settings, {"AKIAEXAMPLE": "secret-key"})
-    assert callable(dep)
+    admin = AdminCredentials(settings, {"AKIAEXAMPLE": "secret-key"})
+    assert admin.valid("admin", "admin")
+    # The AWS access key / secret must NOT work as dashboard credentials.
+    assert not admin.valid("AKIAEXAMPLE", "secret-key")
 
 
-def test_auth_raises_when_no_credentials() -> None:
+def test_auth_raises_when_credentials_blank() -> None:
     settings = Settings(
         host="http://localhost:9000",
         encrypt_key="test-kek",
         admin_ui=True,
+        admin_username="",
+        admin_password="",
     )
     with pytest.raises(RuntimeError):
         create_auth_dependency(settings, {})

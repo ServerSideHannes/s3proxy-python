@@ -124,12 +124,6 @@ _LOGIN_HTML = """<!DOCTYPE html>
     margin-bottom: 14px;
   }
   .login-submit { width: 100%; margin-top: 6px; }
-  .login-hint {
-    margin-top: 18px;
-    font-size: 12px;
-    color: var(--text-subtle);
-    text-align: center;
-  }
 </style>
 </head>
 <body>
@@ -162,7 +156,6 @@ _LOGIN_HTML = """<!DOCTYPE html>
     </div>
 
     <button type="submit" class="btn-dark login-submit">Sign in</button>
-    <div class="login-hint">Credentials default to your AWS access key / secret.</div>
   </form>
 </main>
 </body>

@@ -27,14 +27,12 @@ class AdminCredentials:
     """Resolved admin credentials with session-signing key."""
 
     def __init__(self, settings: Settings, credentials_store: dict[str, str]):
-        if settings.admin_username and settings.admin_password:
-            self.username = settings.admin_username
-            self.password = settings.admin_password
-        elif credentials_store:
-            self.username = next(iter(credentials_store.keys()))
-            self.password = credentials_store[self.username]
-        else:
-            raise RuntimeError("No credentials configured for admin auth")
+        if not (settings.admin_username and settings.admin_password):
+            raise RuntimeError(
+                "Admin dashboard requires S3PROXY_ADMIN_USERNAME and S3PROXY_ADMIN_PASSWORD"
+            )
+        self.username = settings.admin_username
+        self.password = settings.admin_password
         # Derive a session-signing secret from the KEK so cookies survive pod restarts.
         self.session_secret = hashlib.sha256(b"s3proxy-admin-session|" + settings.kek).digest()
 

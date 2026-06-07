@@ -154,6 +154,7 @@ jobs:
             --set externalRedis.url="redis://redis:6379/0" \
             --set externalRedis.existingSecret=redis-secret \
             --set externalRedis.passwordKey=redis-password \
+            --set admin.enabled=true \
             --set replicaCount=3 \
             --set resources.limits.cpu=100m \
             --set resources.requests.cpu=50m \
@@ -229,6 +230,67 @@ jobs:
               echo ""
               echo "✓ All smoke tests passed!"
             '
+
+      - name: Verify admin dashboard
+        run: |
+          set -euo pipefail
+          ENDPOINT="http://s3proxy-python:4433"
+          BUCKET="admin-ci"
+          KEY="admin-ci.txt"
+
+          echo "=== Upload an object through the proxy (so the dashboard has traffic) ==="
+          kubectl run admin-ci-upload -n s3proxy --rm -i --restart=Never \
+            --image=amazon/aws-cli:latest \
+            --env="AWS_ACCESS_KEY_ID=minioadmin" \
+            --env="AWS_SECRET_ACCESS_KEY=minioadmin" \
+            --env="AWS_DEFAULT_REGION=us-east-1" \
+            --command -- /bin/sh -c "
+              set -e
+              echo 'admin dashboard ci object' > /tmp/o.txt
+              aws --endpoint-url $ENDPOINT s3 mb s3://$BUCKET 2>/dev/null || true
+              aws --endpoint-url $ENDPOINT s3 cp /tmp/o.txt s3://$BUCKET/$KEY
+              aws --endpoint-url $ENDPOINT s3 cp s3://$BUCKET/$KEY /tmp/d.txt
+              test \"\$(cat /tmp/d.txt)\" = 'admin dashboard ci object'
+              echo UPLOAD_OK
+            "
+
+          echo "=== Port-forward the admin dashboard ==="
+          kubectl port-forward svc/s3proxy-python 4433:4433 -n s3proxy &
+          PF_PID=$!
+          trap "kill $PF_PID 2>/dev/null || true" EXIT
+          for i in $(seq 1 15); do curl -sf -o /dev/null http://localhost:4433/admin/login && break; sleep 1; done
+
+          echo "=== 1. Login page is served (unauthenticated) ==="
+          curl -sf http://localhost:4433/admin/login | grep -q "Sign in to the admin dashboard"
+          echo "✓ Login page served"
+
+          echo "=== 2. Auth is enforced ==="
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:4433/admin/api/status)
+          [ "$CODE" = "401" ] || { echo "✗ status API without auth returned $CODE (expected 401)"; exit 1; }
+          # The AWS secret key must NOT work as a dashboard password (fallback removed).
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -u minioadmin:minioadmin http://localhost:4433/admin/api/status)
+          [ "$CODE" = "401" ] || { echo "✗ AWS creds accepted as admin login ($CODE) — fallback not removed"; exit 1; }
+          echo "✓ Unauthenticated + AWS-cred requests rejected (401)"
+
+          echo "=== 3. Dashboard + status API work with admin credentials (admin/admin) ==="
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -u admin:admin http://localhost:4433/admin/)
+          [ "$CODE" = "200" ] || { echo "✗ dashboard returned $CODE (expected 200)"; exit 1; }
+          STATUS=$(curl -sf -u admin:admin http://localhost:4433/admin/api/status)
+          echo "$STATUS" | grep -q '"status":"Running"' || { echo "✗ status not Running: $STATUS"; exit 1; }
+          echo "✓ Dashboard + status API healthy"
+
+          echo "=== 4. Bucket listing API shows the uploaded object ==="
+          BUCKETS=$(curl -sf -u admin:admin "http://localhost:4433/admin/api/buckets/$BUCKET")
+          echo "$BUCKETS" | grep -q "\"$KEY\"" || { echo "✗ '$KEY' not in bucket listing: $BUCKETS"; exit 1; }
+          echo "✓ Bucket listing shows '$KEY'"
+
+          echo "=== 5. Object detail API reports encryption ==="
+          OBJ=$(curl -sf -u admin:admin "http://localhost:4433/admin/api/objects/$BUCKET/$KEY")
+          echo "$OBJ" | grep -q '"encrypted":true' || { echo "✗ object detail not encrypted: $OBJ"; exit 1; }
+          echo "✓ Object detail reports encrypted"
+
+          echo ""
+          echo "✓ Admin dashboard verified end-to-end"
 
       - name: Show logs on failure
         if: failure()
