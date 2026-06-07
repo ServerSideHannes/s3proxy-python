@@ -74,7 +74,7 @@ def verify_session(token: str, secret: bytes) -> str | None:
         if not hmac.compare_digest(mac, expected):
             return None
         payload = json.loads(_b64url_decode(body))
-    except (ValueError, binascii.Error, json.JSONDecodeError):
+    except ValueError, binascii.Error, json.JSONDecodeError:
         return None
     if int(payload.get("e", 0)) < int(time.time()):
         return None

@@ -55,19 +55,32 @@ class RateTracker:
 
     def sparkline(self, key: str, points: int = 30) -> list[float]:
         """Return per-bucket deltas suitable for a sparkline."""
+        _, values = self.sparkline_series(key, points)
+        return values
+
+    def sparkline_series(self, key: str, points: int = 30) -> tuple[list[float], list[float]]:
+        """Return (wall_clock_timestamps, per-bucket deltas) in parallel lists."""
         if len(self._snapshots) < 2:
-            return []
-        deltas: list[float] = []
+            return [], []
         snaps = list(self._snapshots)
+        # Map monotonic samples → wall-clock by using the current offset.
+        mono_now = time.monotonic()
+        wall_now = time.time()
+        offset = wall_now - mono_now
+        pairs: list[tuple[float, float]] = []
         for prev, curr in zip(snaps, snaps[1:], strict=False):
             elapsed = curr[0] - prev[0]
             if elapsed <= 0:
                 continue
-            deltas.append(max(0.0, curr[1].get(key, 0.0) - prev[1].get(key, 0.0)))
-        if len(deltas) > points:
-            step = len(deltas) / points
-            deltas = [deltas[int(i * step)] for i in range(points)]
-        return [round(v, 2) for v in deltas]
+            pairs.append(
+                (curr[0] + offset, max(0.0, curr[1].get(key, 0.0) - prev[1].get(key, 0.0)))
+            )
+        if len(pairs) > points:
+            step = len(pairs) / points
+            pairs = [pairs[int(i * step)] for i in range(points)]
+        times = [round(p[0], 3) for p in pairs]
+        values = [round(p[1], 2) for p in pairs]
+        return times, values
 
     def earliest_value(self, key: str) -> float | None:
         if not self._snapshots:
@@ -364,6 +377,10 @@ def collect_all(settings: Settings, start_time: float, version: str = "1.0.0") -
     num_enc, unit_enc = _format_bytes(bytes_encrypted)
     num_thr, unit_thr = _format_bytes(crypto_rate)
 
+    req_times, req_values = _rate_tracker.sparkline_series("requests")
+    crypto_times, crypto_values = _rate_tracker.sparkline_series("bytes_crypto")
+    err_times, err_values = _rate_tracker.sparkline_series("errors")
+
     entries = _request_log.all()
     buckets = _derive_buckets(entries)
     last_error_ts = next((e.timestamp for e in reversed(entries) if e.status >= 400), None)
@@ -381,12 +398,12 @@ def collect_all(settings: Settings, start_time: float, version: str = "1.0.0") -
                 "label": "Requests",
                 "value": f"{int(total_requests):,}",
                 "unit": "",
-                "spark": _rate_tracker.sparkline("requests"),
+                "spark": req_values,
+                "spark_times": req_times,
+                "y_label": "req / sample",
                 "breakdown": [
-                    {"label": m, "value": f"{int(v):,}"}
-                    for m, v in sorted(
-                        _read_method_breakdown().items(), key=lambda kv: -kv[1]
-                    )
+                    {"label": m, "value": f"{int(v):,}", "weight": float(v)}
+                    for m, v in sorted(_read_method_breakdown().items(), key=lambda kv: -kv[1])
                     if v > 0
                 ],
             },
@@ -394,19 +411,31 @@ def collect_all(settings: Settings, start_time: float, version: str = "1.0.0") -
                 "label": "Data Encrypted",
                 "value": num_enc,
                 "unit": unit_enc,
-                "spark": _rate_tracker.sparkline("bytes_crypto"),
+                "spark": crypto_values,
+                "spark_times": crypto_times,
+                "y_label": "bytes / sample",
                 "breakdown": [
-                    {"label": "Encrypted (PUT)", "value": " ".join(_format_bytes(bytes_encrypted))},
-                    {"label": "Decrypted (GET)", "value": " ".join(_format_bytes(bytes_decrypted))},
+                    {
+                        "label": "Encrypted (PUT)",
+                        "value": " ".join(_format_bytes(bytes_encrypted)),
+                        "weight": float(bytes_encrypted),
+                    },
+                    {
+                        "label": "Decrypted (GET)",
+                        "value": " ".join(_format_bytes(bytes_decrypted)),
+                        "weight": float(bytes_decrypted),
+                    },
                 ],
             },
             "errors": {
                 "label": "Errors",
                 "value": f"{int(errors_total):,}",
                 "unit": "",
-                "spark": _rate_tracker.sparkline("errors"),
+                "spark": err_values,
+                "spark_times": err_times,
+                "y_label": "errors / sample",
                 "breakdown": [
-                    {"label": k, "value": f"{int(v):,}"}
+                    {"label": k, "value": f"{int(v):,}", "weight": float(v)}
                     for k, v in _read_error_breakdown().items()
                 ],
             },
@@ -416,7 +445,11 @@ def collect_all(settings: Settings, start_time: float, version: str = "1.0.0") -
                 "unit": "",
                 "detail": f"seen in last {len(entries)} reqs",
                 "breakdown": [
-                    {"label": b["name"], "value": f"{b['objects']} obj · {b['size']}"}
+                    {
+                        "label": b["name"],
+                        "value": f"{b['objects']} obj · {b['size']}",
+                        "weight": float(b["objects"]),
+                    }
                     for b in buckets[:8]
                 ],
             },
@@ -470,12 +503,14 @@ async def list_bucket_objects(
     credentials_store: dict[str, str],
     bucket: str,
     prefix: str = "",
+    delimiter: str | None = "/",
     max_keys: int = 500,
 ) -> dict:
-    """List objects in a bucket using the configured AWS credentials.
+    """List a "directory" in a bucket using ListObjectsV2 with a delimiter.
 
-    The admin UI authenticates out-of-band (session cookie / Basic Auth) and
-    uses the proxy's own S3 credentials to issue the ListObjectsV2.
+    When delimiter is "/" (default), the response is split into sub-prefixes
+    (folders) and objects at the current level — the standard S3-console
+    file-explorer shape.
     """
     from ..client import S3Client, S3Credentials
 
@@ -486,16 +521,33 @@ async def list_bucket_objects(
 
     async with S3Client(settings, creds) as client:
         result = await client.list_objects_v2(
-            bucket=bucket, prefix=prefix or None, max_keys=max_keys
+            bucket=bucket,
+            prefix=prefix or None,
+            delimiter=delimiter,
+            max_keys=max_keys,
         )
-    objects = []
+
+    prefix_len = len(prefix)
+    folders: list[dict] = []
+    for cp in result.get("CommonPrefixes", []) or []:
+        full = cp.get("Prefix", "")
+        name = full[prefix_len:].rstrip("/")
+        folders.append({"prefix": full, "name": name})
+
+    objects: list[dict] = []
     for o in result.get("Contents", []) or []:
+        full = o.get("Key", "")
+        # Skip the "directory marker" object that some tools create at the prefix itself
+        if full == prefix:
+            continue
+        size = int(o.get("Size", 0))
         lm = o.get("LastModified")
         objects.append(
             {
-                "key": o.get("Key", ""),
-                "size": int(o.get("Size", 0)),
-                "size_h": _format_size(int(o.get("Size", 0))),
+                "key": full,
+                "name": full[prefix_len:],
+                "size": size,
+                "size_h": _format_size(size),
                 "last_modified": lm.isoformat() if lm else "",
                 "etag": (o.get("ETag") or "").strip('"'),
             }
@@ -503,9 +555,67 @@ async def list_bucket_objects(
     return {
         "bucket": bucket,
         "prefix": prefix,
+        "delimiter": delimiter or "",
+        "folders": folders,
         "objects": objects,
-        "count": len(objects),
+        "count": len(folders) + len(objects),
         "is_truncated": bool(result.get("IsTruncated", False)),
+    }
+
+
+def list_logs(
+    limit: int = 200,
+    query: str = "",
+    operation: str = "",
+    status: str = "",
+) -> dict:
+    """Return filtered request-log entries for the /logs view."""
+    now = time.time()
+    q = (query or "").strip().lower()
+    op_filter = (operation or "").strip().upper()
+    status_filter = (status or "").strip().lower()
+
+    entries = list(_request_log.all())
+    entries.reverse()
+    out: list[dict] = []
+    for e in entries:
+        if op_filter and (e.method or e.operation).upper() != op_filter:
+            continue
+        if status_filter:
+            is_err = e.status >= 400
+            if status_filter == "success" and is_err:
+                continue
+            if status_filter == "error" and not is_err:
+                continue
+        if q:
+            blob = f"{e.bucket} {e.key} {e.client_ip} {e.method} {e.operation} {e.status}".lower()
+            if q not in blob:
+                continue
+        out.append(
+            {
+                "time": _format_relative(e.timestamp, now),
+                "timestamp": e.timestamp,
+                "operation": _operation_display(e.method, e.operation),
+                "bucket": e.bucket or "",
+                "object": e.key or "",
+                "status": "Success" if e.status < 400 else "Error",
+                "status_code": e.status,
+                "size": _format_size(e.size),
+                "client_ip": e.client_ip or "",
+                "latency": f"{e.duration_ms:.0f} ms",
+            }
+        )
+        if len(out) >= limit:
+            break
+
+    all_ops = sorted(
+        {(e.method or e.operation) for e in _request_log.all() if e.method or e.operation}
+    )
+    return {
+        "count": len(out),
+        "total": len(_request_log.all()),
+        "entries": out,
+        "operations": all_ops,
     }
 
 

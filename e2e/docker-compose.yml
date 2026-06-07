@@ -59,9 +59,10 @@ services:
         BUILD_PID=$$!
 
         # Build esrally image with dependencies pre-installed (parallel)
+        # Pinned to 3.12 because yappi (esrally dep) has no 3.14 wheel yet
         (
           printf '%s\n' \
-            'FROM python:3.14-slim' \
+            'FROM python:3.12-slim' \
             'RUN apt-get update && apt-get install -y --no-install-recommends gcc python3-dev git curl && rm -rf /var/lib/apt/lists/*' \
             'RUN pip install --no-cache-dir esrally' \
             | docker build -t esrally:latest -f - /tmp

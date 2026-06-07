@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import json as _json
+import time
 from typing import TYPE_CHECKING
 
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 
 from .auth import (
     AdminCredentials,
@@ -16,7 +19,7 @@ from .auth import (
     make_verify_html,
     set_session_cookie,
 )
-from .collectors import collect_all, head_object_detail, list_bucket_objects
+from .collectors import collect_all, head_object_detail, list_bucket_objects, list_logs
 from .templates import render_dashboard, render_login
 
 if TYPE_CHECKING:
@@ -86,11 +89,75 @@ def create_admin_router(
         )
         return JSONResponse(data)
 
+    @router.get("/api/stream", dependencies=[Depends(verify_api)])
+    async def status_stream(request: Request) -> StreamingResponse:
+        """Push status updates via SSE — only emits when the payload changes."""
+
+        async def event_gen():
+            last_payload: str | None = None
+            last_heartbeat = time.monotonic()
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        return
+                    data = collect_all(
+                        request.app.state.settings,
+                        request.app.state.start_time,
+                        version=version,
+                    )
+                    payload = _json.dumps(data)
+                    now = time.monotonic()
+                    if payload != last_payload:
+                        last_payload = payload
+                        last_heartbeat = now
+                        yield f"event: status\ndata: {payload}\n\n"
+                    elif now - last_heartbeat > 15:
+                        last_heartbeat = now
+                        yield ": hb\n\n"
+                    await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                return
+
+        return StreamingResponse(
+            event_gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+
+    @router.get("/api/logs", dependencies=[Depends(verify_api)])
+    async def logs_api(
+        q: str = "",
+        operation: str = "",
+        status: str = "",
+        limit: int = 200,
+    ) -> JSONResponse:
+        data = list_logs(
+            limit=min(max(limit, 1), 500),
+            query=q,
+            operation=operation,
+            status=status,
+        )
+        return JSONResponse(data)
+
     @router.get("/api/buckets/{bucket}", dependencies=[Depends(verify_api)])
-    async def list_bucket(bucket: str, prefix: str = "", limit: int = 500) -> JSONResponse:
+    async def list_bucket(
+        bucket: str,
+        prefix: str = "",
+        delimiter: str = "/",
+        limit: int = 500,
+    ) -> JSONResponse:
         try:
             data = await list_bucket_objects(
-                settings, credentials_store, bucket, prefix=prefix, max_keys=min(limit, 1000)
+                settings,
+                credentials_store,
+                bucket,
+                prefix=prefix,
+                delimiter=delimiter or None,
+                max_keys=min(limit, 1000),
             )
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code", "Error")
