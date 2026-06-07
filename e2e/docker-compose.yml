@@ -413,9 +413,10 @@ services:
           --set image.repository=s3proxy \
           --set image.pullPolicy=IfNotPresent \
           --set s3.host="http://minio.minio.svc.cluster.local:9000" \
-          --set secrets.encryptKey="$$ENCRYPT_KEY" \
-          --set secrets.awsAccessKeyId="minioadmin" \
-          --set secrets.awsSecretAccessKey="minioadmin" \
+          --set secrets.credentials[0].accessKey="minioadmin" \
+          --set secrets.credentials[0].secretKey="minioadmin" \
+          --set secrets.credentials[0].kek="$$ENCRYPT_KEY" \
+          --set admin.secret="$$ENCRYPT_KEY" \
           --set logLevel="DEBUG" \
           --set performance.memoryLimitMb=64 \
           --set gateway.enabled=true \

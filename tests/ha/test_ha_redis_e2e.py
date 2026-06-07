@@ -84,15 +84,16 @@ def s3proxy_pods(redis_server):
         env = os.environ.copy()
         env.update(
             {
-                "S3PROXY_ENCRYPT_KEY": "test-encryption-key-32-bytes!!",
+                "S3PROXY_CREDENTIALS": (
+                    '[{"access_key":"minioadmin","secret_key":"minioadmin",'
+                    '"kek":"test-encryption-key-32-bytes!!"}]'
+                ),
                 "S3PROXY_HOST": "http://localhost:9000",
                 "S3PROXY_REGION": "us-east-1",
                 "S3PROXY_PORT": str(port),
                 "S3PROXY_NO_TLS": "true",
                 "S3PROXY_REDIS_URL": redis_server,
                 "S3PROXY_LOG_LEVEL": "WARNING",
-                "AWS_ACCESS_KEY_ID": "minioadmin",
-                "AWS_SECRET_ACCESS_KEY": "minioadmin",
             }
         )
 
