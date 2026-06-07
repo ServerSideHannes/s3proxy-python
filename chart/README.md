@@ -31,6 +31,18 @@ helm install s3proxy oci://ghcr.io/serversidehannes/s3proxy-python/charts/s3prox
 | `secrets.existingSecrets.keys.encryptKey` | `S3PROXY_ENCRYPT_KEY` | Key name in existing secret |
 | `secrets.existingSecrets.keys.awsAccessKeyId` | `AWS_ACCESS_KEY_ID` | Key name in existing secret |
 | `secrets.existingSecrets.keys.awsSecretAccessKey` | `AWS_SECRET_ACCESS_KEY` | Key name in existing secret |
+| `admin.enabled` | `false` | Enable the admin dashboard |
+| `admin.path` | `/admin` | URL path prefix for the dashboard |
+| `admin.username` | `admin` | Dashboard username (stored in the Secret; override in production) |
+| `admin.password` | `admin` | Dashboard password (stored in the Secret; override in production) |
+| `admin.existingSecret.name` | `""` | Pre-created secret holding admin credentials |
+| `admin.existingSecret.usernameKey` | `S3PROXY_ADMIN_USERNAME` | Username key in the existing secret |
+| `admin.existingSecret.passwordKey` | `S3PROXY_ADMIN_PASSWORD` | Password key in the existing secret |
+| `admin.ingress.enabled` | `false` | Dedicated Ingress for the dashboard (keep off unless intentionally exposing it) |
+| `admin.ingress.className` | `nginx` | Ingress class for the admin Ingress |
+| `admin.ingress.host` | `""` | Hostname for the dashboard (required when enabled) |
+| `admin.ingress.annotations` | `{}` | Annotations (e.g. IP allowlist) for the admin Ingress |
+| `admin.ingress.tls` | `[]` | TLS config for the admin Ingress |
 | `redis-ha.enabled` | `true` | Deploy embedded Redis HA |
 | `redis-ha.replicas` | `1` | Redis replicas |
 | `redis-ha.auth` | `false` | Enable Redis auth |

@@ -13,6 +13,7 @@ from fastapi.responses import PlainTextResponse
 from structlog.stdlib import BoundLogger
 
 from . import concurrency, crypto
+from .admin import record_request
 from .errors import S3Error, raise_for_client_error, raise_for_exception
 from .handlers import S3ProxyHandler
 from .metrics import (
@@ -133,6 +134,13 @@ async def handle_proxy_request(
         REQUESTS_IN_FLIGHT.labels(method=method).dec()
         REQUEST_COUNT.labels(method=method, operation=operation, status=status_code).inc()
         REQUEST_DURATION.labels(method=method, operation=operation).observe(duration)
+
+        try:
+            size = int(request.headers.get("content-length", "0"))
+        except ValueError:
+            size = 0
+        client_ip = request.client.host if request.client else ""
+        record_request(method, path, operation, status_code, duration, size, client_ip)
 
         if reserved_memory > 0:
             await concurrency.release_memory(reserved_memory)

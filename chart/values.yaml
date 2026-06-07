@@ -97,6 +97,30 @@ secrets:
 
 logLevel: "DEBUG"
 
+# Admin dashboard — served on the main service port at `admin.path`.
+# Credentials are stored in a Secret. Override username/password in production,
+# or point existingSecret at your own Secret holding the credential keys below.
+admin:
+  enabled: false
+  path: "/admin"
+  username: "admin"
+  password: "admin"
+  existingSecret:
+    name: ""
+    usernameKey: "S3PROXY_ADMIN_USERNAME"
+    passwordKey: "S3PROXY_ADMIN_PASSWORD"
+
+  # Optional dedicated Ingress for the dashboard, separate from the S3 data-plane
+  # ingress above. OFF by default — the admin UI should not be internet-facing
+  # unless you explicitly expose it (ideally behind an internal ingress class,
+  # an IP allowlist, or VPN). Routes `admin.path` to the proxy service.
+  ingress:
+    enabled: false
+    className: "nginx"
+    host: ""
+    annotations: {}
+    tls: []  # e.g. [{ secretName: admin-tls, hosts: [admin.example.com] }]
+
 resources:
   requests:
     cpu: "100m"

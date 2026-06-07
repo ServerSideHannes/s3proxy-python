@@ -29,8 +29,13 @@ spec:
             - secretRef:
                 name: {{ printf "%s-secrets" .Chart.Name }}
           {{- end }}
+          {{- /* Admin creds need an explicit env block only when they are NOT already
+                 pulled in via the chart-secret envFrom above (i.e. an admin existingSecret
+                 is set, or the app uses an existing secret so envFrom never fires). */ -}}
+          {{- $adminFromChartSecret := and .Values.admin.enabled (not .Values.admin.existingSecret.name) (not .Values.secrets.existingSecrets.enabled) }}
+          {{- $adminNeedsEnv := and .Values.admin.enabled (not $adminFromChartSecret) }}
           {{- /* Determine if we need env section */ -}}
-          {{- $needsEnv := or .Values.secrets.existingSecrets.enabled (and (index .Values "redis-ha" "enabled") (index .Values "redis-ha" "auth")) (and (not (index .Values "redis-ha" "enabled")) .Values.externalRedis.existingSecret) }}
+          {{- $needsEnv := or .Values.secrets.existingSecrets.enabled $adminNeedsEnv (and (index .Values "redis-ha" "enabled") (index .Values "redis-ha" "auth")) (and (not (index .Values "redis-ha" "enabled")) .Values.externalRedis.existingSecret) }}
           {{- if $needsEnv }}
           env:
             {{- /* App secrets from existing secret */ -}}
@@ -50,6 +55,20 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secrets.existingSecrets.name }}
                   key: {{ .Values.secrets.existingSecrets.keys.awsSecretAccessKey }}
+            {{- end }}
+            {{- /* Admin dashboard credentials (when not pulled via the chart-secret envFrom) */ -}}
+            {{- if $adminNeedsEnv }}
+            {{- $adminSecret := .Values.admin.existingSecret.name | default (printf "%s-secrets" .Chart.Name) }}
+            - name: S3PROXY_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $adminSecret }}
+                  key: {{ .Values.admin.existingSecret.usernameKey }}
+            - name: S3PROXY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $adminSecret }}
+                  key: {{ .Values.admin.existingSecret.passwordKey }}
             {{- end }}
             {{- /* Redis password from redis-ha secret */ -}}
             {{- if and (index .Values "redis-ha" "enabled") (index .Values "redis-ha" "auth") }}
