@@ -18,6 +18,11 @@ services:
     privileged: true
     depends_on:
       - registry
+    # Publish the s3proxy admin panel to the host. After the cluster is up, the
+    # entrypoint runs `kubectl port-forward` (on 0.0.0.0) onto container :14433,
+    # so the dashboard is reachable at http://localhost:14433/admin (admin/admin).
+    ports:
+      - "14433:14433"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ..:/repo
@@ -204,23 +209,36 @@ services:
 
         # 1. ECK (Elasticsearch) operator
         (
+          set -e
+          # retry wrapper: apply a remote manifest, failing hard only after N attempts
+          eck_apply() {
+            for i in 1 2 3 4 5; do
+              kubectl apply $$2 -f "$$1" && return 0
+              echo "apply $$1 failed, retry $$i..."; sleep 10
+            done
+            echo "ERROR: apply $$1 failed after 5 attempts"; return 1
+          }
+          # wait for a CRD to exist, then to be Established (avoids the
+          # "no matching resources" race when wait runs before apply propagates)
+          eck_wait_crd() {
+            until kubectl get "crd/$$1" >/dev/null 2>&1; do sleep 2; done
+            kubectl wait --for=condition=Established "crd/$$1" --timeout=180s
+          }
+
           echo "Installing ECK CRDs..."
-          for i in 1 2 3; do
-            kubectl apply -f https://download.elastic.co/downloads/eck/3.3.2/crds.yaml && break
-            echo "ECK CRDs apply failed, retry $$i..."
-            sleep 5
-          done
-          # Wait for CRDs to be established before applying operator
+          eck_apply https://download.elastic.co/downloads/eck/3.3.2/crds.yaml
           echo "Waiting for ECK CRDs to be established..."
-          kubectl wait --for=condition=Established crd/elasticsearches.elasticsearch.k8s.elastic.co --timeout=60s
-          kubectl wait --for=condition=Established crd/kibanas.kibana.k8s.elastic.co --timeout=60s
+          eck_wait_crd elasticsearches.elasticsearch.k8s.elastic.co
+          eck_wait_crd kibanas.kibana.k8s.elastic.co
+
           echo "Installing ECK operator..."
+          eck_apply https://download.elastic.co/downloads/eck/3.3.2/operator.yaml
+          # statefulset may not be registered the instant apply returns; wait for it
+          until kubectl get --namespace elastic-system statefulset/elastic-operator >/dev/null 2>&1; do sleep 2; done
           for i in 1 2 3; do
-            kubectl apply -f https://download.elastic.co/downloads/eck/3.3.2/operator.yaml && break
-            echo "ECK operator apply failed, retry $$i..."
-            sleep 5
+            kubectl rollout status --namespace elastic-system statefulset/elastic-operator --timeout=300s && break
+            echo "elastic-operator rollout not ready, retry $$i..."; sleep 10
           done
-          kubectl rollout status --namespace elastic-system statefulset/elastic-operator --timeout=300s
           echo "✓ ECK operator ready"
         ) &
         ECK_PID=$$!
@@ -236,7 +254,14 @@ services:
 
         # 3. ClickHouse operator
         (
-          kubectl apply -f https://raw.githubusercontent.com/Altinity/clickhouse-operator/master/deploy/operator/clickhouse-operator-install-bundle.yaml
+          set -e
+          for i in 1 2 3 4 5; do
+            kubectl apply -f https://raw.githubusercontent.com/Altinity/clickhouse-operator/master/deploy/operator/clickhouse-operator-install-bundle.yaml && break
+            echo "ClickHouse operator apply failed, retry $$i..."; sleep 10
+            [ "$$i" = 5 ] && { echo "ERROR: ClickHouse operator apply failed after 5 attempts"; exit 1; }
+          done
+          # pod may not be scheduled the instant apply returns; wait for it to exist first
+          until kubectl get pods --namespace kube-system --selector=app=clickhouse-operator 2>/dev/null | grep -q .; do sleep 2; done
           kubectl wait --namespace kube-system --for=condition=ready pod --selector=app=clickhouse-operator --timeout=300s
           echo "✓ ClickHouse operator ready"
         ) &
@@ -244,13 +269,28 @@ services:
 
         # 4. cert-manager + Scylla Operator + Scylla Manager (sequential chain in single background job)
         (
+          set -e
+          # retry wrapper for remote manifests (network-flaky downloads)
+          remote_apply() {
+            for i in 1 2 3 4 5; do
+              kubectl apply $$2 -f "$$1" && return 0
+              echo "apply $$1 failed, retry $$i..."; sleep 10
+            done
+            echo "ERROR: apply $$1 failed after 5 attempts"; return 1
+          }
           # cert-manager
-          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.19.0/cert-manager.yaml
-          kubectl wait --namespace cert-manager --for=condition=ready pod --all --timeout=300s
+          remote_apply https://github.com/cert-manager/cert-manager/releases/download/v1.19.0/cert-manager.yaml
+          # wait for the 3 cert-manager deployments to exist before waiting on pods
+          # (--all matches zero pods and returns immediately if none scheduled yet)
+          for d in cert-manager cert-manager-cainjector cert-manager-webhook; do
+            until kubectl get --namespace cert-manager "deployment/$$d" >/dev/null 2>&1; do sleep 2; done
+            kubectl rollout status --namespace cert-manager "deployment/$$d" --timeout=300s
+          done
           echo "✓ cert-manager ready"
 
           # Scylla Operator (requires cert-manager)
-          kubectl apply --server-side -f https://raw.githubusercontent.com/scylladb/scylla-operator/v1.20.2/deploy/operator.yaml
+          remote_apply https://raw.githubusercontent.com/scylladb/scylla-operator/v1.20.2/deploy/operator.yaml --server-side
+          until kubectl get pods -l app.kubernetes.io/name=scylla-operator -n scylla-operator 2>/dev/null | grep -q .; do sleep 2; done
           kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=scylla-operator -n scylla-operator --timeout=300s
           kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=webhook-server -n scylla-operator --timeout=300s
           # Wait for webhook to be fully ready
@@ -435,9 +475,18 @@ services:
         kubectl get pods -n s3proxy
         kubectl get svc -n s3proxy
 
+        # Expose the s3proxy admin panel to the host. The container publishes
+        # :14433; this self-healing forward maps it to the in-cluster service so
+        # the dashboard is reachable at http://localhost:14433/admin on the host.
+        ( while true; do
+            kubectl port-forward -n s3proxy --address 0.0.0.0 svc/s3proxy-python 14433:4433 >/dev/null 2>&1 || true
+            sleep 2
+          done ) &
+
         echo ""
         echo "S3 Proxy endpoint for databases: http://s3proxy-python-frontproxy.s3proxy.svc.cluster.local:80"
         echo "Direct MinIO (unencrypted):      http://minio.minio.svc.cluster.local:9000"
+        echo "Admin panel (host browser):      http://localhost:14433/admin  (login: admin / admin)"
 
         echo ""
         echo "=========================================="

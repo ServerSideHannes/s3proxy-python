@@ -29,8 +29,10 @@ data:
       balance leastconn
       # Per-request balancing: don't pin a client to one server, and re-resolve the
       # headless Service via DNS so new/restarted pods are picked up automatically.
+      # Use the FQDN: HAProxy's resolver does NOT apply /etc/resolv.conf search
+      # domains, so a bare service name NXDOMAINs and leaves 0 backends (503 <NOSRV>).
       option redispatch
-      server-template pod 1-{{ int .Values.replicaCount }} {{ .Chart.Name }}-headless:{{ .Values.service.port }} check resolvers k8s init-addr none
+      server-template pod 1-{{ int .Values.replicaCount }} {{ .Chart.Name }}-headless.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }} check resolvers k8s init-addr none
 
     resolvers k8s
       parse-resolv-conf
