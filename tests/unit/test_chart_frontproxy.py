@@ -16,21 +16,34 @@ import yaml
 
 CHART_DIR = Path(__file__).resolve().parents[2] / "chart"
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("helm") is None, reason="helm binary not available"
-)
+pytestmark = pytest.mark.skipif(shutil.which("helm") is None, reason="helm binary not available")
 
 
-def render(*set_args: str) -> list[dict]:
-    """Render the chart and return parsed manifests. redis-ha is disabled so the
-    dependency does not need to be fetched."""
+@pytest.fixture(scope="module")
+def chart_dir(tmp_path_factory) -> Path:
+    """A copy of the chart with the redis-ha dependency stripped from Chart.yaml.
+
+    `helm template` checks declared dependencies before evaluating their
+    `condition`, so it fails on a clean checkout where charts/ is empty — even
+    with redis-ha.enabled=false. These tests don't exercise redis-ha, so we
+    render a dependency-free copy and stay fully hermetic (no network, no
+    `helm dependency build`)."""
+    dest = tmp_path_factory.mktemp("chart") / "chart"
+    shutil.copytree(CHART_DIR, dest)
+    shutil.rmtree(dest / "charts", ignore_errors=True)
+    chart_yaml = dest / "Chart.yaml"
+    meta = yaml.safe_load(chart_yaml.read_text())
+    meta.pop("dependencies", None)
+    chart_yaml.write_text(yaml.safe_dump(meta, sort_keys=False))
+    return dest
+
+
+def _render(chart_dir: Path, set_args: tuple[str, ...]) -> subprocess.CompletedProcess:
     cmd = [
         "helm",
         "template",
         "t",
-        str(CHART_DIR),
-        "--set",
-        "redis-ha.enabled=false",
+        str(chart_dir),
         "--set",
         "secrets.encryptKey=x",
         "--set",
@@ -40,18 +53,20 @@ def render(*set_args: str) -> list[dict]:
     ]
     for s in set_args:
         cmd += ["--set", s]
-    out = subprocess.run(cmd, capture_output=True, text=True)
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def render(chart_dir: Path, *set_args: str) -> list[dict]:
+    """Render the chart and return parsed manifests."""
+    out = _render(chart_dir, set_args)
     if out.returncode != 0:
         raise AssertionError(f"helm template failed:\n{out.stderr}")
     return [d for d in yaml.safe_load_all(out.stdout) if d]
 
 
-def render_expect_error(*set_args: str) -> str:
-    """Render expecting failure; return combined stderr for assertion."""
-    cmd = ["helm", "template", "t", str(CHART_DIR), "--set", "redis-ha.enabled=false"]
-    for s in set_args:
-        cmd += ["--set", s]
-    out = subprocess.run(cmd, capture_output=True, text=True)
+def render_expect_error(chart_dir: Path, *set_args: str) -> str:
+    """Render expecting failure; return stderr for assertion."""
+    out = _render(chart_dir, set_args)
     assert out.returncode != 0, "expected helm template to fail but it succeeded"
     return out.stderr
 
@@ -68,8 +83,8 @@ def by_kind_name(docs: list[dict], kind: str, name: str) -> dict | None:
 # --------------------------------------------------------------------------
 
 
-def test_disabled_by_default():
-    docs = render()
+def test_disabled_by_default(chart_dir):
+    docs = render(chart_dir)
     names = {(d.get("kind"), d["metadata"]["name"]) for d in docs}
     assert ("Deployment", "s3proxy-python-frontproxy") not in names
     assert ("Service", "s3proxy-python-frontproxy") not in names
@@ -77,9 +92,9 @@ def test_disabled_by_default():
     assert not any(d.get("kind") == "Ingress" for d in docs)
 
 
-def test_no_nginx_or_gateway_anywhere():
+def test_no_nginx_or_gateway_anywhere(chart_dir):
     """The whole point of the change: no nginx/gateway artifacts, on or off."""
-    docs = render("frontproxy.enabled=true")
+    docs = render(chart_dir, "frontproxy.enabled=true")
     blob = yaml.safe_dump_all(docs).lower()
     assert "nginx" not in blob
     assert "gateway" not in blob
@@ -91,8 +106,8 @@ def test_no_nginx_or_gateway_anywhere():
 # --------------------------------------------------------------------------
 
 
-def test_frontproxy_resources_rendered():
-    docs = render("frontproxy.enabled=true")
+def test_frontproxy_resources_rendered(chart_dir):
+    docs = render(chart_dir, "frontproxy.enabled=true")
     for kind, name in [
         ("Deployment", "s3proxy-python-frontproxy"),
         ("Service", "s3proxy-python-frontproxy"),
@@ -103,17 +118,17 @@ def test_frontproxy_resources_rendered():
         assert by_kind_name(docs, kind, name), f"missing {kind}/{name}"
 
 
-def test_headless_service_is_headless():
-    docs = render("frontproxy.enabled=true")
+def test_headless_service_is_headless(chart_dir):
+    docs = render(chart_dir, "frontproxy.enabled=true")
     hs = by_kind_name(docs, "Service", "s3proxy-python-headless")
     assert hs["spec"]["clusterIP"] == "None"
     assert hs["spec"]["selector"]["app.kubernetes.io/component"] == "server"
 
 
-def test_service_selectors_do_not_overlap():
+def test_service_selectors_do_not_overlap(chart_dir):
     """The main/headless Services must select only s3proxy pods, the frontproxy
     Service only HAProxy pods — otherwise the front proxy round-robins to itself."""
-    docs = render("frontproxy.enabled=true")
+    docs = render(chart_dir, "frontproxy.enabled=true")
     main = by_kind_name(docs, "Service", "s3proxy-python")
     fp = by_kind_name(docs, "Service", "s3proxy-python-frontproxy")
     assert main["spec"]["selector"]["app.kubernetes.io/component"] == "server"
@@ -127,8 +142,8 @@ def test_service_selectors_do_not_overlap():
     assert fp_labels["app.kubernetes.io/component"] == "frontproxy"
 
 
-def test_haproxy_config_balances_and_scales_with_replicas():
-    docs = render("frontproxy.enabled=true", "replicaCount=5")
+def test_haproxy_config_balances_and_scales_with_replicas(chart_dir):
+    docs = render(chart_dir, "frontproxy.enabled=true", "replicaCount=5")
     cm = by_kind_name(docs, "ConfigMap", "s3proxy-python-frontproxy")
     cfg = cm["data"]["haproxy.cfg"]
     assert "balance leastconn" in cfg
@@ -137,8 +152,8 @@ def test_haproxy_config_balances_and_scales_with_replicas():
     assert "parse-resolv-conf" in cfg
 
 
-def test_frontproxy_replicas_and_pdb():
-    docs = render("frontproxy.enabled=true")
+def test_frontproxy_replicas_and_pdb(chart_dir):
+    docs = render(chart_dir, "frontproxy.enabled=true")
     dep = by_kind_name(docs, "Deployment", "s3proxy-python-frontproxy")
     assert dep["spec"]["replicas"] == 2
     pdb = by_kind_name(docs, "PodDisruptionBudget", "s3proxy-python-frontproxy")
@@ -161,8 +176,8 @@ def _ingress_args() -> list[str]:
     ]
 
 
-def test_ingress_routes_to_frontproxy():
-    docs = render(*_ingress_args())
+def test_ingress_routes_to_frontproxy(chart_dir):
+    docs = render(chart_dir, *_ingress_args())
     ing = by_kind_name(docs, "Ingress", "s3proxy-python")
     assert ing is not None
     assert ing["spec"]["ingressClassName"] == "nginx"
@@ -171,8 +186,9 @@ def test_ingress_routes_to_frontproxy():
     assert backend["port"]["number"] == 80
 
 
-def test_ingress_requires_frontproxy():
+def test_ingress_requires_frontproxy(chart_dir):
     err = render_expect_error(
+        chart_dir,
         "ingress.enabled=true",
         "ingress.hosts[0].host=s3.example.com",
         "ingress.hosts[0].paths[0].path=/",
@@ -181,13 +197,14 @@ def test_ingress_requires_frontproxy():
     assert "frontproxy.enabled=true" in err
 
 
-def test_ingress_requires_hosts():
-    err = render_expect_error("frontproxy.enabled=true", "ingress.enabled=true")
+def test_ingress_requires_hosts(chart_dir):
+    err = render_expect_error(chart_dir, "frontproxy.enabled=true", "ingress.enabled=true")
     assert "ingress.hosts is empty" in err
 
 
-def test_ingress_tls_rendered():
+def test_ingress_tls_rendered(chart_dir):
     docs = render(
+        chart_dir,
         *_ingress_args(),
         "ingress.tls[0].secretName=s3-tls",
         "ingress.tls[0].hosts[0]=s3.example.com",
