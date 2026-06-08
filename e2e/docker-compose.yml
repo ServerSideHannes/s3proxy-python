@@ -221,7 +221,7 @@ services:
             echo "ECK operator apply failed, retry $$i..."
             sleep 5
           done
-          kubectl wait --namespace elastic-system --for=condition=ready pod --selector=control-plane=elastic-operator --timeout=300s
+          kubectl rollout status --namespace elastic-system statefulset/elastic-operator --timeout=300s
           echo "✓ ECK operator ready"
         ) &
         ECK_PID=$$!
