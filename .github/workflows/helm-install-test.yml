@@ -138,6 +138,22 @@ jobs:
             --command -- /bin/sh -c '
               set -e
               ENDPOINT="http://s3proxy-python-frontproxy:80"
+
+              # HAProxy starts with no backend addresses (server-template + init-addr none)
+              # and only fills its server slots once it resolves the headless Service via DNS,
+              # which publishes pod IPs only after the app pods are Ready. Until that first
+              # resolution lands, every request is 503 <NOSRV>. Wait for a live backend before
+              # asserting the round-trip.
+              echo "Waiting for the front proxy to discover a backend..."
+              for i in $(seq 1 30); do
+                if aws --endpoint-url $ENDPOINT s3 ls >/dev/null 2>&1; then
+                  echo "Backend is live (attempt $i)"
+                  break
+                fi
+                [ "$i" = "30" ] && { echo "✗ front proxy never reached a live backend"; exit 1; }
+                sleep 2
+              done
+
               echo "via front proxy - $(date)" > /tmp/fp.txt
               ORIG=$(md5sum /tmp/fp.txt | cut -c1-32)
               aws --endpoint-url $ENDPOINT s3 mb s3://frontproxy-bucket
