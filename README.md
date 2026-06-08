@@ -37,7 +37,7 @@ S3's server-side encryption is great, but your cloud provider holds the keys. S3
   <img src="https://img.shields.io/badge/✓_Streaming_I/O-00d4aa?style=flat-square" alt="Streaming">
   <img src="https://img.shields.io/badge/✓_Multipart_Uploads-00d4aa?style=flat-square" alt="Multipart">
   <img src="https://img.shields.io/badge/✓_SigV4_Auth-00d4aa?style=flat-square" alt="SigV4">
-  <img src="https://img.shields.io/badge/✓_Redis_HA-00d4aa?style=flat-square" alt="Redis HA">
+  <img src="https://img.shields.io/badge/✓_Distributed_State-00d4aa?style=flat-square" alt="Distributed State">
   <img src="https://img.shields.io/badge/✓_Horizontal_Scaling-00d4aa?style=flat-square" alt="Scaling">
 </p>
 
@@ -130,7 +130,7 @@ A request signed by an access key with no configured KEK is rejected. Via Helm: 
 | `secrets.credentials` | `[]` | AWS credentials, each `{accessKey, secretKey, kek}` |
 | `secrets.existingSecrets.enabled` | `false` | Use existing K8s secret |
 | `admin.secret` | `change-me` | Secret signing admin session cookies (when admin UI on) |
-| `redis-ha.enabled` | `true` | Deploy embedded Redis HA |
+| `redis.enabled` | `true` | Deploy the bundled single Redis pod (transient upload state) |
 | `frontproxy.enabled` | `false` | Bundled HAProxy for even load distribution (no external dependency) |
 | `ingress.enabled` | `false` | Expose S3 outside the cluster via Ingress (requires `frontproxy.enabled`) |
 | `performance.memoryLimitMb` | `64` | Memory budget for streaming concurrency |
@@ -153,7 +153,7 @@ Data written by that credential is unrecoverable. Each object records the access
 
 <details>
 <summary><strong>What if Redis fails mid-upload?</strong></summary>
-Upload fails and must restart. Use <code>redis-ha.enabled=true</code> with persistence.
+Only in-flight multipart uploads are affected — they fail and must restart. No committed object is ever at risk, since Redis holds only transient, TTL'd upload state. For extra resilience, point <code>externalRedis.url</code> at your own HA Redis and set <code>redis.enabled=false</code>.
 </details>
 
 <details>

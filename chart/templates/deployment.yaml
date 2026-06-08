@@ -35,8 +35,12 @@ spec:
                  is set, or the app uses an existing secret so envFrom never fires). */ -}}
           {{- $adminFromChartSecret := and .Values.admin.enabled (not .Values.admin.existingSecret.name) (not .Values.secrets.existingSecrets.enabled) }}
           {{- $adminNeedsEnv := and .Values.admin.enabled (not $adminFromChartSecret) }}
+          {{- /* Redis password is needed when the bundled Redis has auth on, or
+                 external Redis is used with an existing secret. */ -}}
+          {{- $redisAuth := and .Values.redis.enabled .Values.redis.auth.enabled }}
+          {{- $extRedisAuth := and (not .Values.redis.enabled) .Values.externalRedis.existingSecret }}
           {{- /* Determine if we need env section */ -}}
-          {{- $needsEnv := or .Values.secrets.existingSecrets.enabled $adminNeedsEnv (and (index .Values "redis-ha" "enabled") (index .Values "redis-ha" "auth")) (and (not (index .Values "redis-ha" "enabled")) .Values.externalRedis.existingSecret) }}
+          {{- $needsEnv := or .Values.secrets.existingSecrets.enabled $adminNeedsEnv $redisAuth $extRedisAuth }}
           {{- if $needsEnv }}
           env:
             {{- /* App secrets from existing secret */ -}}
@@ -66,19 +70,15 @@ spec:
                   name: {{ $adminSecret }}
                   key: {{ .Values.admin.existingSecret.secretKey }}
             {{- end }}
-            {{- /* Redis password from redis-ha secret */ -}}
-            {{- if and (index .Values "redis-ha" "enabled") (index .Values "redis-ha" "auth") }}
+            {{- /* Redis password from the bundled Redis secret */ -}}
+            {{- if $redisAuth }}
             - name: S3PROXY_REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  {{- if index .Values "redis-ha" "existingSecret" }}
-                  name: {{ index .Values "redis-ha" "existingSecret" }}
-                  {{- else }}
-                  name: {{ .Release.Name }}-redis-ha
-                  {{- end }}
-                  key: {{ index .Values "redis-ha" "authKey" | default "auth" }}
+                  name: {{ .Values.redis.auth.existingSecret | default (printf "%s-redis" .Chart.Name) }}
+                  key: {{ .Values.redis.auth.passwordKey }}
             {{- /* Redis password from external Redis secret */ -}}
-            {{- else if and (not (index .Values "redis-ha" "enabled")) .Values.externalRedis.existingSecret }}
+            {{- else if $extRedisAuth }}
             - name: S3PROXY_REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:

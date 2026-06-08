@@ -411,24 +411,9 @@ services:
           --set performance.memoryLimitMb=64 \
           --set frontproxy.enabled=true \
           --set admin.enabled=true \
-          --set redis-ha.enabled=true \
-          --set redis-ha.persistentVolume.enabled=true \
-          --set redis-ha.persistentVolume.size=10Gi \
-          --set redis-ha.hardAntiAffinity=false \
-          --set redis-ha.haproxy.hardAntiAffinity=false \
-          --set redis-ha.auth=true \
-          --set redis-ha.replicas=1 \
-          --set redis-ha.redisPassword=testredispassword \
-          --set redis-ha.redis.resources.requests.memory=128Mi \
-          --set redis-ha.redis.resources.limits.memory=256Mi \
-          --set redis-ha.redis.config.maxmemory=200mb \
-          --set redis-ha.redis.config.maxmemory-policy=noeviction \
-          --set redis-ha.redis.config.min-replicas-to-write=0 \
-          --set redis-ha.redis.config.min-replicas-max-lag=10 \
-          --set redis-ha.haproxy.checkInterval=5s \
-          --set redis-ha.haproxy.timeout.check=10s \
-          --set redis-ha.haproxy.timeout.server=60s \
-          --set redis-ha.haproxy.timeout.client=60s &
+          --set redis.enabled=true \
+          --set redis.auth.enabled=true \
+          --set redis.auth.password=testredispassword &
         S3PROXY_PID=$$!
 
         # 8. Wait for ALL parallel tasks

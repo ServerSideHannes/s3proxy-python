@@ -18,62 +18,31 @@ server:
 performance:
   memoryLimitMb: 64
 
-externalRedis:
-  url: ""
-  uploadTtlHours: 24
-  existingSecret: ""
-  passwordKey: "redis-password"
-
-redis-ha:
+# Redis holds only transient multipart-upload state (TTL'd, deleted on
+# completion). It is NOT a durable store — losing it only forces in-flight
+# multipart uploads to restart, never any committed object. So a single
+# bundled Redis pod is the sensible default; for HA or shared infra, disable
+# this and point `externalRedis.url` at your own Redis.
+redis:
   enabled: true
-  replicas: 1
-  auth: false
-  redisPassword: ""
-  existingSecret: ""
-  authKey: "auth"
-
-  persistentVolume:
-    enabled: true
-    size: 10Gi
-    storageClass: ""
-
-  haproxy:
-    enabled: true
-    replicas: 2
-    # CRITICAL: Health check and timeout settings for high load tolerance
-    # Redis can be slow during BGSAVE - don't mark as DOWN too quickly
-    checkInterval: 5s         # Check every 5 seconds (default: 1s)
-    timeout:
-      check: "10s"            # Wait 10s for health check response (default: 2s)
-      server: "60s"           # Server response timeout (default: 30s)
-      client: "60s"           # Client connection timeout (default: 30s)
-    resources:
-      requests:
-        cpu: "50m"
-        memory: "64Mi"
-      limits:
-        cpu: "200m"
-        memory: "128Mi"
-
-  sentinel:
-    port: 26379
-    quorum: 2
-    config:
-      down-after-milliseconds: 10000
-      failover-timeout: 180000
-      parallel-syncs: 5
-
-  redis:
-    port: 6379
-    config:
-      maxmemory: "200mb"
-      maxmemory-policy: noeviction
-
-      min-replicas-to-write: 2
-      min-replicas-max-lag: 10
-
-  hardAntiAffinity: true
-
+  image:
+    # NOTE: not auto-bumped by dependabot (it doesn't track image tags in
+    # values.yaml). Bump this tag manually when upgrading Redis.
+    repository: redis
+    tag: "7-alpine"
+    pullPolicy: IfNotPresent
+  port: 6379
+  # maxmemory-policy noeviction so the proxy gets an error rather than silent
+  # eviction of in-flight upload state.
+  maxmemory: "200mb"
+  maxmemoryPolicy: "noeviction"
+  # Optional auth. Off by default (in-cluster ClusterIP, transient data).
+  # Set `password`, or point `existingSecret`/`passwordKey` at your own Secret.
+  auth:
+    enabled: false
+    password: ""
+    existingSecret: ""
+    passwordKey: "redis-password"
   resources:
     requests:
       cpu: "100m"
@@ -81,6 +50,14 @@ redis-ha:
     limits:
       cpu: "500m"
       memory: "256Mi"
+
+# External Redis — used when `redis.enabled: false`. Point at a Redis you run
+# yourself (managed service, shared cluster, your own HA setup).
+externalRedis:
+  url: ""
+  uploadTtlHours: 24
+  existingSecret: ""
+  passwordKey: "redis-password"
 
 secrets:
   existingSecrets:
