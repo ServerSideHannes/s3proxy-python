@@ -26,7 +26,7 @@ spec:
           imagePullPolicy: {{ .Values.frontproxy.image.pullPolicy }}
           ports:
             - name: http
-              containerPort: {{ .Values.frontproxy.service.port }}
+              containerPort: {{ .Values.frontproxy.containerPort }}
               protocol: TCP
           volumeMounts:
             - name: config

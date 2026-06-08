@@ -118,6 +118,28 @@ def test_frontproxy_resources_rendered(chart_dir):
         assert by_kind_name(docs, kind, name), f"missing {kind}/{name}"
 
 
+def test_frontproxy_binds_unprivileged_port(chart_dir):
+    """The HAProxy container runs as non-root with all caps dropped, so it must
+    bind a port > 1024 — binding 80 directly fails with EACCES (CrashLoopBackOff).
+    The Service still exposes port 80, targeting the named container port."""
+    docs = render(chart_dir, "frontproxy.enabled=true")
+
+    cm = by_kind_name(docs, "ConfigMap", "s3proxy-python-frontproxy")
+    cfg = cm["data"]["haproxy.cfg"]
+    bind_line = next(line for line in cfg.splitlines() if "bind" in line)
+    bind_port = int(bind_line.rsplit(":", 1)[1].strip())
+    assert bind_port > 1024, f"frontproxy binds privileged port {bind_port}"
+
+    dep = by_kind_name(docs, "Deployment", "s3proxy-python-frontproxy")
+    container = dep["spec"]["template"]["spec"]["containers"][0]
+    assert container["securityContext"]["runAsNonRoot"] is True
+    assert container["ports"][0]["containerPort"] == bind_port
+
+    svc = by_kind_name(docs, "Service", "s3proxy-python-frontproxy")
+    assert svc["spec"]["ports"][0]["port"] == 80
+    assert svc["spec"]["ports"][0]["targetPort"] == "http"
+
+
 def test_headless_service_is_headless(chart_dir):
     docs = render(chart_dir, "frontproxy.enabled=true")
     hs = by_kind_name(docs, "Service", "s3proxy-python-headless")

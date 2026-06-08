@@ -5,130 +5,22 @@ from __future__ import annotations
 import hashlib
 import os
 import time
-from collections import defaultdict, deque
-from dataclasses import asdict, dataclass
+from collections import defaultdict
 from typing import TYPE_CHECKING
 
 from .. import metrics
+from .stats_store import (
+    LocalCounters,
+    RequestSample,
+    StatsStore,
+    get_store,
+)
 
 if TYPE_CHECKING:
     from ..config import Settings
 
 
-# ---------------------------------------------------------------------------
-# Sliding-window rate tracker over Prometheus counters
-# ---------------------------------------------------------------------------
-
-
-class RateTracker:
-    """Sample counter values on a schedule, then compute deltas over the window."""
-
-    def __init__(self, window_seconds: int = 3600, max_samples: int = 180):
-        self._window = window_seconds
-        self._max_samples = max_samples
-        self._snapshots: deque[tuple[float, dict[str, float]]] = deque(maxlen=max_samples)
-
-    def record(self, counters: dict[str, float]) -> None:
-        now = time.monotonic()
-        self._snapshots.append((now, dict(counters)))
-        cutoff = now - self._window
-        while len(self._snapshots) > 2 and self._snapshots[0][0] < cutoff:
-            self._snapshots.popleft()
-
-    def rate_per_second(self, key: str) -> float:
-        if len(self._snapshots) < 2:
-            return 0.0
-        t0, v0 = self._snapshots[0]
-        t1, v1 = self._snapshots[-1]
-        elapsed = t1 - t0
-        if elapsed < 0.5:
-            return 0.0
-        delta = v1.get(key, 0.0) - v0.get(key, 0.0)
-        return max(0.0, delta / elapsed)
-
-    def total(self, key: str) -> float:
-        if not self._snapshots:
-            return 0.0
-        _, v0 = self._snapshots[0]
-        _, v1 = self._snapshots[-1]
-        return max(0.0, v1.get(key, 0.0) - v0.get(key, 0.0))
-
-    def sparkline(self, key: str, points: int = 30) -> list[float]:
-        """Return per-bucket deltas suitable for a sparkline."""
-        _, values = self.sparkline_series(key, points)
-        return values
-
-    def sparkline_series(self, key: str, points: int = 30) -> tuple[list[float], list[float]]:
-        """Return (wall_clock_timestamps, per-bucket deltas) in parallel lists."""
-        if len(self._snapshots) < 2:
-            return [], []
-        snaps = list(self._snapshots)
-        # Map monotonic samples → wall-clock by using the current offset.
-        mono_now = time.monotonic()
-        wall_now = time.time()
-        offset = wall_now - mono_now
-        pairs: list[tuple[float, float]] = []
-        for prev, curr in zip(snaps, snaps[1:], strict=False):
-            elapsed = curr[0] - prev[0]
-            if elapsed <= 0:
-                continue
-            pairs.append(
-                (curr[0] + offset, max(0.0, curr[1].get(key, 0.0) - prev[1].get(key, 0.0)))
-            )
-        if len(pairs) > points:
-            step = len(pairs) / points
-            pairs = [pairs[int(i * step)] for i in range(points)]
-        times = [round(p[0], 3) for p in pairs]
-        values = [round(p[1], 2) for p in pairs]
-        return times, values
-
-    def earliest_value(self, key: str) -> float | None:
-        if not self._snapshots:
-            return None
-        return self._snapshots[0][1].get(key, 0.0)
-
-
-_rate_tracker = RateTracker()
-
-
-# ---------------------------------------------------------------------------
-# Request log — ring buffer for the activity feed
-# ---------------------------------------------------------------------------
-
-
-@dataclass(slots=True, frozen=True)
-class RequestEntry:
-    timestamp: float
-    method: str
-    operation: str
-    bucket: str
-    key: str
-    status: int
-    duration_ms: float
-    size: int
-    client_ip: str
-
-
-class RequestLog:
-    def __init__(self, maxlen: int = 200):
-        self._entries: deque[RequestEntry] = deque(maxlen=maxlen)
-
-    def record(self, entry: RequestEntry) -> None:
-        self._entries.append(entry)
-
-    def recent(self, limit: int = 10) -> list[dict]:
-        entries = list(self._entries)
-        entries.reverse()
-        return [asdict(e) for e in entries[:limit]]
-
-    def all(self) -> list[RequestEntry]:
-        return list(self._entries)
-
-
-_request_log = RequestLog(maxlen=200)
-
-
-def record_request(
+async def record_request(
     method: str,
     path: str,
     operation: str,
@@ -137,10 +29,13 @@ def record_request(
     size: int,
     client_ip: str = "",
 ) -> None:
-    """Append a completed request to the ring buffer."""
+    """Append a completed request to the stats store (no-op if unset)."""
+    store = get_store()
+    if store is None:
+        return
     bucket, key = _split_bucket_key(path)
-    _request_log.record(
-        RequestEntry(
+    await store.record(
+        RequestSample(
             timestamp=time.time(),
             method=method,
             operation=operation,
@@ -219,20 +114,42 @@ def _read_method_breakdown() -> dict[str, float]:
     return out
 
 
-def _latency_percentiles() -> dict[str, float]:
-    """Approximate p50/p95/p99 by walking the histogram cumulative buckets."""
-    buckets: list[tuple[float, float]] = []
-    total = 0.0
+def _read_latency_buckets() -> dict[str, float]:
+    """Read the Prometheus histogram as a {le-string: cumulative count} map.
+
+    Includes the synthetic "+Inf" bucket (== total observations). Matches the
+    shape the Redis latency hash stores so percentiles can be computed from
+    either source.
+    """
+    out: dict[str, float] = {}
     for sample in metrics.REQUEST_DURATION.collect()[0].samples:
-        if sample.name.endswith("_bucket"):
-            le = sample.labels.get("le", "")
-            if le == "+Inf":
-                total = sample.value
-            else:
-                try:
-                    buckets.append((float(le), sample.value))
-                except ValueError:
-                    continue
+        if not sample.name.endswith("_bucket"):
+            continue
+        le = sample.labels.get("le", "")
+        out[le] = out.get(le, 0.0) + sample.value
+    return out
+
+
+def _latency_percentiles(cumulative: dict[str, float] | None = None) -> dict[str, float]:
+    """Approximate p50/p95/p99 by walking the histogram cumulative buckets.
+
+    ``cumulative`` is a {le-string: cumulative count} map. When None, reads the
+    per-pod Prometheus histogram.
+    """
+    if cumulative is None:
+        cumulative = _read_latency_buckets()
+
+    buckets: list[tuple[float, float]] = []
+    total = float(cumulative.get("+Inf", 0.0))
+    for le, count in cumulative.items():
+        if le == "+Inf":
+            continue
+        try:
+            buckets.append((float(le), float(count)))
+        except ValueError, TypeError:
+            continue
+    if total < 1 and buckets:
+        total = max(c for _, c in buckets)
     if total < 1 or not buckets:
         return {"p50_ms": 0.0, "p95_ms": 0.0, "p99_ms": 0.0, "count": 0}
     buckets.sort(key=lambda b: b[0])
@@ -250,6 +167,19 @@ def _latency_percentiles() -> dict[str, float]:
         "p99_ms": _pct(0.99),
         "count": int(total),
     }
+
+
+def _local_counters() -> LocalCounters:
+    """Snapshot this pod's Prometheus-derived counters for delta-syncing."""
+    return LocalCounters(
+        requests=_read_labeled_counter_sum(metrics.REQUEST_COUNT),
+        errors=_read_errors_total(),
+        bytes_encrypted=_read_counter(metrics.BYTES_ENCRYPTED),
+        bytes_decrypted=_read_counter(metrics.BYTES_DECRYPTED),
+        methods=_read_method_breakdown(),
+        errors_by_class=_read_error_breakdown(),
+        latency_buckets=_read_latency_buckets(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +224,12 @@ def _format_relative(ts: float, now: float | None = None) -> str:
     return f"{int(delta // 86400)}d ago"
 
 
+def _format_absolute(ts: float) -> str:
+    """Render a Unix epoch as a local 'YYYY-MM-DD HH:MM:SS.mmm' timestamp."""
+    ms = int((ts - int(ts)) * 1000)
+    return f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))}.{ms:03d}"
+
+
 def _format_size(n: int) -> str:
     if n <= 0:
         return "—"
@@ -306,20 +242,21 @@ def _format_size(n: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _derive_buckets(entries: list[RequestEntry]) -> list[dict]:
+def _derive_buckets(entries: list[dict]) -> list[dict]:
     by_bucket: dict[str, dict] = defaultdict(
         lambda: {"objects": set(), "bytes": 0, "last_seen": 0.0}
     )
     for e in entries:
-        if not e.bucket:
+        bucket = e.get("bucket")
+        if not bucket:
             continue
-        info = by_bucket[e.bucket]
-        if e.key:
-            info["objects"].add(e.key)
-        if e.size > 0:
-            info["bytes"] += e.size
-        if e.timestamp > info["last_seen"]:
-            info["last_seen"] = e.timestamp
+        info = by_bucket[bucket]
+        if e.get("key"):
+            info["objects"].add(e["key"])
+        if e.get("size", 0) > 0:
+            info["bytes"] += e["size"]
+        if e.get("timestamp", 0.0) > info["last_seen"]:
+            info["last_seen"] = e["timestamp"]
 
     out: list[dict] = []
     for name, info in by_bucket.items():
@@ -327,7 +264,6 @@ def _derive_buckets(entries: list[RequestEntry]) -> list[dict]:
         out.append(
             {
                 "name": name,
-                "encrypted": True,
                 "objects": len(info["objects"]),
                 "size": f"{num} {unit}" if info["bytes"] > 0 else "—",
                 "last_seen": info["last_seen"],
@@ -359,36 +295,58 @@ def _derive_keys(settings: Settings) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def collect_all(settings: Settings, start_time: float, version: str = "1.0.0") -> dict:
-    """Gather everything the dashboard renders in a single JSON blob."""
+async def collect_all(
+    store: StatsStore,
+    settings: Settings,
+    start_time: float,
+    version: str = "1.0.0",
+    range_key: str = "live",
+) -> dict:
+    """Gather everything the dashboard renders in a single JSON blob.
+
+    Reads cluster-wide aggregates from the Redis store when available, else
+    falls back to this pod's local Prometheus counters.
+    """
     now = time.time()
     uptime_s = max(0.0, time.monotonic() - start_time)
 
-    total_requests = _read_labeled_counter_sum(metrics.REQUEST_COUNT)
-    bytes_encrypted = _read_counter(metrics.BYTES_ENCRYPTED)
-    bytes_decrypted = _read_counter(metrics.BYTES_DECRYPTED)
-    errors_total = _read_errors_total()
+    # Fold this pod's local Prometheus deltas into the shared store, then read
+    # the cluster-wide aggregate. MemoryStatsStore.aggregate() returns None,
+    # so single-instance mode keeps reading Prometheus directly below.
+    local = _local_counters()
+    await store.sync_local(local)
+    agg = await store.aggregate()
 
-    counters = {
-        "requests": total_requests,
-        "bytes_crypto": bytes_encrypted + bytes_decrypted,
-        "errors": errors_total,
-    }
-    _rate_tracker.record(counters)
+    if agg is not None:
+        total_requests = agg.requests
+        bytes_encrypted = agg.bytes_encrypted
+        bytes_decrypted = agg.bytes_decrypted
+        errors_total = agg.errors
+        method_breakdown = agg.methods
+        error_breakdown = agg.errors_by_class or {"4xx": 0.0, "5xx": 0.0, "503": 0.0}
+        latency = _latency_percentiles(agg.latency_buckets)
+    else:
+        total_requests = local.requests
+        bytes_encrypted = local.bytes_encrypted
+        bytes_decrypted = local.bytes_decrypted
+        errors_total = local.errors
+        method_breakdown = local.methods
+        error_breakdown = local.errors_by_class
+        latency = _latency_percentiles(local.latency_buckets)
 
-    req_rate = _rate_tracker.rate_per_second("requests")
-    crypto_rate = _rate_tracker.rate_per_second("bytes_crypto")
+    req_times, req_values = await store.series("requests", range_key)
+    crypto_times, crypto_values = await store.series("crypto", range_key)
+    err_times, err_values = await store.series("errors", range_key)
+
+    req_rate = (req_values[-1] / 60.0) if req_values else 0.0
+    crypto_rate = (crypto_values[-1] / 60.0) if crypto_values else 0.0
 
     num_enc, unit_enc = _format_bytes(bytes_encrypted)
     num_thr, unit_thr = _format_bytes(crypto_rate)
 
-    req_times, req_values = _rate_tracker.sparkline_series("requests")
-    crypto_times, crypto_values = _rate_tracker.sparkline_series("bytes_crypto")
-    err_times, err_values = _rate_tracker.sparkline_series("errors")
-
-    entries = _request_log.all()
-    buckets = _derive_buckets(entries)
-    last_error_ts = next((e.timestamp for e in reversed(entries) if e.status >= 400), None)
+    activity = await store.recent(10)
+    buckets = _derive_buckets(activity)
+    last_error_ts = next((e["timestamp"] for e in activity if e["status"] >= 400), None)
 
     return {
         "header": {
@@ -397,6 +355,8 @@ def collect_all(settings: Settings, start_time: float, version: str = "1.0.0") -
             "uptime": _format_uptime(uptime_s),
             "pod": os.environ.get("HOSTNAME", "local"),
             "version": version,
+            "cluster_wide": store.cluster_wide,
+            "range": range_key,
         },
         "cards": {
             "requests": {
@@ -405,10 +365,10 @@ def collect_all(settings: Settings, start_time: float, version: str = "1.0.0") -
                 "unit": "",
                 "spark": req_values,
                 "spark_times": req_times,
-                "y_label": "req / sample",
+                "y_label": "req / bucket",
                 "breakdown": [
                     {"label": m, "value": f"{int(v):,}", "weight": float(v)}
-                    for m, v in sorted(_read_method_breakdown().items(), key=lambda kv: -kv[1])
+                    for m, v in sorted(method_breakdown.items(), key=lambda kv: -kv[1])
                     if v > 0
                 ],
             },
@@ -418,7 +378,7 @@ def collect_all(settings: Settings, start_time: float, version: str = "1.0.0") -
                 "unit": unit_enc,
                 "spark": crypto_values,
                 "spark_times": crypto_times,
-                "y_label": "bytes / sample",
+                "y_label": "bytes / bucket",
                 "breakdown": [
                     {
                         "label": "Encrypted (PUT)",
@@ -438,17 +398,17 @@ def collect_all(settings: Settings, start_time: float, version: str = "1.0.0") -
                 "unit": "",
                 "spark": err_values,
                 "spark_times": err_times,
-                "y_label": "errors / sample",
+                "y_label": "errors / bucket",
                 "breakdown": [
                     {"label": k, "value": f"{int(v):,}", "weight": float(v)}
-                    for k, v in _read_error_breakdown().items()
+                    for k, v in error_breakdown.items()
                 ],
             },
             "active_buckets": {
                 "label": "Active Buckets",
                 "value": str(len(buckets)),
                 "unit": "",
-                "detail": f"seen in last {len(entries)} reqs",
+                "detail": f"seen in last {len(activity)} reqs",
                 "breakdown": [
                     {
                         "label": b["name"],
@@ -459,10 +419,12 @@ def collect_all(settings: Settings, start_time: float, version: str = "1.0.0") -
                 ],
             },
         },
-        "latency": _latency_percentiles(),
+        "latency": latency,
         "activity": [
             {
-                "time": _format_relative(e["timestamp"], now),
+                "time": _format_absolute(e["timestamp"]),
+                "time_relative": _format_relative(e["timestamp"], now),
+                "timestamp": e["timestamp"],
                 "operation": _operation_display(e["method"], e["operation"]),
                 "bucket": e["bucket"] or "—",
                 "object": e["key"] or "—",
@@ -472,12 +434,11 @@ def collect_all(settings: Settings, start_time: float, version: str = "1.0.0") -
                 "client_ip": e["client_ip"] or "—",
                 "latency": f"{e['duration_ms']:.0f} ms",
             }
-            for e in _request_log.recent(10)
+            for e in activity
         ],
         "buckets": [
             {
                 "name": b["name"],
-                "encrypted": b["encrypted"],
                 "objects": f"{b['objects']:,}",
                 "size": b["size"],
             }
@@ -488,8 +449,27 @@ def collect_all(settings: Settings, start_time: float, version: str = "1.0.0") -
             "version": version,
             "req_per_s": f"{req_rate:.0f}",
             "throughput": f"{num_thr} {unit_thr}/s" if crypto_rate > 0 else f"0 {unit_thr}/s",
-            "last_error": _format_relative(last_error_ts, now) if last_error_ts else "never",
+            "last_error": _format_absolute(last_error_ts) if last_error_ts else "never",
         },
+    }
+
+
+async def collect_series(store: StatsStore, metric: str, range_key: str) -> dict:
+    """Return a single metric's time-series for the chart range selector."""
+    times, values = await store.series(metric, range_key)
+    return {"metric": metric, "range": range_key, "spark_times": times, "spark": values}
+
+
+async def collect_throughput(store: StatsStore, range_key: str) -> dict:
+    """Return PUT (encrypted) and GET (decrypted) byte series as two lines."""
+    put_times, put_values = await store.series("bytes_put", range_key)
+    get_times, get_values = await store.series("bytes_get", range_key)
+    return {
+        "range": range_key,
+        "series": [
+            {"label": "Encrypted (PUT)", "spark_times": put_times, "spark": put_values},
+            {"label": "Decrypted (GET)", "spark_times": get_times, "spark": get_values},
+        ],
     }
 
 
@@ -509,13 +489,19 @@ async def list_bucket_objects(
     bucket: str,
     prefix: str = "",
     delimiter: str | None = "/",
-    max_keys: int = 500,
+    max_keys: int = 1000,
+    offset: int = 0,
+    page_size: int = 20,
 ) -> dict:
     """List a "directory" in a bucket using ListObjectsV2 with a delimiter.
 
     When delimiter is "/" (default), the response is split into sub-prefixes
     (folders) and objects at the current level — the standard S3-console
     file-explorer shape.
+
+    Objects are paginated client-side (offset/page_size). The expensive
+    per-object encryption HEAD fan-out runs only on the current page slice, so a
+    huge folder stays cheap (≈page_size HEADs, not one per object in the bucket).
     """
     from ..client import S3Client, S3Credentials
 
@@ -532,95 +518,113 @@ async def list_bucket_objects(
             max_keys=max_keys,
         )
 
-    prefix_len = len(prefix)
-    folders: list[dict] = []
-    for cp in result.get("CommonPrefixes", []) or []:
-        full = cp.get("Prefix", "")
-        name = full[prefix_len:].rstrip("/")
-        folders.append({"prefix": full, "name": name})
+        prefix_len = len(prefix)
+        folders: list[dict] = []
+        for cp in result.get("CommonPrefixes", []) or []:
+            full = cp.get("Prefix", "")
+            name = full[prefix_len:].rstrip("/")
+            folders.append({"prefix": full, "name": name})
 
-    objects: list[dict] = []
-    for o in result.get("Contents", []) or []:
-        full = o.get("Key", "")
-        # Skip the "directory marker" object that some tools create at the prefix itself
-        if full == prefix:
-            continue
-        size = int(o.get("Size", 0))
-        lm = o.get("LastModified")
-        objects.append(
-            {
-                "key": full,
-                "name": full[prefix_len:],
-                "size": size,
-                "size_h": _format_size(size),
-                "last_modified": lm.isoformat() if lm else "",
-                "etag": (o.get("ETag") or "").strip('"'),
-            }
-        )
+        all_objects: list[dict] = []
+        for o in result.get("Contents", []) or []:
+            full = o.get("Key", "")
+            # Skip the "directory marker" object that some tools create at the prefix itself
+            if full == prefix:
+                continue
+            size = int(o.get("Size", 0))
+            lm = o.get("LastModified")
+            all_objects.append(
+                {
+                    "key": full,
+                    "name": full[prefix_len:],
+                    "size": size,
+                    "size_h": _format_size(size),
+                    "last_modified": lm.isoformat() if lm else "",
+                    "etag": (o.get("ETag") or "").strip('"'),
+                }
+            )
+
+        total_objects = len(all_objects)
+        objects = all_objects[offset : offset + page_size]
+
+        # Per-object encryption status, the same check the object-detail view uses
+        # (on-object isec tag, else multipart sidecar). Run only on the current
+        # page (≈page_size HEADs). These admin HEADs use this S3Client directly
+        # (not the proxy), so they don't pollute the dashboard stats.
+        await _annotate_encryption(settings, client, bucket, objects)
+
     return {
         "bucket": bucket,
         "prefix": prefix,
         "delimiter": delimiter or "",
         "folders": folders,
         "objects": objects,
-        "count": len(folders) + len(objects),
+        "offset": offset,
+        "page_size": page_size,
+        "total_objects": total_objects,
+        "has_more": offset + len(objects) < total_objects,
+        "count": len(folders) + total_objects,
         "is_truncated": bool(result.get("IsTruncated", False)),
     }
 
 
-def list_logs(
-    limit: int = 200,
+async def _annotate_encryption(settings, client, bucket: str, objects: list[dict]) -> None:
+    """Set obj['encrypted'] for each listed object using the GET-path detection."""
+    import asyncio
+
+    sem = asyncio.Semaphore(32)
+
+    async def check(obj: dict) -> None:
+        async with sem:
+            try:
+                md = await client.head_object(bucket, obj["key"])
+            except Exception:
+                obj["encrypted"] = None  # couldn't determine
+                return
+            user_md = dict(md.get("Metadata") or {})
+            has_tag = user_md.get(settings.dektag_name) is not None
+            # `or` short-circuits: skip the sidecar lookup when an on-object tag is present.
+            obj["encrypted"] = has_tag or await _has_multipart_sidecar(client, bucket, obj["key"])
+
+    if objects:
+        await asyncio.gather(*(check(o) for o in objects))
+
+
+async def list_logs(
+    store: StatsStore,
+    limit: int = 50,
+    offset: int = 0,
     query: str = "",
     operation: str = "",
     status: str = "",
 ) -> dict:
-    """Return filtered request-log entries for the /logs view."""
+    """Return a filtered, paginated page of request-log entries for /logs."""
     now = time.time()
-    q = (query or "").strip().lower()
-    op_filter = (operation or "").strip().upper()
-    status_filter = (status or "").strip().lower()
-
-    entries = list(_request_log.all())
-    entries.reverse()
-    out: list[dict] = []
-    for e in entries:
-        if op_filter and (e.method or e.operation).upper() != op_filter:
-            continue
-        if status_filter:
-            is_err = e.status >= 400
-            if status_filter == "success" and is_err:
-                continue
-            if status_filter == "error" and not is_err:
-                continue
-        if q:
-            blob = f"{e.bucket} {e.key} {e.client_ip} {e.method} {e.operation} {e.status}".lower()
-            if q not in blob:
-                continue
-        out.append(
-            {
-                "time": _format_relative(e.timestamp, now),
-                "timestamp": e.timestamp,
-                "operation": _operation_display(e.method, e.operation),
-                "bucket": e.bucket or "",
-                "object": e.key or "",
-                "status": "Success" if e.status < 400 else "Error",
-                "status_code": e.status,
-                "size": _format_size(e.size),
-                "client_ip": e.client_ip or "",
-                "latency": f"{e.duration_ms:.0f} ms",
-            }
-        )
-        if len(out) >= limit:
-            break
-
-    all_ops = sorted(
-        {(e.method or e.operation) for e in _request_log.all() if e.method or e.operation}
-    )
+    page = await store.page(offset, limit, query, operation, status)
+    entries = [
+        {
+            "time": _format_absolute(e["timestamp"]),
+            "time_relative": _format_relative(e["timestamp"], now),
+            "timestamp": e["timestamp"],
+            "operation": _operation_display(e["method"], e["operation"]),
+            "bucket": e["bucket"] or "",
+            "object": e["key"] or "",
+            "status": "Success" if e["status"] < 400 else "Error",
+            "status_code": e["status"],
+            "size": _format_size(e["size"]),
+            "client_ip": e["client_ip"] or "",
+            "latency": f"{e['duration_ms']:.0f} ms",
+        }
+        for e in page["entries"]
+    ]
     return {
-        "count": len(out),
-        "total": len(_request_log.all()),
-        "entries": out,
-        "operations": all_ops,
+        "count": page["count"],
+        "offset": page["offset"],
+        "limit": page["limit"],
+        "total": page["total"],
+        "has_more": page["has_more"],
+        "entries": entries,
+        "operations": page["operations"],
     }
 
 
@@ -641,11 +645,20 @@ async def head_object_detail(
     async with S3Client(settings, creds) as client:
         md = await client.head_object(bucket, key)
 
-    user_metadata = dict(md.get("Metadata") or {})
-    # Redact the binary envelope (encrypted DEK) — it's opaque to humans.
-    isec = user_metadata.pop(settings.dektag_name, None)
-    if isec is not None:
-        user_metadata["_encrypted_dek"] = f"<{len(isec)} bytes>"
+        user_metadata = dict(md.get("Metadata") or {})
+        # Redact the binary envelope (encrypted DEK) — it's opaque to humans.
+        isec = user_metadata.pop(settings.dektag_name, None)
+        if isec is not None:
+            user_metadata["_encrypted_dek"] = f"<{len(isec)} bytes>"
+            enc_via = "metadata"
+        elif await _has_multipart_sidecar(client, bucket, key):
+            # Multipart objects store the wrapped DEK in a sidecar object, not an
+            # on-object tag — the create-time metadata doesn't survive
+            # CompleteMultipartUpload. Consult the sidecar before concluding
+            # "not encrypted" (mirrors the GET read path).
+            enc_via = "sidecar"
+        else:
+            enc_via = ""
 
     lm = md.get("LastModified")
     return {
@@ -657,5 +670,19 @@ async def head_object_detail(
         "etag": (md.get("ETag") or "").strip('"'),
         "last_modified": lm.isoformat() if lm else "",
         "metadata": user_metadata,
-        "encrypted": isec is not None,
+        "encrypted": bool(enc_via),
+        "encryption_source": enc_via,
     }
+
+
+async def _has_multipart_sidecar(client, bucket: str, key: str) -> bool:
+    """True if the object has an s3proxy multipart-metadata sidecar (= encrypted).
+
+    Reuses the GET path's unified lookup so detection matches decryption exactly.
+    """
+    from ..state.metadata import load_multipart_metadata
+
+    try:
+        return await load_multipart_metadata(client, bucket, key) is not None
+    except Exception:
+        return False

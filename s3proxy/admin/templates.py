@@ -274,6 +274,21 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     font-size: 12px; color: var(--text-muted);
     font-variant-numeric: tabular-nums;
   }
+  .range-tabs {
+    display: inline-flex; gap: 2px;
+    background: var(--surface-2, rgba(127,127,127,0.08));
+    border: 1px solid var(--border);
+    border-radius: 8px; padding: 2px;
+  }
+  .range-tab {
+    border: 0; background: transparent; cursor: pointer;
+    font: inherit; font-size: 12px; color: var(--text-muted);
+    padding: 3px 10px; border-radius: 6px;
+  }
+  .range-tab:hover { color: var(--text); }
+  .range-tab.active {
+    background: var(--accent, #2563eb); color: #fff;
+  }
   .chart-wrap {
     position: relative;
     width: 100%;
@@ -284,7 +299,11 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     padding: 14px 14px 10px 14px;
   }
   .chart-wrap--big {
-    height: 420px;
+    /* Match the SVG viewBox aspect (900x360) so preserveAspectRatio="none"
+       scales uniformly — no axis squish/stretch — and hover maths stay exact. */
+    height: auto;
+    aspect-ratio: 900 / 360;
+    max-height: 460px;
     padding: 18px 18px 14px 18px;
   }
   .chart-wrap svg {
@@ -296,13 +315,13 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .chart-wrap .axis path { stroke: var(--border-strong); fill: none; }
   .chart-wrap .axis text {
     fill: var(--text-muted);
-    font-size: 10px;
+    font-size: 15px;
     font-variant-numeric: tabular-nums;
     font-family: inherit;
   }
   .chart-wrap .axis-label {
     fill: var(--text-subtle);
-    font-size: 10px;
+    font-size: 15px;
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
@@ -395,7 +414,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   }
   .metric-grid {
     display: grid;
-    grid-template-columns: minmax(0, 1.9fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 3fr) minmax(0, 0.9fr);
     gap: 28px;
     align-items: start;
   }
@@ -472,6 +491,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .back-link:hover { text-decoration: underline; }
 
   /* ---- Tables ---- */
+  .scroll-x { width: 100%; overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; }
   th, td {
     text-align: left; padding: 10px 8px;
@@ -516,7 +536,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   }
 
   /* ---- Detail views ---- */
-  .detail-sub { color: var(--text-muted); font-size: 13px; margin-top: 2px; }
+  .detail-sub { color: var(--text-muted); font-size: 13px; margin-top: 2px; word-break: break-all; overflow-wrap: anywhere; }
   .empty-state {
     color: var(--text-muted); font-size: 13px;
     padding: 24px; text-align: center;
@@ -609,6 +629,18 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     box-shadow: 0 0 0 3px rgba(17,24,39,0.06);
   }
   .logs-count { color: var(--text-muted); font-size: 12px; margin-left: auto; }
+  .logs-pager {
+    display: flex; align-items: center; justify-content: center;
+    gap: 14px; margin-top: 14px;
+  }
+  .pager-btn {
+    border: 1px solid var(--border); background: var(--surface);
+    color: var(--text); font: inherit; font-size: 13px;
+    padding: 5px 14px; border-radius: 7px; cursor: pointer;
+  }
+  .pager-btn:hover:not(:disabled) { border-color: var(--border-strong); }
+  .pager-btn:disabled { opacity: 0.4; cursor: default; }
+  .pager-status { color: var(--text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 
   /* ---- Footer ---- */
   .footer {
@@ -670,6 +702,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
           <a class="btn-ghost" href="#logs">View all logs →</a>
         </div>
       </div>
+      <div class="scroll-x">
       <table>
         <thead>
           <tr>
@@ -681,6 +714,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
           <tr><td colspan="8" class="empty-state">No requests yet — traffic will appear here.</td></tr>
         </tbody>
       </table>
+      </div>
     </section>
 
     <section class="split">
@@ -690,10 +724,10 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
         <table>
           <thead>
-            <tr><th>Name</th><th>Encryption</th><th>Objects</th><th>Size</th></tr>
+            <tr><th>Name</th><th title="Distinct objects seen in recent requests — not the full bucket count">Objects (seen)</th><th>Size</th></tr>
           </thead>
           <tbody id="buckets-body">
-            <tr><td colspan="4" class="empty-state">No buckets observed yet.</td></tr>
+            <tr><td colspan="3" class="empty-state">No buckets observed yet.</td></tr>
           </tbody>
         </table>
       </div>
@@ -730,14 +764,20 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         <thead>
           <tr>
             <th>Name</th>
+            <th style="width: 150px;">Encryption</th>
             <th style="width: 110px; text-align: right;">Size</th>
             <th style="width: 180px;">Last Modified</th>
           </tr>
         </thead>
         <tbody id="bv-body">
-          <tr><td colspan="3" class="empty-state">Loading…</td></tr>
+          <tr><td colspan="4" class="empty-state">Loading…</td></tr>
         </tbody>
       </table>
+      <div class="logs-pager">
+        <button type="button" id="bv-prev" class="pager-btn" disabled>← Prev</button>
+        <span class="pager-status" id="bv-page">—</span>
+        <button type="button" id="bv-next" class="pager-btn" disabled>Next →</button>
+      </div>
     </section>
   </div>
 
@@ -766,6 +806,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         </select>
         <span class="logs-count" id="lv-count"></span>
       </div>
+      <div class="scroll-x">
       <table>
         <thead>
           <tr>
@@ -777,6 +818,12 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
           <tr><td colspan="9" class="empty-state">Loading…</td></tr>
         </tbody>
       </table>
+      </div>
+      <div class="logs-pager">
+        <button type="button" id="lv-prev" class="pager-btn" disabled>← Prev</button>
+        <span class="pager-status" id="lv-page">—</span>
+        <button type="button" id="lv-next" class="pager-btn" disabled>Next →</button>
+      </div>
     </section>
   </div>
 
@@ -815,10 +862,21 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="metric-chart-col">
           <div class="chart-header">
             <span class="chart-title" id="m-charttitle">Over time</span>
+            <span class="range-tabs" id="m-direction" style="display:none">
+              <button type="button" data-dir="put" class="range-tab active">Encrypted</button>
+              <button type="button" data-dir="get" class="range-tab">Decrypted</button>
+            </span>
+            <span class="range-tabs" id="m-range">
+              <button type="button" data-range="1h" class="range-tab active">1h</button>
+              <button type="button" data-range="3h" class="range-tab">3h</button>
+              <button type="button" data-range="7h" class="range-tab">7h</button>
+              <button type="button" data-range="24h" class="range-tab">24h</button>
+              <button type="button" data-range="7d" class="range-tab">7d</button>
+            </span>
             <span class="chart-subtle" id="m-chartmeta">&nbsp;</span>
           </div>
           <div class="chart-wrap chart-wrap--big" id="m-chartwrap">
-            <svg id="m-chart" viewBox="0 0 600 260" preserveAspectRatio="none"></svg>
+            <svg id="m-chart" viewBox="0 0 900 360" preserveAspectRatio="none"></svg>
             <div class="chart-tooltip" id="m-tip"></div>
           </div>
         </div>
@@ -862,7 +920,14 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   const API_BUCKET = "__BUCKET_URL__";      // expects /bucket appended
   const API_OBJECT = "__OBJECT_URL__";      // expects /bucket/key appended
   const API_LOGS   = "__LOGS_URL__";
+  const API_SERIES = "__SERIES_URL__";
   const VIEW_POLL_MS = 2000;
+  // Map metric-card key -> /api/series metric name.
+  const SERIES_METRIC = {requests: "requests", data_encrypted: "crypto", errors: "errors"};
+  let CHART_RANGE = "1h";
+  let DATA_DIRECTION = "put";  // for the Data Encrypted metric: put|get
+  let M_UNIT = "";
+  let M_YLABEL = "";
   const $ = (id) => document.getElementById(id);
 
   function setText(id, v) { const el = $(id); if (el) el.textContent = v; }
@@ -951,8 +1016,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     if (!svg || !wrap || !tip) return;
     svg.innerHTML = "";
 
-    const W = 600, H = 260;
-    const PAD_L = 52, PAD_R = 14, PAD_T = 16, PAD_B = 30;
+    const W = 900, H = 360;
+    const PAD_L = 82, PAD_R = 28, PAD_T = 34, PAD_B = 54;
     const plotW = W - PAD_L - PAD_R;
     const plotH = H - PAD_T - PAD_B;
 
@@ -975,7 +1040,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       msg.setAttribute("y", H / 2);
       msg.setAttribute("text-anchor", "middle");
       msg.setAttribute("fill", "#9ca3af");
-      msg.setAttribute("font-size", "12");
+      msg.setAttribute("font-size", "16");
       msg.textContent = "Collecting data… (points appear as traffic flows)";
       svg.appendChild(msg);
       CHART_STATE[prefix] = null;
@@ -983,9 +1048,14 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       return;
     }
 
-    // Y scale with nice ticks
+    // Y scale with nice ticks. Scale to a robust max (p98) so a single early
+    // spike doesn't squash the rest of the series flat against the baseline;
+    // the rare outlier is allowed to clip slightly above the top gridline.
     const rawMax = Math.max(...vals, 1);
-    const {ticks, niceMax} = niceTicks(rawMax, 5);
+    const sorted = vals.slice().sort((a, b) => a - b);
+    const p98 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.98))] || 0;
+    const scaleMax = Math.max(1, p98 > 0 ? p98 : rawMax);
+    const {ticks, niceMax} = niceTicks(scaleMax, 5);
 
     // X scale over time
     const tMin = ts[0];
@@ -993,7 +1063,9 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     const tSpan = Math.max(1, tMax - tMin);
 
     const xFor = (t) => PAD_L + ((t - tMin) / tSpan) * plotW;
-    const yFor = (v) => PAD_T + plotH - (v / niceMax) * plotH;
+    // Clamp to the plot top so an outlier scaled past niceMax doesn't draw
+    // above the chart area.
+    const yFor = (v) => Math.max(PAD_T, PAD_T + plotH - (v / niceMax) * plotH);
 
     // Grid + Y axis labels
     const gGrid = document.createElementNS(SVG_NS, "g");
@@ -1008,8 +1080,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       line.setAttribute("y1", y); line.setAttribute("y2", y);
       gGrid.appendChild(line);
       const lbl = document.createElementNS(SVG_NS, "text");
-      lbl.setAttribute("x", PAD_L - 8);
-      lbl.setAttribute("y", y + 3);
+      lbl.setAttribute("x", PAD_L - 12);
+      lbl.setAttribute("y", y + 5);
       lbl.setAttribute("text-anchor", "end");
       lbl.textContent = formatNumber(tv);
       gAxis.appendChild(lbl);
@@ -1021,8 +1093,9 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     xLine.setAttribute("y1", PAD_T + plotH); xLine.setAttribute("y2", PAD_T + plotH);
     gAxis.appendChild(xLine);
 
-    // X labels: pick ~5 positions spread across the range, at real sample indexes
-    const desired = 5;
+    // X labels: pick positions spread across the range, at real sample
+    // indexes. Wider chart fits more labels without crowding.
+    const desired = Math.min(8, Math.max(2, n));
     const xIdxs = [];
     for (let i = 0; i < desired; i++) {
       const idx = Math.round((i * (n - 1)) / (desired - 1));
@@ -1034,7 +1107,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       const lbl = document.createElementNS(SVG_NS, "text");
       const anchor = i === 0 ? "start" : (i === xIdxs.length - 1 ? "end" : "middle");
       lbl.setAttribute("x", x);
-      lbl.setAttribute("y", PAD_T + plotH + 16);
+      lbl.setAttribute("y", PAD_T + plotH + 22);
       lbl.setAttribute("text-anchor", anchor);
       lbl.textContent = formatTime(ts[idx]);
       gAxis.appendChild(lbl);
@@ -1051,7 +1124,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       const yl = document.createElementNS(SVG_NS, "text");
       yl.setAttribute("class", "axis-label");
       yl.setAttribute("x", PAD_L);
-      yl.setAttribute("y", PAD_T - 6);
+      yl.setAttribute("y", PAD_T - 12);
       yl.textContent = yLabel;
       svg.appendChild(yl);
     }
@@ -1188,15 +1261,60 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     if (route.view === "object")  await loadObject(route.bucket, route.object);
     if (route.view === "logs")    await loadLogs();
     if (route.view === "metric") {
+      // Each metric view starts on the 1h range, PUT direction.
+      DATA_DIRECTION = "put";
+      setDirection("put");
+      CHART_FP.m = null;
+      BREAKDOWN_FP.m = null;
       if (LAST_STATUS && LAST_STATUS.cards[route.metric]) {
-        // Force a redraw on view switch so the chart paints into its now-visible SVG.
-        CHART_FP.m = null;
-        BREAKDOWN_FP.m = null;
         renderMetric(route.metric, LAST_STATUS.cards[route.metric]);
       } else {
         await refresh();
       }
+      await loadRange("1h");  // draws the chart from /api/series into the now-visible SVG
     }
+  }
+
+  function setDirection(dir) {
+    DATA_DIRECTION = dir;
+    const tabs = $("m-direction");
+    if (tabs) {
+      for (const b of tabs.querySelectorAll(".range-tab")) {
+        b.classList.toggle("active", b.dataset.dir === dir);
+      }
+    }
+  }
+
+  function setRange(range) {
+    CHART_RANGE = range;
+    const tabs = $("m-range");
+    if (tabs) {
+      for (const b of tabs.querySelectorAll(".range-tab")) {
+        b.classList.toggle("active", b.dataset.range === range);
+      }
+    }
+  }
+
+  // Fetch the metric's series for the selected range from Redis and draw it.
+  // The Data Encrypted metric splits into Encrypted (PUT) / Decrypted (GET)
+  // sub-tabs, each backed by its own per-direction byte series.
+  async function loadRange(range) {
+    setRange(range);
+    if (currentRoute.view !== "metric") return;
+    const metricKey = currentRoute.metric;
+    let metric = SERIES_METRIC[metricKey] || "requests";
+    if (metricKey === "data_encrypted") {
+      metric = (DATA_DIRECTION === "get") ? "bytes_get" : "bytes_put";
+    }
+    try {
+      const params = new URLSearchParams({metric, range});
+      const r = await fetch(API_SERIES + "?" + params.toString(), {credentials: "same-origin"});
+      if (r.status === 401) { location.href = "__LOGIN_URL__"; return; }
+      if (!r.ok) return;
+      const d = await r.json();
+      CHART_FP.m = null;
+      drawChart("m", d.spark || [], d.spark_times || [], M_UNIT, M_YLABEL);
+    } catch (e) { /* leave chart as-is */ }
   }
 
   function gotoDashboard() { location.hash = ""; }
@@ -1261,17 +1379,18 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     setText("mv-value", card.value);
     setText("mv-unit", card.unit || "");
     setText("mv-delta", card.detail || "");
-    setText("m-charttitle", card.label + " over time");
     setText("m-breakdown-title", BREAKDOWN_TITLES[key] || "Breakdown");
+    M_UNIT = card.unit || "";
+    M_YLABEL = card.y_label || "";
 
-    // Full-axis chart: skip redraw if data identical, or if user is hovering.
-    if (card.spark !== undefined) {
-      const chartFp = JSON.stringify([card.spark, card.spark_times, card.unit, card.y_label]);
-      if (CHART_FP.m !== chartFp && !CHART_HOVER.m) {
-        CHART_FP.m = chartFp;
-        drawChart("m", card.spark, card.spark_times || [], card.unit || "", card.y_label || "");
-      }
-    }
+    // Data Encrypted splits into Encrypted (PUT) / Decrypted (GET) direction
+    // sub-tabs; other metrics hide them.
+    const dirTabs = $("m-direction");
+    if (dirTabs) dirTabs.style.display = (key === "data_encrypted") ? "" : "none";
+    const dirLabel = (key === "data_encrypted")
+      ? (DATA_DIRECTION === "get" ? "Data Decrypted" : "Data Encrypted")
+      : card.label;
+    setText("m-charttitle", dirLabel + " over time");
 
     // Breakdown list (proportional bars).
     if (card.breakdown) {
@@ -1306,7 +1425,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         : `<span class="mono">${escapeHtml(r.object)}</span>`;
       return `
         <tr>
-          <td style="color:var(--text-muted)">${escapeHtml(r.time)}</td>
+          <td class="mono" style="color:var(--text-muted)" title="${escapeHtml(r.time_relative || "")}">${escapeHtml(r.time)}</td>
           <td class="mono">${escapeHtml(r.operation)}</td>
           <td>${bucketCell}</td>
           <td class="truncate">${objectCell}</td>
@@ -1325,14 +1444,12 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     if (SECTION_FP.buckets === fp) return;
     SECTION_FP.buckets = fp;
     if (!rows || rows.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No buckets observed yet.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="3" class="empty-state">No buckets observed yet.</td></tr>';
       return;
     }
-    const lock = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg>';
     tbody.innerHTML = rows.map(b => `
       <tr>
         <td><a class="linkish" href="#bucket=${encodeURIComponent(b.name)}">${escapeHtml(b.name)}</a></td>
-        <td><span class="enc-cell ${b.encrypted ? "on" : "off"}">${lock}${b.encrypted ? "Encrypted" : "Not Encrypted"}</span></td>
         <td>${escapeHtml(b.objects)}</td>
         <td>${escapeHtml(b.size)}</td>
       </tr>
@@ -1409,6 +1526,13 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   // ------------------- Bucket detail (list-style) -------------------
   const FOLDER_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6z"/></svg>';
   const FILE_ICON   = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6z"/><polyline points="14 2 14 8 20 8"/></svg>';
+  const LOCK_ICON   = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg>';
+
+  function encBadge(enc) {
+    if (enc === true)  return `<span class="enc-cell on">${LOCK_ICON}Encrypted</span>`;
+    if (enc === false) return `<span class="enc-cell off">Not Encrypted</span>`;
+    return '<span class="enc-cell off">—</span>';  // unknown / not checked
+  }
 
   function renderCrumbs(bucket, prefix) {
     const crumbs = $("bv-crumbs");
@@ -1442,41 +1566,56 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     } catch { return iso; }
   }
 
+  const BUCKET_PAGE = 20;
+  let BUCKET_OFFSET = 0;
+
   async function loadBucket(bucket, prefix) {
     prefix = prefix || "";
     setText("bv-title", bucket);
     renderCrumbs(bucket, prefix);
     const tbody = $("bv-body");
     const fpKey = bucket + "|" + prefix;
-    // Only show "Loading" if we're coming from a different bucket/prefix.
+    // Reset to the first object page when the bucket/prefix changes.
     if (BUCKET_FP._last !== fpKey) {
       BUCKET_FP._last = fpKey;
-      tbody.innerHTML = '<tr><td colspan="3" class="empty-state">Loading…</td></tr>';
+      BUCKET_OFFSET = 0;
+      tbody.innerHTML = '<tr><td colspan="4" class="empty-state">Loading…</td></tr>';
       BUCKET_FP[fpKey] = null;
     }
     try {
       const url = API_BUCKET + "/" + encodeURIComponent(bucket) +
-                  "?prefix=" + encodeURIComponent(prefix) + "&delimiter=/";
+                  "?prefix=" + encodeURIComponent(prefix) + "&delimiter=/" +
+                  "&offset=" + BUCKET_OFFSET + "&page_size=" + BUCKET_PAGE;
       const r = await fetch(url, {credentials:"same-origin"});
       if (r.status === 401) { location.href = "__LOGIN_URL__"; return; }
       if (!r.ok) {
-        tbody.innerHTML = `<tr><td colspan="3" class="empty-state">Failed to load: ${r.status}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="4" class="empty-state">Failed to load: ${r.status}</td></tr>`;
         return;
       }
       const d = await r.json();
+      const totalObj = d.total_objects != null ? d.total_objects : d.objects.length;
+      const from = totalObj === 0 ? 0 : d.offset + 1;
+      const to = d.offset + d.objects.length;
       setText(
         "bv-sub",
         `${d.folders.length} folder${d.folders.length === 1 ? "" : "s"}, ` +
-        `${d.objects.length} object${d.objects.length === 1 ? "" : "s"}` +
-        (d.is_truncated ? " (truncated — showing first 500)" : "")
+        `${totalObj} object${totalObj === 1 ? "" : "s"}` +
+        (totalObj > d.objects.length ? ` (showing ${from}–${to})` : "") +
+        (d.is_truncated ? " · bucket truncated at 1000 keys" : "")
       );
-      const fp = JSON.stringify([d.folders, d.objects, d.is_truncated]);
+      // Pager controls
+      const prevBtn = $("bv-prev"), nextBtn = $("bv-next");
+      if (prevBtn) prevBtn.disabled = d.offset <= 0;
+      if (nextBtn) nextBtn.disabled = !d.has_more;
+      setText("bv-page", totalObj === 0 ? "—" : `${from}–${to} of ${totalObj}`);
+
+      const fp = JSON.stringify([d.folders, d.objects, d.offset]);
       if (BUCKET_FP[fpKey] === fp) return;
       BUCKET_FP[fpKey] = fp;
 
       const total = d.folders.length + d.objects.length;
       if (total === 0) {
-        tbody.innerHTML = '<tr><td colspan="3" class="empty-state">Empty folder.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="4" class="empty-state">Empty folder.</td></tr>';
         return;
       }
       const rows = [];
@@ -1488,6 +1627,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
               <span class="row-icon folder">${FOLDER_ICON}</span>
               <a href="${href}" title="${escapeHtml(f.prefix)}">${escapeHtml((f.name || f.prefix) + "/")}</a>
             </td>
+            <td>—</td>
             <td class="col-size">—</td>
             <td class="col-modified">—</td>
           </tr>`);
@@ -1500,6 +1640,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
               <span class="row-icon file">${FILE_ICON}</span>
               <a href="${href}" title="${escapeHtml(o.key)}">${escapeHtml(o.name || o.key)}</a>
             </td>
+            <td>${encBadge(o.encrypted)}</td>
             <td class="col-size">${escapeHtml(o.size_h || "—")}</td>
             <td class="col-modified">${escapeHtml(formatIsoShort(o.last_modified))}</td>
           </tr>`);
@@ -1511,11 +1652,17 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   }
 
   // ------------------- Logs view -------------------
+  const LOGS_LIMIT = 50;
+  let LOGS_OFFSET = 0;
+
   async function loadLogs() {
     const q = $("lv-q").value;
     const op = $("lv-op").value;
     const stt = $("lv-status").value;
-    const params = new URLSearchParams({q, operation: op, status: stt, limit: "200"});
+    const params = new URLSearchParams({
+      q, operation: op, status: stt,
+      limit: String(LOGS_LIMIT), offset: String(LOGS_OFFSET),
+    });
     try {
       const r = await fetch(API_LOGS + "?" + params.toString(), {credentials: "same-origin"});
       if (r.status === 401) { location.href = "__LOGIN_URL__"; return; }
@@ -1533,10 +1680,16 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         }
       }
       opSel.value = currentOp;
-      setText("lv-count", `${d.count} of ${d.total} entries`);
-      setText("lv-sub", `${d.total} entries in ring buffer`);
+      const from = d.total === 0 ? 0 : d.offset + 1;
+      const to = d.offset + d.count;
+      setText("lv-count", `${from}–${to} of ${d.total} entries`);
+      setText("lv-sub", `${d.total} entries (24h, capped)`);
+      setText("lv-page", `${from}–${to} of ${d.total}`);
+      const prevBtn = $("lv-prev"), nextBtn = $("lv-next");
+      if (prevBtn) prevBtn.disabled = d.offset <= 0;
+      if (nextBtn) nextBtn.disabled = !d.has_more;
       const tbody = $("lv-body");
-      const fp = JSON.stringify(d.entries || []);
+      const fp = JSON.stringify([d.entries || [], d.offset]);
       if (SECTION_FP.logs === fp) return;
       SECTION_FP.logs = fp;
       if (!d.entries.length) {
@@ -1554,7 +1707,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
           : '<span style="color:var(--text-subtle)">—</span>';
         return `
           <tr>
-            <td style="color:var(--text-muted)">${escapeHtml(r.time)}</td>
+            <td class="mono" style="color:var(--text-muted)" title="${escapeHtml(r.time_relative || "")}">${escapeHtml(r.time)}</td>
             <td class="mono">${escapeHtml(r.operation)}</td>
             <td>${bucketCell}</td>
             <td class="truncate">${objectCell}</td>
@@ -1591,13 +1744,15 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         ["Content-Type", d.content_type || "—"],
         ["ETag", d.etag || "—"],
         ["Last Modified", d.last_modified || "—"],
-        ["Encrypted", d.encrypted ? "Yes (AES-256-GCM)" : "No"],
+        ["Encrypted", d.encrypted
+          ? ("Yes (AES-256-GCM" + (d.encryption_source === "sidecar" ? ", multipart sidecar" : "") + ")")
+          : "No"],
       ];
       for (const [k, v] of Object.entries(d.metadata || {})) {
         rows.push(["x-amz-meta-" + k, v]);
       }
       tbody.innerHTML = rows.map(([k, v]) =>
-        `<tr><td style="color:var(--text-muted);width:200px">${escapeHtml(k)}</td><td class="mono">${escapeHtml(v)}</td></tr>`
+        `<tr><td style="color:var(--text-muted);width:200px;vertical-align:top">${escapeHtml(k)}</td><td class="mono" style="word-break:break-all;overflow-wrap:anywhere">${escapeHtml(v)}</td></tr>`
       ).join("");
     } catch (e) {
       tbody.innerHTML = '<tr><td colspan="2" class="empty-state">Network error.</td></tr>';
@@ -1610,6 +1765,24 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     mWrap.addEventListener("mousemove", (e) => handleChartHover("m", e));
     mWrap.addEventListener("mouseleave", () => handleChartLeave("m"));
   }
+  const mRange = $("m-range");
+  if (mRange) {
+    mRange.addEventListener("click", (e) => {
+      const btn = e.target.closest(".range-tab");
+      if (btn) loadRange(btn.dataset.range);
+    });
+  }
+  const mDir = $("m-direction");
+  if (mDir) {
+    mDir.addEventListener("click", (e) => {
+      const btn = e.target.closest(".range-tab");
+      if (!btn) return;
+      setDirection(btn.dataset.dir);
+      const card = LAST_STATUS && LAST_STATUS.cards.data_encrypted;
+      if (card) renderMetric("data_encrypted", card);  // updates title
+      loadRange(CHART_RANGE);  // redraw with the selected direction's series
+    });
+  }
   document.querySelectorAll("[data-goto]").forEach(el => {
     el.addEventListener("click", (e) => { e.preventDefault(); gotoDashboard(); });
   });
@@ -1620,20 +1793,39 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   });
   window.addEventListener("hashchange", navigateFromHash);
 
-  // Logs toolbar: debounced search + filter changes
+  // Logs toolbar: debounced search + filter changes. Any filter change resets
+  // pagination to the first page.
   let _logsDebounce = 0;
+  function reloadLogsFromStart() { LOGS_OFFSET = 0; loadLogs(); }
   function onLogsFilterChange() {
     clearTimeout(_logsDebounce);
-    _logsDebounce = setTimeout(loadLogs, 150);
+    _logsDebounce = setTimeout(reloadLogsFromStart, 150);
   }
   $("lv-q").addEventListener("input", onLogsFilterChange);
-  $("lv-op").addEventListener("change", loadLogs);
-  $("lv-status").addEventListener("change", loadLogs);
+  $("lv-op").addEventListener("change", reloadLogsFromStart);
+  $("lv-status").addEventListener("change", reloadLogsFromStart);
+  $("lv-prev").addEventListener("click", () => {
+    LOGS_OFFSET = Math.max(0, LOGS_OFFSET - LOGS_LIMIT);
+    loadLogs();
+  });
+  $("lv-next").addEventListener("click", () => {
+    LOGS_OFFSET += LOGS_LIMIT;
+    loadLogs();
+  });
+  $("bv-prev").addEventListener("click", () => {
+    BUCKET_OFFSET = Math.max(0, BUCKET_OFFSET - BUCKET_PAGE);
+    loadBucket(currentRoute.bucket, currentRoute.prefix || "");
+  });
+  $("bv-next").addEventListener("click", () => {
+    BUCKET_OFFSET += BUCKET_PAGE;
+    loadBucket(currentRoute.bucket, currentRoute.prefix || "");
+  });
 
   // SSE pushes header/footer/cards/activity/buckets/keys on change.
-  // The active bucket/logs view still polls at a low rate since those aren't streamed.
+  // The logs view polls at a low rate (cheap, genuinely live). The bucket
+  // listing is NOT polled — it does a per-object encryption HEAD fan-out, so it
+  // refreshes only on navigation or the Refresh button.
   async function viewTick() {
-    if (currentRoute.view === "bucket") await loadBucket(currentRoute.bucket, currentRoute.prefix || "");
     if (currentRoute.view === "logs")   await loadLogs();
   }
 
@@ -1701,6 +1893,7 @@ def render_dashboard(admin_path: str = "/admin") -> str:
     html = html.replace("__BUCKET_URL__", f"{prefix}/api/buckets")
     html = html.replace("__OBJECT_URL__", f"{prefix}/api/objects")
     html = html.replace("__LOGS_URL__", f"{prefix}/api/logs")
+    html = html.replace("__SERIES_URL__", f"{prefix}/api/series")
     html = html.replace("__LOGIN_URL__", f"{prefix}/login")
     html = html.replace("__LOGOUT_URL__", f"{prefix}/logout")
     html = html.replace(

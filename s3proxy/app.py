@@ -64,6 +64,13 @@ def create_lifespan(settings: Settings, credentials_store: dict[str, str]) -> As
             ttl_seconds=settings.redis_upload_ttl_seconds,
         )
 
+        # Admin stats store — Redis-backed (cluster-wide) when Redis is
+        # configured, else per-pod in-memory. Mirrors create_state_store().
+        from .admin.stats_store import create_stats_store, set_store
+
+        stats_store = create_stats_store(settings)
+        set_store(stats_store)  # used by the synchronous record_request path
+
         # Create handler and verifier with properly initialized manager
         verifier = SigV4Verifier(credentials_store)
         handler = S3ProxyHandler(settings, credentials_store, multipart_manager)
@@ -72,6 +79,7 @@ def create_lifespan(settings: Settings, credentials_store: dict[str, str]) -> As
         app.state.settings = settings
         app.state.handler = handler
         app.state.verifier = verifier
+        app.state.stats_store = stats_store
         app.state.start_time = time.monotonic()
 
         yield

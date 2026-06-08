@@ -22,7 +22,7 @@ data:
       timeout server {{ .Values.frontproxy.timeouts.server }}
 
     frontend http_in
-      bind *:{{ .Values.frontproxy.service.port }}
+      bind *:{{ .Values.frontproxy.containerPort }}
       default_backend s3proxy_pods
 
     backend s3proxy_pods

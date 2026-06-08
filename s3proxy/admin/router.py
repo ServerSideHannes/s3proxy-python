@@ -19,7 +19,15 @@ from .auth import (
     make_verify_html,
     set_session_cookie,
 )
-from .collectors import collect_all, head_object_detail, list_bucket_objects, list_logs
+from .collectors import (
+    collect_all,
+    collect_series,
+    collect_throughput,
+    head_object_detail,
+    list_bucket_objects,
+    list_logs,
+)
+from .stats_store import DEFAULT_RANGE, RANGE_SPECS
 from .templates import render_dashboard, render_login
 
 if TYPE_CHECKING:
@@ -80,18 +88,42 @@ def create_admin_router(
     async def dashboard() -> HTMLResponse:
         return HTMLResponse(render_dashboard(admin_path=settings.admin_path))
 
+    def _range(request: Request) -> str:
+        r = request.query_params.get("range", DEFAULT_RANGE)
+        return r if r in RANGE_SPECS else DEFAULT_RANGE
+
     @router.get("/api/status", dependencies=[Depends(verify_api)])
     async def status_api(request: Request) -> JSONResponse:
-        data = collect_all(
+        data = await collect_all(
+            request.app.state.stats_store,
             request.app.state.settings,
             request.app.state.start_time,
             version=version,
+            range_key=_range(request),
         )
+        return JSONResponse(data)
+
+    @router.get("/api/series", dependencies=[Depends(verify_api)])
+    async def series_api(
+        request: Request, metric: str = "requests", range: str = DEFAULT_RANGE
+    ) -> JSONResponse:
+        allowed = ("requests", "crypto", "errors", "bytes_put", "bytes_get")
+        metric = metric if metric in allowed else "requests"
+        range_key = range if range in RANGE_SPECS else DEFAULT_RANGE
+        data = await collect_series(request.app.state.stats_store, metric, range_key)
+        return JSONResponse(data)
+
+    @router.get("/api/throughput", dependencies=[Depends(verify_api)])
+    async def throughput_api(request: Request, range: str = DEFAULT_RANGE) -> JSONResponse:
+        range_key = range if range in RANGE_SPECS else DEFAULT_RANGE
+        data = await collect_throughput(request.app.state.stats_store, range_key)
         return JSONResponse(data)
 
     @router.get("/api/stream", dependencies=[Depends(verify_api)])
     async def status_stream(request: Request) -> StreamingResponse:
         """Push status updates via SSE — only emits when the payload changes."""
+
+        range_key = _range(request)
 
         async def event_gen():
             last_payload: str | None = None
@@ -100,10 +132,12 @@ def create_admin_router(
                 while True:
                     if await request.is_disconnected():
                         return
-                    data = collect_all(
+                    data = await collect_all(
+                        request.app.state.stats_store,
                         request.app.state.settings,
                         request.app.state.start_time,
                         version=version,
+                        range_key=range_key,
                     )
                     payload = _json.dumps(data)
                     now = time.monotonic()
@@ -130,13 +164,17 @@ def create_admin_router(
 
     @router.get("/api/logs", dependencies=[Depends(verify_api)])
     async def logs_api(
+        request: Request,
         q: str = "",
         operation: str = "",
         status: str = "",
-        limit: int = 200,
+        limit: int = 50,
+        offset: int = 0,
     ) -> JSONResponse:
-        data = list_logs(
+        data = await list_logs(
+            request.app.state.stats_store,
             limit=min(max(limit, 1), 500),
+            offset=max(offset, 0),
             query=q,
             operation=operation,
             status=status,
@@ -148,7 +186,9 @@ def create_admin_router(
         bucket: str,
         prefix: str = "",
         delimiter: str = "/",
-        limit: int = 500,
+        limit: int = 1000,
+        offset: int = 0,
+        page_size: int = 20,
     ) -> JSONResponse:
         try:
             data = await list_bucket_objects(
@@ -158,6 +198,8 @@ def create_admin_router(
                 prefix=prefix,
                 delimiter=delimiter or None,
                 max_keys=min(limit, 1000),
+                offset=max(offset, 0),
+                page_size=min(max(page_size, 1), 100),
             )
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code", "Error")
