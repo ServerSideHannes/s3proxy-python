@@ -95,9 +95,11 @@ class CopyPartMixin(BaseHandler):
                 client, src_bucket, src_key, src_multipart_meta, range_start, range_end
             )
         else:
-            # Single-part encrypted - use shared helper
+            # Single-part encrypted - use shared helper. Decrypt with the kid
+            # the source object was encrypted under, not the current rules.
+            src_kid = src_metadata.get(self.settings.kidtag_name, "")
             full_plaintext = await self._download_encrypted_single(
-                client, src_bucket, src_key, src_wrapped_dek
+                client, src_bucket, src_key, src_wrapped_dek, src_kid
             )
             if copy_source_range:
                 range_start, range_end = self._parse_copy_source_range(

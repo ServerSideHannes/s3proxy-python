@@ -124,6 +124,35 @@ class TestPerCredentialRoundtrip:
             )
 
 
+class TestCopyPerCredential:
+    @pytest.mark.asyncio
+    async def test_copy_object_decrypts_source_kid_reencrypts_dest(self, settings, mock_s3):
+        """CopyObject must decrypt the source via its stored kid and re-encrypt
+        under the calling credential. Regression: the single-object source path
+        previously dropped the kid and crashed on decrypt."""
+        await mock_s3.create_bucket("data")
+        body = b"copy me across credentials"
+
+        # ACME writes the source.
+        h_acme = _handler(settings, mock_s3, ACME)
+        await h_acme.handle_put_object(_put_request("/data/src.txt", body), _creds(ACME))
+
+        # GLOBEX copies it -> re-encrypted under GLOBEX's kid.
+        h_globex = _handler(settings, mock_s3, GLOBEX)
+        copy_req = MagicMock()
+        copy_req.url.path = "/data/dst.txt"
+        copy_req.headers = {"x-amz-copy-source": "/data/src.txt"}
+        await h_globex.handle_copy_object(copy_req, _creds(GLOBEX))
+
+        assert (
+            mock_s3.objects[mock_s3._key("data", "dst.txt")]["Metadata"][settings.kidtag_name]
+            == GLOBEX
+        )
+
+        resp = await h_globex.handle_get_object(_get_request("/data/dst.txt"), _creds(GLOBEX))
+        assert await _read(resp) == body
+
+
 class TestMultipartPerCredential:
     @pytest.mark.asyncio
     async def test_streaming_upload_roundtrip(self, settings, mock_s3):
