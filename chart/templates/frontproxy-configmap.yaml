@@ -1,0 +1,39 @@
+{{- if .Values.frontproxy.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Chart.Name }}-frontproxy
+  labels:
+    {{- include "s3proxy.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontproxy
+data:
+  haproxy.cfg: |
+    global
+      log stdout format raw local0
+      maxconn 4096
+
+    defaults
+      mode http
+      log global
+      option httplog
+      option dontlognull
+      timeout connect {{ .Values.frontproxy.timeouts.connect }}
+      timeout client {{ .Values.frontproxy.timeouts.client }}
+      timeout server {{ .Values.frontproxy.timeouts.server }}
+
+    frontend http_in
+      bind *:{{ .Values.frontproxy.service.port }}
+      default_backend s3proxy_pods
+
+    backend s3proxy_pods
+      balance leastconn
+      # Per-request balancing: don't pin a client to one server, and re-resolve the
+      # headless Service via DNS so new/restarted pods are picked up automatically.
+      option redispatch
+      server-template pod 1-{{ int .Values.replicaCount }} {{ .Chart.Name }}-headless:{{ .Values.service.port }} check resolvers k8s init-addr none
+
+    resolvers k8s
+      parse-resolv-conf
+      accepted_payload_size 8192
+      hold valid 5s
+{{- end }}

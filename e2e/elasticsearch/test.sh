@@ -122,7 +122,7 @@ kubectl exec -n "$NAMESPACE" "${ES_POD}" -- \
         "type": "s3",
         "settings": {
             "bucket": "elasticsearch-backups",
-            "endpoint": "s3-gateway.s3proxy:80",
+            "endpoint": "s3proxy-python-frontproxy.s3proxy:80",
             "protocol": "http",
             "path_style_access": true
         }
@@ -237,7 +237,7 @@ kubectl exec -n "$NAMESPACE" "${RESTORED_POD}" -- \
         "type": "s3",
         "settings": {
             "bucket": "elasticsearch-backups",
-            "endpoint": "s3-gateway.s3proxy:80",
+            "endpoint": "s3proxy-python-frontproxy.s3proxy:80",
             "protocol": "http",
             "path_style_access": true
         }

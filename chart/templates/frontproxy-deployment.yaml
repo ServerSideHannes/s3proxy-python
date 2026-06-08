@@ -1,0 +1,68 @@
+{{- if .Values.frontproxy.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Chart.Name }}-frontproxy
+  labels:
+    {{- include "s3proxy.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontproxy
+spec:
+  replicas: {{ .Values.frontproxy.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "s3proxy.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: frontproxy
+  template:
+    metadata:
+      labels:
+        {{- include "s3proxy.labels" . | nindent 8 }}
+        app.kubernetes.io/component: frontproxy
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/frontproxy-configmap.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: haproxy
+          image: "{{ .Values.frontproxy.image.repository }}:{{ .Values.frontproxy.image.tag }}"
+          imagePullPolicy: {{ .Values.frontproxy.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.frontproxy.service.port }}
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /usr/local/etc/haproxy/haproxy.cfg
+              subPath: haproxy.cfg
+              readOnly: true
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.frontproxy.resources | nindent 12 }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 99
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Chart.Name }}-frontproxy
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "s3proxy.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: frontproxy
+{{- end }}

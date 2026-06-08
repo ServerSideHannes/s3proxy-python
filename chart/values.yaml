@@ -117,13 +117,13 @@ admin:
     passwordKey: "S3PROXY_ADMIN_PASSWORD"
     secretKey: "S3PROXY_ADMIN_SECRET"
 
-  # Optional dedicated Ingress for the dashboard, separate from the S3 data-plane
-  # ingress above. OFF by default — the admin UI should not be internet-facing
-  # unless you explicitly expose it (ideally behind an internal ingress class,
-  # an IP allowlist, or VPN). Routes `admin.path` to the proxy service.
+  # Optional dedicated Ingress for the dashboard. OFF by default — the admin UI
+  # should not be internet-facing unless you explicitly expose it (ideally behind
+  # an internal ingress class, an IP allowlist, or VPN). Routes `admin.path` to the
+  # proxy service. Set `className` to whatever ingress controller your cluster runs.
   ingress:
     enabled: false
-    className: "nginx"
+    className: ""
     host: ""
     annotations: {}
     tls: []  # e.g. [{ secretName: admin-tls, hosts: [admin.example.com] }]
@@ -140,10 +140,55 @@ service:
   type: ClusterIP
   port: 4433
 
-gateway:
+# Bundled front proxy (HAProxy) for even load distribution across s3proxy pods.
+# A plain ClusterIP balances per-connection (L4), so S3 clients holding long-lived
+# keep-alive connections pin to a single pod. The front proxy balances per-request
+# (L7) across all pods, fanning out even a single client's stream. Self-contained:
+# requires nothing else in the cluster. OFF by default — clients then talk to the
+# front proxy Service (`s3proxy-python-frontproxy`) instead of the s3proxy Service.
+frontproxy:
   enabled: false
-  serviceName: s3-gateway
-  ingressService: ingress-nginx-controller.ingress-nginx.svc.cluster.local
+  replicaCount: 2
+  image:
+    repository: haproxy
+    tag: "3.0-alpine"
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 80
+  # Per-request timeouts must tolerate large S3 transfers.
+  timeouts:
+    client: "1h"
+    server: "1h"
+    connect: "10s"
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "500m"
+      memory: "128Mi"
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+# Optional Ingress to expose S3 operations OUTSIDE the cluster. Routes to the
+# front proxy, so external clients also get even per-request distribution —
+# therefore requires `frontproxy.enabled: true`. Controller-agnostic: set
+# `className` to whatever ingress controller your cluster runs, and add any
+# controller-specific tuning (buffering, body size, timeouts) via `annotations`.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []
+  # - host: s3.example.com
+  #   paths:
+  #     - path: /
+  #       pathType: Prefix
+  tls: []
+  # - secretName: s3-tls
+  #   hosts: [s3.example.com]
 
 nodeSelector: {}
 
@@ -158,14 +203,3 @@ podDisruptionBudget:
   enabled: true
   minAvailable: 1
   # maxUnavailable: 1  # Alternative to minAvailable
-
-ingress:
-  enabled: false
-  className: "nginx"
-  annotations:
-    nginx.ingress.kubernetes.io/proxy-buffering: "off"
-    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-  tls: []
-  hosts: []

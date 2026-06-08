@@ -1,0 +1,19 @@
+{{- if .Values.frontproxy.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Chart.Name }}-frontproxy
+  labels:
+    {{- include "s3proxy.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontproxy
+spec:
+  type: {{ .Values.frontproxy.service.type }}
+  selector:
+    {{- include "s3proxy.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: frontproxy
+  ports:
+    - name: http
+      port: {{ .Values.frontproxy.service.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

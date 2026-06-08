@@ -5,8 +5,8 @@ metadata:
 data:
   s3tests.conf: |
     [DEFAULT]
-    # Use gateway hostname matching ingress rule
-    host = s3-gateway.s3proxy
+    # Front proxy service (even load distribution across s3proxy pods)
+    host = s3proxy-python-frontproxy.s3proxy
     port = 80
     is_secure = False
     ssl_verify = False
