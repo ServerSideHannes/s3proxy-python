@@ -133,6 +133,10 @@ frontproxy:
   service:
     type: ClusterIP
     port: 80
+  # Port HAProxy binds inside the container. Must be > 1024: the container runs
+  # as non-root with all capabilities dropped, so it cannot bind a privileged
+  # port (e.g. 80). The Service still exposes `service.port` and targets this.
+  containerPort: 8080
   # Per-request timeouts must tolerate large S3 transfers.
   timeouts:
     client: "1h"

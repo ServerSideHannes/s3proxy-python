@@ -71,6 +71,21 @@ class Settings(BaseSettings):
         default=24, description="TTL for upload state in Redis (hours)"
     )
 
+    # Admin stats store (Redis-backed cluster-wide dashboard state). Only used
+    # when Redis is configured; single-instance mode keeps per-pod in-memory.
+    request_log_cap: int = Field(
+        default=10000, description="Max request-log entries kept in the Redis capped list"
+    )
+    request_log_ttl_hours: int = Field(
+        default=24, description="TTL for the request log in Redis (hours)"
+    )
+    stats_ttl_hours: int = Field(
+        default=24, description="TTL for shared counters/breakdowns in Redis (hours)"
+    )
+    stats_series_ttl_hours: int = Field(
+        default=168, description="TTL for the per-minute time-series in Redis (hours, 7d default)"
+    )
+
     # Logging
     log_level: str = Field(default="INFO", description="Log level (DEBUG, INFO, WARNING, ERROR)")
 
@@ -127,3 +142,18 @@ class Settings(BaseSettings):
     def redis_upload_ttl_seconds(self) -> int:
         """Get Redis upload TTL in seconds."""
         return self.redis_upload_ttl_hours * 3600
+
+    @property
+    def request_log_ttl_seconds(self) -> int:
+        """Get request-log TTL in seconds."""
+        return self.request_log_ttl_hours * 3600
+
+    @property
+    def stats_ttl_seconds(self) -> int:
+        """Get shared-counters TTL in seconds."""
+        return self.stats_ttl_hours * 3600
+
+    @property
+    def stats_series_ttl_seconds(self) -> int:
+        """Get per-minute time-series TTL in seconds."""
+        return self.stats_series_ttl_hours * 3600

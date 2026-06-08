@@ -200,6 +200,10 @@ log_info "Backup snapshot tag: $SNAPSHOT_TAG"
 # Verify encryption
 verify_encryption "scylla-backups" "" "$NAMESPACE" || log_warn "Encryption check skipped"
 
+# Verify the admin dashboard correctly reports multipart backup objects as
+# encrypted (issue #47 #6 — sidecar-aware detection).
+verify_admin_encryption "scylla-backups" "$NAMESPACE" || log_warn "Admin encryption check skipped"
+
 # ============================================================================
 # STEP 4: Delete cluster
 # ============================================================================

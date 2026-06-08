@@ -2,6 +2,61 @@
 # Kubernetes wrapper for encryption verification
 # Source this script and call: verify_encryption <bucket> <path-prefix> <namespace>
 
+# Assert the admin dashboard reports a MULTIPART object as encrypted (issue #47
+# #6). Multipart objects keep their wrapped DEK in a sidecar, not an on-object
+# tag, so the admin API must consult the sidecar. The byte-level verify_encryption
+# above can't catch a mislabel in the dashboard — this closes that gap.
+#
+#   verify_admin_encryption <bucket> <namespace>
+# Picks a real multipart backup object (ETag ending in "-<n>") and asserts the
+# admin object-detail API returns "encrypted": true for it.
+verify_admin_encryption() {
+    local BUCKET="$1"
+    local NAMESPACE="${2:-default}"
+
+    echo "=== Admin Encryption-Status Check (multipart) ==="
+
+    # Find a multipart object via MinIO: a *-big-Data.db SSTable, which Scylla
+    # uploads as a multipart object (ETag ends in -<partcount>). Skip sidecars.
+    local KEY
+    KEY=$(kubectl run admin-enc-find --namespace minio --rm -i --restart=Never \
+        --image=mc:latest --image-pull-policy=Never --command -- /bin/sh -c "
+            mc alias set m http://minio.minio.svc.cluster.local:9000 minioadmin minioadmin >/dev/null 2>&1
+            mc ls -r m/$BUCKET 2>/dev/null | awk '{print \$NF}' \
+                | grep -v '^\.s3proxy-internal/' | grep -- '-big-Data.db' | head -1
+        " 2>/dev/null | tr -d '\r' | tail -1)
+
+    if [ -z "$KEY" ]; then
+        echo "✗ No multipart object found to check"
+        return 1
+    fi
+    echo "Multipart object: $KEY"
+
+    # Query the admin object-detail API from inside an s3proxy pod (which has
+    # Python + reaches its own admin API on localhost). The {key:path} route
+    # takes the slashed key verbatim.
+    local POD
+    POD=$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/name=s3proxy-python \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    local RESP
+    RESP=$(kubectl exec -n "$NAMESPACE" "$POD" -- python -c "
+import base64, json, urllib.request
+key = '''$KEY'''
+url = 'http://localhost:4433/admin/api/objects/$BUCKET/' + key
+req = urllib.request.Request(url)
+req.add_header('Authorization', 'Basic ' + base64.b64encode(b'admin:admin').decode())
+print(urllib.request.urlopen(req, timeout=15).read().decode())
+" 2>&1)
+    echo "Admin response: $RESP"
+
+    if echo "$RESP" | grep -q '"encrypted": *true'; then
+        echo "✓ Admin API reports multipart object encrypted"
+        return 0
+    fi
+    echo "✗ Admin API reported multipart object as NOT encrypted"
+    return 1
+}
+
 verify_encryption() {
     local BUCKET="$1"
     local PATH_PREFIX="${2:-}"

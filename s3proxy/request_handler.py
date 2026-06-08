@@ -33,6 +33,23 @@ UNSIGNED_PAYLOAD = "UNSIGNED-PAYLOAD"
 STREAMING_PAYLOAD_PREFIX = "STREAMING-"
 
 
+def _is_admin_path(request: Request, path: str) -> bool:
+    """True if the path targets the admin dashboard (so it's excluded from stats).
+
+    The admin router is mounted at settings.admin_path; requests there (including a
+    bare prefix with no trailing slash that misses the router and falls through to
+    the S3 catch-all) must not be recorded as proxied S3 traffic.
+    """
+    settings = getattr(request.app.state, "settings", None)
+    if settings is None or getattr(settings, "admin_ui", False) is not True:
+        return False
+    prefix = getattr(settings, "admin_path", "")
+    if not isinstance(prefix, str) or not prefix:
+        return False
+    prefix = prefix.rstrip("/")
+    return path == prefix or path.startswith(prefix + "/")
+
+
 def _needs_body_for_signature(headers: dict[str, str], max_size: int) -> bool:
     """Check if body is needed for signature verification.
 
@@ -140,7 +157,12 @@ async def handle_proxy_request(
         except ValueError:
             size = 0
         client_ip = request.client.host if request.client else ""
-        record_request(method, path, operation, status_code, duration, size, client_ip)
+        # Don't record dashboard requests in the dashboard's own stats. A bare
+        # "/admin" (no trailing slash) doesn't match the mounted admin router and
+        # falls through to this S3 catch-all, where it would otherwise be logged
+        # as a phantom "admin" bucket.
+        if not _is_admin_path(request, path):
+            await record_request(method, path, operation, status_code, duration, size, client_ip)
 
         if reserved_memory > 0:
             await concurrency.release_memory(reserved_memory)
