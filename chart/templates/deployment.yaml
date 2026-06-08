@@ -13,6 +13,7 @@ spec:
     metadata:
       labels:
         {{- include "s3proxy.labels" . | nindent 8 }}
+        app.kubernetes.io/component: server
     spec:
       containers:
         - name: {{ .Chart.Name }}

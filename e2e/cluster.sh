@@ -89,7 +89,7 @@ case "${1:-help}" in
         --env="AWS_SECRET_ACCESS_KEY=minioadmin" \
         --env="AWS_DEFAULT_REGION=us-east-1" \
         --command -- /bin/sh -c "
-          aws --endpoint-url http://s3-gateway.s3proxy s3 mb s3://load-test-bucket 2>/dev/null || true
+          aws --endpoint-url http://s3proxy-python-frontproxy.s3proxy s3 mb s3://load-test-bucket 2>/dev/null || true
 
           echo \"Generating 10MB test files...\"
           mkdir -p /tmp/testfiles
@@ -102,19 +102,19 @@ case "${1:-help}" in
           echo \"=== Starting concurrent uploads ===\"
           START=\$(date +%s)
           for i in 1 2 3; do
-            aws --endpoint-url http://s3-gateway.s3proxy s3 cp /tmp/testfiles/file-\$i.bin s3://load-test-bucket/file-\$i.bin &
+            aws --endpoint-url http://s3proxy-python-frontproxy.s3proxy s3 cp /tmp/testfiles/file-\$i.bin s3://load-test-bucket/file-\$i.bin &
           done
           wait
           END=\$(date +%s)
           echo \"Upload complete in \$((END - START))s\"
 
           echo \"=== Verifying uploads ===\"
-          aws --endpoint-url http://s3-gateway.s3proxy s3 ls s3://load-test-bucket/
+          aws --endpoint-url http://s3proxy-python-frontproxy.s3proxy s3 ls s3://load-test-bucket/
 
           echo \"=== Downloading and verifying ===\"
           mkdir -p /tmp/downloads
           for i in 1 2 3; do
-            aws --endpoint-url http://s3-gateway.s3proxy s3 cp s3://load-test-bucket/file-\$i.bin /tmp/downloads/file-\$i.bin &
+            aws --endpoint-url http://s3proxy-python-frontproxy.s3proxy s3 cp s3://load-test-bucket/file-\$i.bin /tmp/downloads/file-\$i.bin &
           done
           wait
 

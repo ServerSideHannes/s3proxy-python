@@ -156,6 +156,7 @@ jobs:
             --set externalRedis.passwordKey=redis-password \
             --set admin.enabled=true \
             --set admin.secret=test-admin-secret-for-ci \
+            --set frontproxy.enabled=true \
             --set replicaCount=3 \
             --set resources.limits.cpu=100m \
             --set resources.requests.cpu=50m \
@@ -172,6 +173,35 @@ jobs:
             exit 1
           fi
           echo "✓ All 3 s3proxy pods running"
+
+      - name: Verify front proxy
+        run: |
+          set -euo pipefail
+          echo "=== Front proxy pods ready ==="
+          kubectl wait --for=condition=ready pod \
+            -l app.kubernetes.io/component=frontproxy -n s3proxy --timeout=120s
+          kubectl get pods -n s3proxy -l app.kubernetes.io/component=frontproxy
+
+          echo "=== S3 round-trip THROUGH the front proxy ==="
+          kubectl run frontproxy-test -n s3proxy --rm -i --restart=Never \
+            --image=amazon/aws-cli:latest \
+            --env="AWS_ACCESS_KEY_ID=minioadmin" \
+            --env="AWS_SECRET_ACCESS_KEY=minioadmin" \
+            --env="AWS_DEFAULT_REGION=us-east-1" \
+            --command -- /bin/sh -c '
+              set -e
+              ENDPOINT="http://s3proxy-python-frontproxy:80"
+              echo "via front proxy - $(date)" > /tmp/fp.txt
+              ORIG=$(md5sum /tmp/fp.txt | cut -c1-32)
+              aws --endpoint-url $ENDPOINT s3 mb s3://frontproxy-bucket
+              aws --endpoint-url $ENDPOINT s3 cp /tmp/fp.txt s3://frontproxy-bucket/fp.txt
+              aws --endpoint-url $ENDPOINT s3 cp s3://frontproxy-bucket/fp.txt /tmp/down.txt
+              DOWN=$(md5sum /tmp/down.txt | cut -c1-32)
+              [ "$ORIG" = "$DOWN" ] || { echo "✗ round-trip via front proxy failed"; exit 1; }
+              aws --endpoint-url $ENDPOINT s3 rm s3://frontproxy-bucket/fp.txt
+              aws --endpoint-url $ENDPOINT s3 rb s3://frontproxy-bucket
+              echo "✓ S3 round-trip through front proxy succeeded"
+            '
 
       - name: Check health endpoint
         run: |
@@ -304,6 +334,9 @@ jobs:
           echo ""
           echo "=== S3Proxy Logs ==="
           kubectl logs -l app.kubernetes.io/name=s3proxy-python -n s3proxy --tail=100
+          echo ""
+          echo "=== Front Proxy Logs ==="
+          kubectl logs -l app.kubernetes.io/component=frontproxy -n s3proxy --tail=100
           echo ""
           echo "=== MinIO Logs ==="
           kubectl logs -l app=minio -n s3proxy --tail=50

@@ -52,7 +52,7 @@ class Settings(BaseSettings):
 
     # Memory settings
     # This is the ONLY setting needed for OOM protection.
-    # Use nginx proxy-body-size at ingress to reject oversized requests before they reach Python.
+    # Reject oversized requests at the front proxy to stop them before they reach Python.
     memory_limit_mb: int = Field(
         default=64,
         description="Memory budget for concurrent requests in MB. 0=unlimited. "

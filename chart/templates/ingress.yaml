@@ -1,4 +1,10 @@
 {{- if .Values.ingress.enabled -}}
+{{- if not .Values.frontproxy.enabled }}
+{{- fail "ingress.enabled requires frontproxy.enabled=true — the ingress routes to the front proxy" }}
+{{- end }}
+{{- if not .Values.ingress.hosts }}
+{{- fail "ingress.enabled is true but ingress.hosts is empty — set at least one host" }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -10,10 +16,12 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
-  ingressClassName: {{ .Values.ingress.className }}
-  {{- if .Values.ingress.tls }}
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
   tls:
-    {{- range .Values.ingress.tls }}
+    {{- range . }}
     - hosts:
         {{- range .hosts }}
         - {{ . | quote }}
@@ -22,19 +30,6 @@ spec:
     {{- end }}
   {{- end }}
   rules:
-    {{- if and .Values.gateway.enabled (not .Values.ingress.hosts) }}
-    # Auto-generate host from gateway service name + namespace
-    - host: {{ printf "%s.%s" .Values.gateway.serviceName .Release.Namespace | quote }}
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Chart.Name }}
-                port:
-                  number: {{ .Values.service.port }}
-    {{- else }}
     {{- range .Values.ingress.hosts }}
     - host: {{ .host | quote }}
       http:
@@ -44,10 +39,9 @@ spec:
             pathType: {{ .pathType }}
             backend:
               service:
-                name: {{ $.Chart.Name }}
+                name: {{ $.Chart.Name }}-frontproxy
                 port:
-                  number: {{ $.Values.service.port }}
+                  number: {{ $.Values.frontproxy.service.port }}
           {{- end }}
-    {{- end }}
     {{- end }}
 {{- end }}

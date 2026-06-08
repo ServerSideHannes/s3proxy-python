@@ -37,7 +37,7 @@ helm install s3proxy oci://ghcr.io/serversidehannes/s3proxy-python/charts/s3prox
 | `admin.existingSecret.passwordKey` | `S3PROXY_ADMIN_PASSWORD` | Password key in the existing secret |
 | `admin.existingSecret.secretKey` | `S3PROXY_ADMIN_SECRET` | Session-secret key in the existing secret |
 | `admin.ingress.enabled` | `false` | Dedicated Ingress for the dashboard (keep off unless intentionally exposing it) |
-| `admin.ingress.className` | `nginx` | Ingress class for the admin Ingress |
+| `admin.ingress.className` | `""` | Ingress class for the admin Ingress (set to your cluster's controller) |
 | `admin.ingress.host` | `""` | Hostname for the dashboard (required when enabled) |
 | `admin.ingress.annotations` | `{}` | Annotations (e.g. IP allowlist) for the admin Ingress |
 | `admin.ingress.tls` | `[]` | TLS config for the admin Ingress |
@@ -53,14 +53,22 @@ helm install s3proxy oci://ghcr.io/serversidehannes/s3proxy-python/charts/s3prox
 | `externalRedis.passwordKey` | `redis-password` | Key name in Redis secret |
 | `service.type` | `ClusterIP` | Service type |
 | `service.port` | `4433` | Service port |
-| `ingress.enabled` | `false` | Enable ingress |
-| `ingress.className` | `nginx` | Ingress class |
-| `ingress.annotations` | nginx streaming defaults | Ingress annotations |
-| `ingress.hosts` | `[]` | Ingress hostnames |
+| `frontproxy.enabled` | `false` | Deploy a bundled HAProxy front proxy for even load distribution (see below) |
+| `frontproxy.replicaCount` | `2` | Front proxy replicas |
+| `frontproxy.image.repository` | `haproxy` | Front proxy image |
+| `frontproxy.image.tag` | `3.0-alpine` | Front proxy image tag |
+| `frontproxy.service.type` | `ClusterIP` | Front proxy service type |
+| `frontproxy.service.port` | `80` | Front proxy service port (clients connect here) |
+| `frontproxy.timeouts.client` | `1h` | Client-side timeout (tolerate large transfers) |
+| `frontproxy.timeouts.server` | `1h` | Backend timeout (tolerate large transfers) |
+| `frontproxy.timeouts.connect` | `10s` | Backend connect timeout |
+| `frontproxy.podDisruptionBudget.enabled` | `true` | Enable front proxy PDB |
+| `frontproxy.podDisruptionBudget.minAvailable` | `1` | Min available front proxy pods |
+| `ingress.enabled` | `false` | Expose S3 outside the cluster via Ingress (requires `frontproxy.enabled`) |
+| `ingress.className` | `""` | Ingress class (set to your cluster's controller) |
+| `ingress.annotations` | `{}` | Ingress annotations (controller-specific tuning) |
+| `ingress.hosts` | `[]` | Ingress host/path rules |
 | `ingress.tls` | `[]` | Ingress TLS config |
-| `gateway.enabled` | `false` | ExternalName gateway service |
-| `gateway.serviceName` | `s3-gateway` | Gateway service name |
-| `gateway.ingressService` | `ingress-nginx-controller...` | Target ingress service |
 | `resources.requests.cpu` | `100m` | CPU request |
 | `resources.requests.memory` | `512Mi` | Memory request |
 | `resources.limits.cpu` | `500m` | CPU limit |
@@ -71,3 +79,41 @@ helm install s3proxy oci://ghcr.io/serversidehannes/s3proxy-python/charts/s3prox
 | `topologySpreadConstraints` | `[]` | Topology spread |
 | `podDisruptionBudget.enabled` | `true` | Enable PDB |
 | `podDisruptionBudget.minAvailable` | `1` | Min available pods |
+
+## Even load distribution (front proxy)
+
+A plain `ClusterIP` Service balances per **connection** (L4, via kube-proxy). S3
+clients (boto3, aws-cli) hold long-lived keep-alive connections, so each client
+tends to pin to a single pod — leaving load uneven across replicas.
+
+Setting `frontproxy.enabled=true` deploys a small bundled HAProxy in front of the
+s3proxy pods that balances per **request** (L7), spreading even a single client's
+stream across every pod. It is fully self-contained — it requires **no** ingress
+controller, service mesh, or anything else in the cluster.
+
+```bash
+helm install s3proxy ... --set frontproxy.enabled=true
+```
+
+Clients then connect to the front proxy Service (`s3proxy-python-frontproxy`)
+instead of the s3proxy Service. The front proxy runs `replicaCount: 2` with a PDB so
+it is not a single point of failure.
+
+### Exposing S3 outside the cluster
+
+For S3 operations from **outside** the cluster, enable an Ingress in front of the
+front proxy. It is controller-agnostic — set `ingress.className` to whatever ingress
+controller you run and add any controller-specific tuning via `ingress.annotations`.
+
+```bash
+helm install s3proxy ... \
+  --set frontproxy.enabled=true \
+  --set ingress.enabled=true \
+  --set ingress.className=nginx \
+  --set 'ingress.hosts[0].host=s3.example.com' \
+  --set 'ingress.hosts[0].paths[0].path=/' \
+  --set 'ingress.hosts[0].paths[0].pathType=Prefix'
+```
+
+The Ingress routes to the front proxy, so external clients also get even per-request
+distribution. `ingress.enabled` therefore requires `frontproxy.enabled=true`.

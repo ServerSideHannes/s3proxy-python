@@ -75,7 +75,7 @@ aws s3 --endpoint-url http://s3proxy-python:4433 cp file.txt s3://bucket/
 
 Use the **same credentials** you configured above. That's it.
 
-> **Endpoints** — In-cluster: `http://s3proxy-python.<ns>:4433` · Gateway: `http://s3-gateway.<ns>` · Ingress: `https://s3proxy.example.com`
+> **Endpoints** — In-cluster: `http://s3proxy-python.<ns>:4433` · Front proxy (even load distribution, `frontproxy.enabled=true`): `http://s3proxy-python-frontproxy.<ns>` · Outside the cluster: enable `ingress` in front of the front proxy
 >
 > **Health** — `GET /healthz` · `GET /readyz` · **Metrics** — `GET /metrics`
 
@@ -131,8 +131,8 @@ A request signed by an access key with no configured KEK is rejected. Via Helm: 
 | `secrets.existingSecrets.enabled` | `false` | Use existing K8s secret |
 | `admin.secret` | `change-me` | Secret signing admin session cookies (when admin UI on) |
 | `redis-ha.enabled` | `true` | Deploy embedded Redis HA |
-| `gateway.enabled` | `false` | Create gateway service |
-| `ingress.enabled` | `false` | Enable ingress |
+| `frontproxy.enabled` | `false` | Bundled HAProxy for even load distribution (no external dependency) |
+| `ingress.enabled` | `false` | Expose S3 outside the cluster via Ingress (requires `frontproxy.enabled`) |
 | `performance.memoryLimitMb` | `64` | Memory budget for streaming concurrency |
 
 See [chart/README.md](chart/README.md) for all options.

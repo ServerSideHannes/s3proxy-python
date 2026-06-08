@@ -25,7 +25,7 @@ spec:
   backup:
     barmanObjectStore:
       destinationPath: "s3://postgres-backups/"
-      endpointURL: "http://s3-gateway.s3proxy:80"
+      endpointURL: "http://s3proxy-python-frontproxy.s3proxy:80"
       s3Credentials:
         accessKeyId:
           name: s3-credentials

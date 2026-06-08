@@ -1,0 +1,15 @@
+{{- if and .Values.frontproxy.enabled .Values.frontproxy.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Chart.Name }}-frontproxy
+  labels:
+    {{- include "s3proxy.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontproxy
+spec:
+  minAvailable: {{ .Values.frontproxy.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "s3proxy.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: frontproxy
+{{- end }}
