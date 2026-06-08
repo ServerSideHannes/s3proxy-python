@@ -17,13 +17,15 @@ class TestObjectEncryptionFlow:
     """Test full object encryption/decryption workflow."""
 
     @pytest.mark.asyncio
-    async def test_put_then_get_object(self, mock_s3, settings, credentials, multipart_manager):
+    async def test_put_then_get_object(
+        self, mock_s3, settings, credentials, multipart_manager, kek
+    ):
         """Test uploading and then downloading an object preserves data."""
         S3ProxyHandler(settings, {}, multipart_manager)
         plaintext = b"Hello, this is secret data!"
 
         # Encrypt and store
-        encrypted = crypto.encrypt_object(plaintext, settings.kek)
+        encrypted = crypto.encrypt_object(plaintext, kek)
         metadata = {
             settings.dektag_name: base64.b64encode(encrypted.wrapped_dek).decode(),
             "plaintext-size": str(len(plaintext)),
@@ -37,15 +39,15 @@ class TestObjectEncryptionFlow:
         stored_metadata = resp["Metadata"]
 
         wrapped_dek = base64.b64decode(stored_metadata[settings.dektag_name])
-        decrypted = crypto.decrypt_object(ciphertext, wrapped_dek, settings.kek)
+        decrypted = crypto.decrypt_object(ciphertext, wrapped_dek, kek)
 
         assert decrypted == plaintext
 
     @pytest.mark.asyncio
-    async def test_put_then_head_object(self, mock_s3, settings):
+    async def test_put_then_head_object(self, mock_s3, settings, kek):
         """Test HEAD returns correct plaintext size."""
         plaintext = b"Test data for head request"
-        encrypted = crypto.encrypt_object(plaintext, settings.kek)
+        encrypted = crypto.encrypt_object(plaintext, kek)
         metadata = {
             settings.dektag_name: base64.b64encode(encrypted.wrapped_dek).decode(),
             "plaintext-size": str(len(plaintext)),
@@ -68,10 +70,10 @@ class TestObjectEncryptionFlow:
         assert "NoSuchKey" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_range_request(self, mock_s3, settings):
+    async def test_range_request(self, mock_s3, settings, kek):
         """Test partial object download with range request."""
         plaintext = b"0123456789ABCDEF"  # 16 bytes
-        encrypted = crypto.encrypt_object(plaintext, settings.kek)
+        encrypted = crypto.encrypt_object(plaintext, kek)
         metadata = {
             settings.dektag_name: base64.b64encode(encrypted.wrapped_dek).decode(),
             "plaintext-size": str(len(plaintext)),
@@ -90,7 +92,7 @@ class TestMultipartEncryptionFlow:
     """Test multipart upload encryption workflow."""
 
     @pytest.mark.asyncio
-    async def test_multipart_upload_flow(self, mock_s3, settings, multipart_manager):
+    async def test_multipart_upload_flow(self, mock_s3, settings, multipart_manager, kek):
         """Test complete multipart upload flow."""
         bucket = "test-bucket"
         key = "large-file.bin"
@@ -104,7 +106,7 @@ class TestMultipartEncryptionFlow:
 
         # Generate encryption key
         dek = crypto.generate_dek()
-        crypto.wrap_key(dek, settings.kek)
+        crypto.wrap_key(dek, kek)
 
         # Upload parts
         part1_plaintext = b"A" * 5242880  # 5MB
@@ -388,13 +390,13 @@ class TestEncryptedCopyObject:
     """Test copy object with encrypted source."""
 
     @pytest.mark.asyncio
-    async def test_copy_encrypted_object(self, mock_s3, settings):
+    async def test_copy_encrypted_object(self, mock_s3, settings, kek):
         """Test copying an encrypted object re-encrypts it."""
         await mock_s3.create_bucket("test-bucket")
 
         # Store encrypted object
         plaintext = b"Secret data to copy"
-        encrypted = crypto.encrypt_object(plaintext, settings.kek)
+        encrypted = crypto.encrypt_object(plaintext, kek)
         metadata = {
             settings.dektag_name: base64.b64encode(encrypted.wrapped_dek).decode(),
             "plaintext-size": str(len(plaintext)),

@@ -31,10 +31,11 @@ def _clean_state():
 def admin_settings():
     return Settings(
         host="http://localhost:9000",
-        encrypt_key="test-kek-32bytes!!!!!!!!!!!!!!!!",
         admin_ui=True,
         admin_username="admin",
         admin_password="secret",
+        admin_secret="test-admin-secret",
+        credentials=[{"access_key": "AKIA-TEST", "secret_key": "s", "kek": "k"}],
     )
 
 
@@ -169,10 +170,10 @@ def test_status_api_401_without_auth(admin_settings) -> None:
 def test_auth_uses_explicit_credentials_not_aws() -> None:
     settings = Settings(
         host="http://localhost:9000",
-        encrypt_key="test-kek",
         admin_ui=True,
         admin_username="admin",
         admin_password="admin",
+        admin_secret="test-admin-secret",
     )
     admin = AdminCredentials(settings, {"AKIAEXAMPLE": "secret-key"})
     assert admin.valid("admin", "admin")
@@ -183,10 +184,10 @@ def test_auth_uses_explicit_credentials_not_aws() -> None:
 def test_auth_raises_when_credentials_blank() -> None:
     settings = Settings(
         host="http://localhost:9000",
-        encrypt_key="test-kek",
         admin_ui=True,
         admin_username="",
         admin_password="",
+        admin_secret="test-admin-secret",
     )
     with pytest.raises(RuntimeError):
         create_auth_dependency(settings, {})

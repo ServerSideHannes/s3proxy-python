@@ -25,7 +25,7 @@ class TestPgBackRestWorkflow:
     """
 
     @pytest.mark.asyncio
-    async def test_full_backup_workflow(self, mock_s3, settings):
+    async def test_full_backup_workflow(self, mock_s3, settings, kek):
         """Test complete backup workflow."""
         bucket = "pgbackrest-repo"
 
@@ -36,7 +36,7 @@ class TestPgBackRestWorkflow:
         manifest_content = (
             b'{"backup_label": "20240115-120000F", "start_time": "2024-01-15 12:00:00"}'
         )
-        manifest_encrypted = crypto.encrypt_object(manifest_content, settings.kek)
+        manifest_encrypted = crypto.encrypt_object(manifest_content, kek)
         await mock_s3.put_object(
             bucket,
             "backup/20240115-120000F/backup.manifest",
@@ -49,7 +49,7 @@ class TestPgBackRestWorkflow:
 
         # 3. Upload WAL segment (medium file ~16MB simulated with smaller data)
         wal_content = b"WAL segment data " * 1000
-        wal_encrypted = crypto.encrypt_object(wal_content, settings.kek)
+        wal_encrypted = crypto.encrypt_object(wal_content, kek)
         await mock_s3.put_object(
             bucket,
             "archive/000000010000000000000001",
@@ -70,11 +70,11 @@ class TestPgBackRestWorkflow:
         get_resp = await mock_s3.get_object(bucket, "backup/20240115-120000F/backup.manifest")
         ciphertext = await get_resp["Body"].read()
         wrapped_dek = base64.b64decode(get_resp["Metadata"][settings.dektag_name])
-        decrypted = crypto.decrypt_object(ciphertext, wrapped_dek, settings.kek)
+        decrypted = crypto.decrypt_object(ciphertext, wrapped_dek, kek)
         assert decrypted == manifest_content
 
     @pytest.mark.asyncio
-    async def test_retention_cleanup(self, mock_s3, settings):
+    async def test_retention_cleanup(self, mock_s3, settings, kek):
         """Test batch delete for retention policy cleanup."""
         bucket = "pgbackrest-repo"
         await mock_s3.create_bucket(bucket)
@@ -82,7 +82,7 @@ class TestPgBackRestWorkflow:
         # Create old backup files
         for i in range(5):
             content = f"old backup {i}".encode()
-            encrypted = crypto.encrypt_object(content, settings.kek)
+            encrypted = crypto.encrypt_object(content, kek)
             await mock_s3.put_object(
                 bucket,
                 f"backup/old-backup-{i}/data.bin",
@@ -115,14 +115,14 @@ class TestWALGWorkflow:
     """
 
     @pytest.mark.asyncio
-    async def test_delta_backup_with_copy(self, mock_s3, settings):
+    async def test_delta_backup_with_copy(self, mock_s3, settings, kek):
         """Test delta backup using copy object."""
         bucket = "walg-repo"
         await mock_s3.create_bucket(bucket)
 
         # Upload base backup
         base_content = b"base backup data " * 100
-        base_encrypted = crypto.encrypt_object(base_content, settings.kek)
+        base_encrypted = crypto.encrypt_object(base_content, kek)
         await mock_s3.put_object(
             bucket,
             "basebackups/base_000000010000000000000001/data.tar",
@@ -146,7 +146,7 @@ class TestWALGWorkflow:
         assert len(keys) == 2
 
     @pytest.mark.asyncio
-    async def test_wal_archiving(self, mock_s3, settings):
+    async def test_wal_archiving(self, mock_s3, settings, kek):
         """Test WAL file archiving."""
         bucket = "walg-repo"
         await mock_s3.create_bucket(bucket)
@@ -154,7 +154,7 @@ class TestWALGWorkflow:
         # Archive multiple WAL files
         for segment_num in range(5):
             wal_content = f"WAL segment {segment_num:08d}".encode() * 100
-            wal_encrypted = crypto.encrypt_object(wal_content, settings.kek)
+            wal_encrypted = crypto.encrypt_object(wal_content, kek)
             await mock_s3.put_object(
                 bucket,
                 f"wal_005/00000001000000000000000{segment_num}",
@@ -183,7 +183,7 @@ class TestScyllaManagerWorkflow:
     """
 
     @pytest.mark.asyncio
-    async def test_sstable_multipart_upload(self, mock_s3, settings):
+    async def test_sstable_multipart_upload(self, mock_s3, settings, kek):
         """Test multipart upload for large SSTables."""
         bucket = "scylla-backup"
         key = "keyspace/table/mc-1-big-Data.db"
@@ -195,7 +195,7 @@ class TestScyllaManagerWorkflow:
 
         # Generate encryption key for this upload
         dek = crypto.generate_dek()
-        crypto.wrap_key(dek, settings.kek)
+        crypto.wrap_key(dek, kek)
 
         # Upload parts (simulated SSTable chunks)
         part_etags = []
@@ -265,7 +265,7 @@ class TestClickHouseBackupWorkflow:
     """
 
     @pytest.mark.asyncio
-    async def test_backup_metadata(self, mock_s3, settings):
+    async def test_backup_metadata(self, mock_s3, settings, kek):
         """Test backing up ClickHouse metadata."""
         bucket = "clickhouse-backup"
         await mock_s3.create_bucket(bucket)
@@ -277,7 +277,7 @@ class TestClickHouseBackupWorkflow:
             "size": 1024000,
         }
         metadata_bytes = str(metadata).encode()
-        encrypted = crypto.encrypt_object(metadata_bytes, settings.kek)
+        encrypted = crypto.encrypt_object(metadata_bytes, kek)
 
         await mock_s3.put_object(
             bucket,
@@ -306,7 +306,7 @@ class TestElasticsearchSnapshotWorkflow:
     """
 
     @pytest.mark.asyncio
-    async def test_snapshot_to_s3(self, mock_s3, settings):
+    async def test_snapshot_to_s3(self, mock_s3, settings, kek):
         """Test creating an ES snapshot to S3."""
         bucket = "es-snapshots"
         await mock_s3.create_bucket(bucket)
@@ -317,7 +317,7 @@ class TestElasticsearchSnapshotWorkflow:
 
         # Upload snapshot metadata
         snapshot_metadata = b'{"snapshot_id": "snapshot_1", "indices": ["logs-2024.01"]}'
-        encrypted = crypto.encrypt_object(snapshot_metadata, settings.kek)
+        encrypted = crypto.encrypt_object(snapshot_metadata, kek)
 
         await mock_s3.put_object(
             bucket,
@@ -330,7 +330,7 @@ class TestElasticsearchSnapshotWorkflow:
 
         # Upload index data
         index_data = b"lucene index data " * 1000
-        index_encrypted = crypto.encrypt_object(index_data, settings.kek)
+        index_encrypted = crypto.encrypt_object(index_data, kek)
 
         await mock_s3.put_object(
             bucket,
@@ -350,7 +350,7 @@ class TestBarmanCloudWorkflow:
     """Simulate Barman Cloud (CloudNativePG) backup workflow."""
 
     @pytest.mark.asyncio
-    async def test_base_backup(self, mock_s3, settings):
+    async def test_base_backup(self, mock_s3, settings, kek):
         """Test Barman Cloud base backup."""
         bucket = "barman-backup"
         await mock_s3.create_bucket(bucket)
@@ -360,7 +360,7 @@ class TestBarmanCloudWorkflow:
 
         # Upload backup label
         backup_label = b"START WAL LOCATION: 0/1000000 (file 000000010000000000000001)"
-        encrypted = crypto.encrypt_object(backup_label, settings.kek)
+        encrypted = crypto.encrypt_object(backup_label, kek)
 
         await mock_s3.put_object(
             bucket,
@@ -373,7 +373,7 @@ class TestBarmanCloudWorkflow:
 
         # Upload data directory tarball
         data_tar = b"postgres data directory contents " * 1000
-        data_encrypted = crypto.encrypt_object(data_tar, settings.kek)
+        data_encrypted = crypto.encrypt_object(data_tar, kek)
 
         await mock_s3.put_object(
             bucket,
@@ -395,14 +395,14 @@ class TestEncryptionKeyRotation:
     """Test scenarios involving key rotation."""
 
     @pytest.mark.asyncio
-    async def test_read_with_original_key(self, mock_s3, settings):
+    async def test_read_with_original_key(self, mock_s3, settings, kek):
         """Test reading data encrypted with original key still works."""
         bucket = "key-rotation-test"
         await mock_s3.create_bucket(bucket)
 
         # Encrypt with current key
         plaintext = b"data encrypted before key rotation"
-        encrypted = crypto.encrypt_object(plaintext, settings.kek)
+        encrypted = crypto.encrypt_object(plaintext, kek)
 
         await mock_s3.put_object(
             bucket,
@@ -418,7 +418,7 @@ class TestEncryptionKeyRotation:
         ciphertext = await get_resp["Body"].read()
         wrapped_dek = base64.b64decode(get_resp["Metadata"][settings.dektag_name])
 
-        decrypted = crypto.decrypt_object(ciphertext, wrapped_dek, settings.kek)
+        decrypted = crypto.decrypt_object(ciphertext, wrapped_dek, kek)
         assert decrypted == plaintext
 
 

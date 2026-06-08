@@ -26,7 +26,9 @@ class TestEntityTooSmallHandling:
 
         # Create upload state with parts 1, 2, 3, 5 (missing 4)
         dek = crypto.generate_dek()
-        await handler.multipart_manager.create_upload(bucket, key, upload_id, dek)
+        await handler.multipart_manager.create_upload(
+            bucket, key, upload_id, dek, kid="AKIAIOSFODNN7EXAMPLE"
+        )
 
         # Add parts 1, 2, 3, 5 to state
         for part_num in [1, 2, 3, 5]:
@@ -89,7 +91,9 @@ class TestEntityTooSmallHandling:
 
         # Create upload with 5 parts of 1KB each (total 5KB)
         dek = crypto.generate_dek()
-        await handler.multipart_manager.create_upload(bucket, key, upload_id, dek)
+        await handler.multipart_manager.create_upload(
+            bucket, key, upload_id, dek, kid="AKIAIOSFODNN7EXAMPLE"
+        )
 
         # Add 5 parts of 1KB each
         for part_num in range(1, 6):

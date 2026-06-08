@@ -25,7 +25,9 @@ class TestPartialMultipartCompletion:
         dek = crypto.generate_dek()
 
         # Simulate upload state with 4 parts uploaded
-        await handler.multipart_manager.create_upload("bucket", "key", "upload-123", dek)
+        await handler.multipart_manager.create_upload(
+            "bucket", "key", "upload-123", dek, kid="AKIAIOSFODNN7EXAMPLE"
+        )
 
         # Create 4 parts in state (all uploaded)
         for i in range(1, 5):
@@ -129,7 +131,9 @@ class TestPartialMultipartCompletion:
         mock_client.__aexit__ = AsyncMock(return_value=None)
         dek = crypto.generate_dek()
 
-        await handler.multipart_manager.create_upload("bucket", "key", "upload-123", dek)
+        await handler.multipart_manager.create_upload(
+            "bucket", "key", "upload-123", dek, kid="AKIAIOSFODNN7EXAMPLE"
+        )
 
         # Add 2 parts
         for i in range(1, 3):
@@ -195,7 +199,9 @@ class TestPartialMultipartCompletion:
         mock_client.__aexit__ = AsyncMock(return_value=None)
         dek = crypto.generate_dek()
 
-        await handler.multipart_manager.create_upload("bucket", "key", "upload-123", dek)
+        await handler.multipart_manager.create_upload(
+            "bucket", "key", "upload-123", dek, kid="AKIAIOSFODNN7EXAMPLE"
+        )
 
         # Add some parts to state
         part = PartMetadata(

@@ -44,7 +44,10 @@ def run_s3proxy(
     env = os.environ.copy()
     env.update(
         {
-            "S3PROXY_ENCRYPT_KEY": "test-encryption-key-32-bytes!!",
+            "S3PROXY_CREDENTIALS": (
+                '[{"access_key":"minioadmin","secret_key":"minioadmin",'
+                '"kek":"test-encryption-key-32-bytes!!"}]'
+            ),
             "S3PROXY_HOST": "http://localhost:9000",
             "S3PROXY_REGION": "us-east-1",
             "S3PROXY_PORT": str(port),

@@ -45,22 +45,22 @@ S3's server-side encryption is great, but your cloud provider holds the keys. S3
 
 ## Install
 
+Each AWS credential is configured with its **own encryption key** (KEK). The proxy verifies the client's signature with the credential's secret key, then encrypts/decrypts that credential's objects with its KEK.
+
 **Option A** — inline secrets (quick start):
 
 ```bash
 helm install s3proxy oci://ghcr.io/serversidehannes/s3proxy-python/charts/s3proxy-python \
-  --set secrets.encryptKey="your-32-byte-key" \
-  --set secrets.awsAccessKeyId="AKIA..." \
-  --set secrets.awsSecretAccessKey="wJalr..."
+  --set secrets.credentials[0].accessKey="AKIA..." \
+  --set secrets.credentials[0].secretKey="wJalr..." \
+  --set secrets.credentials[0].kek="this-credentials-encryption-secret"
 ```
 
 **Option B** — existing K8s secret (recommended for production):
 
 ```bash
 kubectl create secret generic s3proxy-secrets \
-  --from-literal=S3PROXY_ENCRYPT_KEY="your-32-byte-key" \
-  --from-literal=AWS_ACCESS_KEY_ID="AKIA..." \
-  --from-literal=AWS_SECRET_ACCESS_KEY="wJalr..."
+  --from-literal=S3PROXY_CREDENTIALS='[{"access_key":"AKIA...","secret_key":"wJalr...","kek":"this-credentials-encryption-secret"}]'
 
 helm install s3proxy oci://ghcr.io/serversidehannes/s3proxy-python/charts/s3proxy-python \
   --set secrets.existingSecrets.enabled=true \
@@ -106,6 +106,18 @@ Master Key → KEK (derived via SHA-256)
                    └→ encrypts data (AES-256-GCM)
 ```
 
+**Per-credential keys** — Each AWS credential has its own KEK. The proxy verifies the client's signature with the credential's secret key, then wraps that credential's DEKs with the credential's KEK. So a leaked KEK only exposes the data written by that one credential. The access key that wrapped each object is recorded in the object's metadata (`isec-kid`), so **decryption always uses the key that actually encrypted the object** — reconfiguring credentials never orphans existing data, as long as that access key's KEK is still present.
+
+```bash
+# Each credential: access_key + secret_key + its own kek (SHA-256'd into the KEK)
+S3PROXY_CREDENTIALS='[
+  {"access_key":"AKIA-ACME","secret_key":"...","kek":"acme-kek-secret"},
+  {"access_key":"AKIA-GLOBEX","secret_key":"...","kek":"globex-kek-secret"}
+]'
+```
+
+A request signed by an access key with no configured KEK is rejected. Via Helm: set `secrets.credentials` (see [chart/values.yaml](chart/values.yaml)).
+
 ---
 
 ## Configuration
@@ -115,8 +127,9 @@ Master Key → KEK (derived via SHA-256)
 | `replicaCount` | `3` | Pod replicas |
 | `s3.host` | `s3.amazonaws.com` | S3 endpoint (AWS, MinIO, R2, etc.) |
 | `s3.region` | `us-east-1` | AWS region |
-| `secrets.encryptKey` | — | Encryption key |
+| `secrets.credentials` | `[]` | AWS credentials, each `{accessKey, secretKey, kek}` |
 | `secrets.existingSecrets.enabled` | `false` | Use existing K8s secret |
+| `admin.secret` | `change-me` | Secret signing admin session cookies (when admin UI on) |
 | `redis-ha.enabled` | `true` | Deploy embedded Redis HA |
 | `gateway.enabled` | `false` | Create gateway service |
 | `ingress.enabled` | `false` | Enable ingress |
@@ -134,8 +147,8 @@ Yes. S3Proxy detects unencrypted objects and returns them as-is. Migrate by copy
 </details>
 
 <details>
-<summary><strong>What if I lose my encryption key?</strong></summary>
-Data is unrecoverable. Back up your key.
+<summary><strong>What if I lose an encryption key?</strong></summary>
+Data written by that credential is unrecoverable. Each object records the access key that encrypted it, so keep every credential's <code>kek</code> as long as objects written by that credential exist. Back up your keys.
 </details>
 
 <details>
@@ -158,8 +171,8 @@ Yes. The proxy verifies the presigned signature, then makes its own authenticate
 ## Roadmap
 
 - [ ] Key rotation (re-encrypt objects with a new master key)
-- [ ] Multiple AWS credential pairs (per-client auth)
-- [ ] Per-bucket / per-prefix encryption keys
+- [x] Multiple AWS credential pairs (per-client auth)
+- [x] Per-credential encryption keys
 - [ ] S3 Select passthrough
 - [ ] Ceph S3 compatibility > 80%
 - [ ] Batch re-encryption CLI tool

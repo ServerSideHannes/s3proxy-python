@@ -51,6 +51,7 @@ class MultipartUploadState:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     total_plaintext_size: int = 0
     next_internal_part_number: int = 1  # Next S3 part number to use
+    kid: str = ""  # Key id that wraps this upload's DEK ("" = default key)
 
 
 @dataclass(slots=True)
@@ -66,6 +67,7 @@ class MultipartMetadata:
     total_plaintext_size: int = 0
     parts: list[PartMetadata] = field(default_factory=list)
     wrapped_dek: bytes = b""
+    kid: str = ""  # Key id that wrapped the DEK ("" = legacy/default key)
 
 
 class StateMissingError(Exception):

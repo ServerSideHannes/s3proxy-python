@@ -50,6 +50,7 @@ class MultipartStateManager:
         key: str,
         upload_id: str,
         dek: bytes,
+        kid: str = "",
     ) -> MultipartUploadState:
         """Create new upload state."""
         state = MultipartUploadState(
@@ -57,6 +58,7 @@ class MultipartStateManager:
             bucket=bucket,
             key=key,
             upload_id=upload_id,
+            kid=kid,
         )
 
         sk = self._storage_key(bucket, key, upload_id)

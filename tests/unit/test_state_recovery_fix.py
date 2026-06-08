@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from s3proxy import crypto
+from s3proxy.keyring import KeyRing
 from s3proxy.state import (
     MultipartUploadState,
     PartMetadata,
@@ -20,6 +21,14 @@ from s3proxy.state import (
 
 # Encryption overhead (nonce + tag)
 ENCRYPTION_OVERHEAD = crypto.NONCE_SIZE + crypto.TAG_SIZE  # 12 + 16 = 28
+
+
+RECOVERY_KID = "AKIA-TEST"
+
+
+def _single_key_ring(kek: bytes) -> KeyRing:
+    """A KeyRing holding `kek` under the kid the recovery state carries."""
+    return KeyRing(keys={RECOVERY_KID: kek})
 
 
 class TestStateReconstruction:
@@ -42,7 +51,9 @@ class TestStateReconstruction:
 
         from s3proxy.state import json_dumps
 
-        state_data = json_dumps({"dek": base64.b64encode(wrapped_dek).decode()})
+        state_data = json_dumps(
+            {"dek": base64.b64encode(wrapped_dek).decode(), "kid": RECOVERY_KID}
+        )
 
         async def mock_get_object(bucket_name, key_name):
             return {"Body": AsyncMock(read=AsyncMock(return_value=state_data))}
@@ -77,7 +88,9 @@ class TestStateReconstruction:
         )
 
         # Reconstruct state
-        state = await reconstruct_upload_state_from_s3(mock_s3_client, bucket, key, upload_id, kek)
+        state = await reconstruct_upload_state_from_s3(
+            mock_s3_client, bucket, key, upload_id, _single_key_ring(kek)
+        )
 
         # Verify reconstruction
         assert state is not None
@@ -119,7 +132,9 @@ class TestStateReconstruction:
 
         from s3proxy.state import json_dumps
 
-        state_data = json_dumps({"dek": base64.b64encode(wrapped_dek).decode()})
+        state_data = json_dumps(
+            {"dek": base64.b64encode(wrapped_dek).decode(), "kid": RECOVERY_KID}
+        )
 
         async def mock_get_object(bucket_name, key_name):
             return {"Body": AsyncMock(read=AsyncMock(return_value=state_data))}
@@ -130,7 +145,9 @@ class TestStateReconstruction:
         mock_s3_client.list_parts = AsyncMock(return_value={"Parts": []})
 
         # Reconstruct state
-        state = await reconstruct_upload_state_from_s3(mock_s3_client, bucket, key, upload_id, kek)
+        state = await reconstruct_upload_state_from_s3(
+            mock_s3_client, bucket, key, upload_id, _single_key_ring(kek)
+        )
 
         # Verify empty state is created
         assert state is not None
@@ -154,7 +171,9 @@ class TestStateReconstruction:
         mock_s3_client.get_object = mock_get_object
 
         # Reconstruct state should return None
-        state = await reconstruct_upload_state_from_s3(mock_s3_client, bucket, key, upload_id, kek)
+        state = await reconstruct_upload_state_from_s3(
+            mock_s3_client, bucket, key, upload_id, _single_key_ring(kek)
+        )
 
         assert state is None
 
@@ -174,7 +193,9 @@ class TestStateReconstruction:
 
         from s3proxy.state import json_dumps
 
-        state_data = json_dumps({"dek": base64.b64encode(wrapped_dek).decode()})
+        state_data = json_dumps(
+            {"dek": base64.b64encode(wrapped_dek).decode(), "kid": RECOVERY_KID}
+        )
 
         async def mock_get_object(bucket_name, key_name):
             return {"Body": AsyncMock(read=AsyncMock(return_value=state_data))}
@@ -185,7 +206,9 @@ class TestStateReconstruction:
         mock_s3_client.list_parts = AsyncMock(side_effect=Exception("List failed"))
 
         # Reconstruct state should return None
-        state = await reconstruct_upload_state_from_s3(mock_s3_client, bucket, key, upload_id, kek)
+        state = await reconstruct_upload_state_from_s3(
+            mock_s3_client, bucket, key, upload_id, _single_key_ring(kek)
+        )
 
         assert state is None
 
@@ -205,7 +228,9 @@ class TestStateReconstruction:
 
         from s3proxy.state import json_dumps
 
-        state_data = json_dumps({"dek": base64.b64encode(wrapped_dek).decode()})
+        state_data = json_dumps(
+            {"dek": base64.b64encode(wrapped_dek).decode(), "kid": RECOVERY_KID}
+        )
 
         async def mock_get_object(bucket_name, key_name):
             return {"Body": AsyncMock(read=AsyncMock(return_value=state_data))}
@@ -240,7 +265,9 @@ class TestStateReconstruction:
         )
 
         # Reconstruct state
-        state = await reconstruct_upload_state_from_s3(mock_s3_client, bucket, key, upload_id, kek)
+        state = await reconstruct_upload_state_from_s3(
+            mock_s3_client, bucket, key, upload_id, _single_key_ring(kek)
+        )
 
         # Verify all client parts are present
         assert state is not None

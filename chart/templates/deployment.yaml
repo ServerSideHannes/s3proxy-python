@@ -40,21 +40,11 @@ spec:
           env:
             {{- /* App secrets from existing secret */ -}}
             {{- if .Values.secrets.existingSecrets.enabled }}
-            - name: S3PROXY_ENCRYPT_KEY
+            - name: S3PROXY_CREDENTIALS
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secrets.existingSecrets.name }}
-                  key: {{ .Values.secrets.existingSecrets.keys.encryptKey }}
-            - name: AWS_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.secrets.existingSecrets.name }}
-                  key: {{ .Values.secrets.existingSecrets.keys.awsAccessKeyId }}
-            - name: AWS_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.secrets.existingSecrets.name }}
-                  key: {{ .Values.secrets.existingSecrets.keys.awsSecretAccessKey }}
+                  key: {{ .Values.secrets.existingSecrets.keys.credentials }}
             {{- end }}
             {{- /* Admin dashboard credentials (when not pulled via the chart-secret envFrom) */ -}}
             {{- if $adminNeedsEnv }}
@@ -69,6 +59,11 @@ spec:
                 secretKeyRef:
                   name: {{ $adminSecret }}
                   key: {{ .Values.admin.existingSecret.passwordKey }}
+            - name: S3PROXY_ADMIN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $adminSecret }}
+                  key: {{ .Values.admin.existingSecret.secretKey }}
             {{- end }}
             {{- /* Redis password from redis-ha secret */ -}}
             {{- if and (index .Values "redis-ha" "enabled") (index .Values "redis-ha" "auth") }}

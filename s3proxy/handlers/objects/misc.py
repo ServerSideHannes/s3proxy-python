@@ -98,7 +98,12 @@ class MiscObjectMixin(BaseHandler):
             extra["x-amz-tagging-count"] = str(resp["TagCount"])
         # Include user metadata (x-amz-meta-*) excluding internal s3proxy keys
         metadata = resp.get("Metadata", {})
-        internal_keys = {self.settings.dektag_name.lower(), "client-etag", "plaintext-size"}
+        internal_keys = {
+            self.settings.dektag_name.lower(),
+            self.settings.kidtag_name.lower(),
+            "client-etag",
+            "plaintext-size",
+        }
         for key, value in metadata.items():
             if key.lower() not in internal_keys:
                 extra[f"x-amz-meta-{key}"] = value
@@ -283,21 +288,26 @@ class MiscObjectMixin(BaseHandler):
         )
 
         if src_multipart_meta:
+            # Multipart source carries its kid in the stored metadata.
             plaintext = await self._download_encrypted_multipart(
                 client, src_bucket, src_key, src_multipart_meta
             )
         else:
+            # Single-object source kid is on the head response we already fetched.
+            src_kid = head_resp.get("Metadata", {}).get(self.settings.kidtag_name, "")
             plaintext = await self._download_encrypted_single(
-                client, src_bucket, src_key, src_wrapped_dek
+                client, src_bucket, src_key, src_wrapped_dek, src_kid
             )
 
-        # Re-encrypt
-        encrypted = crypto.encrypt_object(plaintext, self.settings.kek)
+        # Re-encrypt under the calling credential's key.
+        dest_kid, dest_kek = self.keyring.key_for(client.credentials.access_key)
+        encrypted = crypto.encrypt_object(plaintext, dest_kek)
         etag = hashlib.md5(plaintext, usedforsecurity=False).hexdigest()
 
         # Build destination metadata
         dest_metadata = {
             self.settings.dektag_name: base64.b64encode(encrypted.wrapped_dek).decode(),
+            self.settings.kidtag_name: dest_kid,
             "client-etag": etag,
             "plaintext-size": str(len(plaintext)),
         }
@@ -308,7 +318,12 @@ class MiscObjectMixin(BaseHandler):
         else:
             # Copy user metadata from source (excluding our internal keys)
             src_metadata = head_resp.get("Metadata", {})
-            internal_keys = {self.settings.dektag_name.lower(), "client-etag", "plaintext-size"}
+            internal_keys = {
+                self.settings.dektag_name.lower(),
+                self.settings.kidtag_name.lower(),
+                "client-etag",
+                "plaintext-size",
+            }
             for meta_key, meta_value in src_metadata.items():
                 if meta_key.lower() not in internal_keys:
                     dest_metadata[meta_key] = meta_value

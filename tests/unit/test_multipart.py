@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from s3proxy.keyring import KeyRing
 from s3proxy.state import (
     InternalPartMetadata,
     MultipartMetadata,
@@ -23,6 +24,13 @@ from s3proxy.state.serialization import (
     deserialize_upload_state,
     serialize_upload_state,
 )
+
+RECOVERY_KID = "AKIA-TEST"
+
+
+def _single_key_ring(kek: bytes) -> KeyRing:
+    """A KeyRing holding `kek` under the kid the recovery state carries."""
+    return KeyRing(keys={RECOVERY_KID: kek})
 
 
 class TestMultipartStateManager:
@@ -666,7 +674,10 @@ class TestReconstructUploadStateFromS3:
 
         # Mock the internal upload state object containing wrapped DEK
         # load_upload_state calls get_object on the internal key
-        wrapped_dek_data = {"dek": base64.b64encode(b"wrapped-dek-data").decode()}
+        wrapped_dek_data = {
+            "dek": base64.b64encode(b"wrapped-dek-data").decode(),
+            "kid": RECOVERY_KID,
+        }
 
         async def mock_read():
             return json.dumps(wrapped_dek_data).encode()
@@ -693,7 +704,7 @@ class TestReconstructUploadStateFromS3:
         # Mock the crypto.unwrap_key to return the original DEK
         with patch("s3proxy.crypto.unwrap_key", return_value=original_dek):
             state = await reconstruct_upload_state_from_s3(
-                mock_client, "bucket", "key", "upload-123", kek
+                mock_client, "bucket", "key", "upload-123", _single_key_ring(kek)
             )
 
         # Verify state was reconstructed correctly
@@ -731,7 +742,7 @@ class TestReconstructUploadStateFromS3:
         mock_client.get_object = AsyncMock(side_effect=Exception("NoSuchKey"))
 
         state = await reconstruct_upload_state_from_s3(
-            mock_client, "bucket", "key", "upload-123", kek
+            mock_client, "bucket", "key", "upload-123", _single_key_ring(kek)
         )
 
         assert state is None
@@ -744,7 +755,10 @@ class TestReconstructUploadStateFromS3:
         kek = b"k" * 32
 
         # Mock successful DEK retrieval
-        wrapped_dek_data = {"dek": base64.b64encode(b"wrapped-dek-data").decode()}
+        wrapped_dek_data = {
+            "dek": base64.b64encode(b"wrapped-dek-data").decode(),
+            "kid": RECOVERY_KID,
+        }
 
         async def mock_read():
             return json.dumps(wrapped_dek_data).encode()
@@ -758,7 +772,7 @@ class TestReconstructUploadStateFromS3:
 
         with patch("s3proxy.crypto.unwrap_key", return_value=original_dek):
             state = await reconstruct_upload_state_from_s3(
-                mock_client, "bucket", "key", "upload-123", kek
+                mock_client, "bucket", "key", "upload-123", _single_key_ring(kek)
             )
 
         assert state is None
@@ -771,7 +785,10 @@ class TestReconstructUploadStateFromS3:
         kek = b"k" * 32
 
         # Mock successful DEK retrieval
-        wrapped_dek_data = {"dek": base64.b64encode(b"wrapped-dek-data").decode()}
+        wrapped_dek_data = {
+            "dek": base64.b64encode(b"wrapped-dek-data").decode(),
+            "kid": RECOVERY_KID,
+        }
 
         async def mock_read():
             return json.dumps(wrapped_dek_data).encode()
@@ -785,7 +802,7 @@ class TestReconstructUploadStateFromS3:
 
         with patch("s3proxy.crypto.unwrap_key", return_value=original_dek):
             state = await reconstruct_upload_state_from_s3(
-                mock_client, "bucket", "key", "upload-123", kek
+                mock_client, "bucket", "key", "upload-123", _single_key_ring(kek)
             )
 
         assert state is not None

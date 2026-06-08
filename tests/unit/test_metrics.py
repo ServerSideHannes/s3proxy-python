@@ -268,7 +268,6 @@ class TestMetricsEndpoint:
 
         settings = Settings(
             host="http://localhost:9000",
-            encrypt_key="test-encryption-key-32bytes!!!!",
             region="us-east-1",
             no_tls=True,
             port=4433,

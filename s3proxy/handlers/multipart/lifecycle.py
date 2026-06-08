@@ -47,9 +47,7 @@ class LifecycleMixin(BaseHandler):
             context=context,
         )
 
-        state = await reconstruct_upload_state_from_s3(
-            client, bucket, key, upload_id, self.settings.kek
-        )
+        state = await reconstruct_upload_state_from_s3(client, bucket, key, upload_id, self.keyring)
         if not state:
             raise S3Error.no_such_upload(upload_id)
 
@@ -75,12 +73,14 @@ class LifecycleMixin(BaseHandler):
             cache_control = request.headers.get("cache-control")
             expires = request.headers.get("expires")
 
+            kid, kek = self.keyring.key_for(client.credentials.access_key)
             dek = crypto.generate_dek()
-            wrapped_dek = crypto.wrap_key(dek, self.settings.kek)
+            wrapped_dek = crypto.wrap_key(dek, kek)
 
             # Build metadata (include user's x-amz-meta-*)
             upload_metadata = {
                 self.settings.dektag_name: base64.b64encode(wrapped_dek).decode(),
+                self.settings.kidtag_name: kid,
             }
             for hdr, val in request.headers.items():
                 if hdr.lower().startswith("x-amz-meta-"):
@@ -98,12 +98,12 @@ class LifecycleMixin(BaseHandler):
             upload_id = resp["UploadId"]
 
             # Store state in Redis/memory first, then persist to S3 as backup
-            await self.multipart_manager.create_upload(bucket, key, upload_id, dek)
+            await self.multipart_manager.create_upload(bucket, key, upload_id, dek, kid)
 
             # Persist DEK to S3 as backup - retry once on failure
             for attempt in range(2):
                 try:
-                    await persist_upload_state(client, bucket, key, upload_id, wrapped_dek)
+                    await persist_upload_state(client, bucket, key, upload_id, wrapped_dek, kid)
                     break
                 except Exception as e:
                     if attempt == 0:
@@ -177,17 +177,25 @@ class LifecycleMixin(BaseHandler):
             # Order matters: if metadata save fails, state is preserved
             # so the upload can be retried. Deleting state first would
             # lose the DEK, making the object permanently undecryptable.
-            wrapped_dek = crypto.wrap_key(state.dek, self.settings.kek)
+            # Prefer the kid recorded when the upload was created; if the state
+            # predates it (e.g. older recovered state), fall back to the
+            # completing credential's key.
+            if state.kid:
+                kid, kek = state.kid, self.keyring.key_by_id(state.kid)
+            else:
+                kid, kek = self.keyring.key_for(creds.access_key)
+            wrapped_dek = crypto.wrap_key(state.dek, kek)
             await save_multipart_metadata(
                 client,
                 bucket,
                 key,
                 MultipartMetadata(
-                    version=1,
+                    version=2,
                     part_count=len(completed_parts),
                     total_plaintext_size=total_plaintext,
                     parts=completed_parts,
                     wrapped_dek=wrapped_dek,
+                    kid=kid,
                 ),
             )
             await delete_upload_state(client, bucket, key, upload_id)
@@ -223,8 +231,8 @@ class LifecycleMixin(BaseHandler):
             """Convert internal part number to client part number."""
             return ((internal_part_number - 1) // MAX_INTERNAL_PARTS_PER_CLIENT) + 1
 
-        dek = await load_upload_state(client, bucket, key, upload_id, self.settings.kek)
-        if not dek:
+        state_data = await load_upload_state(client, bucket, key, upload_id)
+        if not state_data:
             # Check if upload exists in S3 before returning NoSuchUpload
             try:
                 await client.list_parts(bucket, key, upload_id, max_parts=1)
@@ -241,7 +249,9 @@ class LifecycleMixin(BaseHandler):
                 pass
             raise S3Error.no_such_upload(upload_id)
 
-        state = await self.multipart_manager.create_upload(bucket, key, upload_id, dek)
+        wrapped_dek, kid = state_data
+        dek = crypto.unwrap_key(wrapped_dek, self.keyring.key_by_id(kid))
+        state = await self.multipart_manager.create_upload(bucket, key, upload_id, dek, kid)
 
         try:
             parts_resp = await client.list_parts(bucket, key, upload_id)
