@@ -41,13 +41,14 @@ helm install s3proxy oci://ghcr.io/serversidehannes/s3proxy-python/charts/s3prox
 | `admin.ingress.host` | `""` | Hostname for the dashboard (required when enabled) |
 | `admin.ingress.annotations` | `{}` | Annotations (e.g. IP allowlist) for the admin Ingress |
 | `admin.ingress.tls` | `[]` | TLS config for the admin Ingress |
-| `redis-ha.enabled` | `true` | Deploy embedded Redis HA |
-| `redis-ha.replicas` | `1` | Redis replicas |
-| `redis-ha.auth` | `false` | Enable Redis auth |
-| `redis-ha.haproxy.enabled` | `true` | Deploy HAProxy for Redis |
-| `redis-ha.persistentVolume.enabled` | `true` | Persistent storage |
-| `redis-ha.persistentVolume.size` | `10Gi` | Volume size |
-| `externalRedis.url` | `""` | External Redis URL |
+| `redis.enabled` | `true` | Deploy the bundled single Redis pod (transient upload state) |
+| `redis.image.repository` | `redis` | Redis image (bump manually; not tracked by dependabot) |
+| `redis.image.tag` | `7-alpine` | Redis image tag |
+| `redis.auth.enabled` | `false` | Require a password on the bundled Redis |
+| `redis.auth.password` | `""` | Password (when auth enabled and no existingSecret) |
+| `redis.auth.existingSecret` | `""` | Use a pre-created Secret for the Redis password |
+| `redis.auth.passwordKey` | `redis-password` | Key name in the Redis password Secret |
+| `externalRedis.url` | `""` | External Redis URL (used when `redis.enabled=false`) |
 | `externalRedis.uploadTtlHours` | `24` | Upload state TTL |
 | `externalRedis.existingSecret` | `""` | K8s secret with Redis password |
 | `externalRedis.passwordKey` | `redis-password` | Key name in Redis secret |

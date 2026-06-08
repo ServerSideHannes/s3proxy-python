@@ -148,8 +148,20 @@ def test_haproxy_config_balances_and_scales_with_replicas(chart_dir):
     cfg = cm["data"]["haproxy.cfg"]
     assert "balance leastconn" in cfg
     # per-request balancing across all pods via the headless Service
-    assert "server-template pod 1-5 s3proxy-python-headless:4433" in cfg
+    assert "server-template pod 1-5 " in cfg
     assert "parse-resolv-conf" in cfg
+
+
+def test_haproxy_backend_uses_fqdn(chart_dir):
+    """Regression: HAProxy's resolver ignores /etc/resolv.conf search domains, so
+    the server-template MUST target the FQDN. A bare name NXDOMAINs -> 0 backends
+    -> every request 503s with <NOSRV> (which is exactly what broke postgres e2e)."""
+    docs = render(chart_dir, "frontproxy.enabled=true")
+    cfg = by_kind_name(docs, "ConfigMap", "s3proxy-python-frontproxy")["data"]["haproxy.cfg"]
+    # default release namespace in `helm template` is "default"
+    assert "s3proxy-python-headless.default.svc.cluster.local:4433" in cfg
+    # and never the bare service name (would resolve to nothing in HAProxy)
+    assert "headless:4433" not in cfg
 
 
 def test_frontproxy_replicas_and_pdb(chart_dir):

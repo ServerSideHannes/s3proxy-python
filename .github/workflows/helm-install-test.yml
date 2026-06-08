@@ -71,58 +71,6 @@ jobs:
           EOF
           kubectl wait --for=condition=ready pod -l app=minio -n s3proxy --timeout=120s
 
-      - name: Deploy Redis with password
-        run: |
-          # Create Redis password secret
-          kubectl create secret generic redis-secret \
-            --from-literal=redis-password=testredispassword123 \
-            -n s3proxy
-
-          cat <<EOF | kubectl apply -n s3proxy -f -
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: redis
-          spec:
-            replicas: 1
-            selector:
-              matchLabels:
-                app: redis
-            template:
-              metadata:
-                labels:
-                  app: redis
-              spec:
-                containers:
-                - name: redis
-                  image: redis:7-alpine
-                  command: ["redis-server"]
-                  args: ["--requirepass", "\$(REDIS_PASSWORD)"]
-                  env:
-                  - name: REDIS_PASSWORD
-                    valueFrom:
-                      secretKeyRef:
-                        name: redis-secret
-                        key: redis-password
-                  ports:
-                  - containerPort: 6379
-                  resources:
-                    limits:
-                      memory: 128Mi
-                      cpu: 100m
-          ---
-          apiVersion: v1
-          kind: Service
-          metadata:
-            name: redis
-          spec:
-            selector:
-              app: redis
-            ports:
-            - port: 6379
-          EOF
-          kubectl wait --for=condition=ready pod -l app=redis -n s3proxy --timeout=120s
-
       - name: Create K8s Image Pull Secret & Patch Namespace
         run: |
           # 1. Create the secret using the workflow token
@@ -150,10 +98,9 @@ jobs:
             --set secrets.credentials[0].accessKey=minioadmin \
             --set secrets.credentials[0].secretKey=minioadmin \
             --set secrets.credentials[0].kek=test-encryption-key-for-ci \
-            --set redis-ha.enabled=false \
-            --set externalRedis.url="redis://redis:6379/0" \
-            --set externalRedis.existingSecret=redis-secret \
-            --set externalRedis.passwordKey=redis-password \
+            --set redis.enabled=true \
+            --set redis.auth.enabled=true \
+            --set redis.auth.password=testredispassword123 \
             --set admin.enabled=true \
             --set admin.secret=test-admin-secret-for-ci \
             --set frontproxy.enabled=true \
