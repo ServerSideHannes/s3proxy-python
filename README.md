@@ -130,7 +130,6 @@ A request signed by an access key with no configured KEK is rejected. Via Helm: 
 | `secrets.credentials` | `[]` | AWS credentials, each `{accessKey, secretKey, kek}` |
 | `secrets.existingSecrets.enabled` | `false` | Use existing K8s secret |
 | `dashboard.enabled` | `false` | Enable the dashboard API + its separate UI deployment |
-| `dashboard.secret` | `change-me` | Secret signing dashboard session cookies (when the dashboard is on) |
 | `redis.enabled` | `true` | Deploy the bundled single Redis pod (transient upload state) |
 | `frontproxy.enabled` | `false` | Bundled HAProxy for even load distribution (no external dependency) |
 | `ingress.enabled` | `false` | Expose S3 outside the cluster via Ingress (requires `frontproxy.enabled`) |
@@ -174,15 +173,37 @@ Yes. The proxy verifies the presigned signature, then makes its own authenticate
 - [ ] Key rotation (re-encrypt objects with a new master key)
 - [x] Multiple AWS credential pairs (per-client auth)
 - [x] Per-credential encryption keys
+- [x] Web dashboard (Svelte UI, live stats, request logs)
 - [ ] S3 Select passthrough
 - [ ] Ceph S3 compatibility > 80%
 - [ ] Batch re-encryption CLI tool
 - [ ] Audit logging (who accessed what, when)
-- [ ] Web dashboard for key & upload status
 
 ---
 
 ## Changelog
+
+### 2026.6.0
+
+#### New features
+
+- **Per-credential encryption keys** — each credential has its own KEK. A compromised key exposes only that credential's data. The encrypting access key is stored in object metadata (`isec-kid`), so decryption always uses the right key even after credential rotation.
+- **Bundled HAProxy front proxy** — set `frontproxy.enabled=true` to add a self-contained HAProxy that balances per-request (L7) across all s3proxy replicas. No ingress controller needed. Includes a PDB and optional external Ingress.
+- **Bundled Redis** — replaces the `redis-ha` Helm dependency with a single lightweight Redis pod (default on). Use `externalRedis.url` to point at your own HA Redis instead.
+- **Svelte admin dashboard** — `dashboard.enabled=true` now deploys a separate `dashboard-frontend` pod (compiled Svelte SPA). Shows cluster-wide request stats, per-bucket and per-object views, paginated request logs, sparkline charts, and an encryption status panel.
+- **Redis-backed dashboard sessions** — session tokens are stored in Redis instead of signed cookies. Sessions invalidate cluster-wide on logout.
+
+#### Upgrading from 2026.2.0
+
+**`dashboard.secret` / `S3PROXY_DASHBOARD_SECRET` removed.** If you were setting either, remove them — they are no longer read. Sessions are now backed by Redis (which is already required), so no replacement value is needed.
+
+**`redis-ha` dependency dropped.** The chart no longer pulls in the `redis-ha` sub-chart. If you were passing `redis-ha.*` values, remove them. The bundled Redis is controlled by `redis.*` (see [chart/README.md](chart/README.md)).
+
+**Dashboard is now a separate Deployment.** When `dashboard.enabled=true`, the chart creates a second Deployment (`dashboard-frontend`) and a second Service. If you previously exposed the dashboard via a custom Ingress pointing at the s3proxy Service, update it to point at the `dashboard-frontend` Service instead (or use `dashboard.ingress.enabled=true`).
+
+Everything else is backwards-compatible. Existing encrypted objects are unaffected.
+
+---
 
 ### 2026.2.0
 
