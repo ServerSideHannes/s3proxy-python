@@ -153,7 +153,10 @@ async def handle_proxy_request(
         REQUEST_DURATION.labels(method=method, operation=operation).observe(duration)
 
         try:
-            size = int(request.headers.get("content-length", "0"))
+            if method == "GET" and response is not None:
+                size = int(response.headers.get("content-length", "0"))
+            else:
+                size = int(request.headers.get("content-length", "0"))
         except ValueError:
             size = 0
         client_ip = request.client.host if request.client else ""
