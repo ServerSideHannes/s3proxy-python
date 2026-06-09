@@ -160,5 +160,4 @@
       {/if}
     </tbody>
   </table>
-  {@render pager()}
 </section>

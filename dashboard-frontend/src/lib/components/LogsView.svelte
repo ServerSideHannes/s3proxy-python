@@ -105,6 +105,9 @@
     </select>
     <span class="logs-count">{countText}</span>
   </div>
+  {#if data}
+    <Pager total={data.total} pageSize={LIMIT} offset={data.offset} onGo={goOffset} />
+  {/if}
   <div class="scroll-x">
     <table>
       <thead>
@@ -146,7 +149,4 @@
       </tbody>
     </table>
   </div>
-  {#if data}
-    <Pager total={data.total} pageSize={LIMIT} offset={data.offset} onGo={goOffset} />
-  {/if}
 </section>
