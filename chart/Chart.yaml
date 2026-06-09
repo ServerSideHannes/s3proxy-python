@@ -2,5 +2,5 @@ apiVersion: v2
 name: s3proxy-python
 description: Transparent S3 encryption proxy with AES-256-GCM
 type: application
-version: 2026.2.0
-appVersion: "2026.2.0"
+version: 2026.6.0
+appVersion: "2026.6.0"
