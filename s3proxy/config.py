@@ -1,7 +1,5 @@
 """Configuration management for S3Proxy."""
 
-import hashlib
-
 from pydantic import BaseModel, Field, PrivateAttr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -71,7 +69,7 @@ class Settings(BaseSettings):
         default=24, description="TTL for upload state in Redis (hours)"
     )
 
-    # Admin stats store (Redis-backed cluster-wide dashboard state). Only used
+    # Dashboard stats store (Redis-backed cluster-wide dashboard state). Only used
     # when Redis is configured; single-instance mode keeps per-pod in-memory.
     request_log_cap: int = Field(
         default=10000, description="Max request-log entries kept in the Redis capped list"
@@ -89,15 +87,16 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = Field(default="INFO", description="Log level (DEBUG, INFO, WARNING, ERROR)")
 
-    # Admin dashboard
-    admin_ui: bool = Field(default=False, description="Enable the admin dashboard at admin_path")
-    admin_path: str = Field(default="/admin", description="URL path prefix for the admin UI")
-    admin_username: str = Field(default="", description="Admin dashboard username")
-    admin_password: str = Field(default="", description="Admin dashboard password")
-    admin_secret: str = Field(
-        default="",
-        description="Stable secret for signing admin session cookies (required when admin_ui)",
+    # Dashboard. The proxy serves the dashboard API + auth under dashboard_path;
+    # the UI is a Svelte static build served by its own deployment.
+    dashboard_ui: bool = Field(
+        default=False, description="Enable the dashboard API at dashboard_path"
     )
+    dashboard_path: str = Field(
+        default="/dashboard", description="URL path prefix for the dashboard API"
+    )
+    dashboard_username: str = Field(default="", description="Dashboard username")
+    dashboard_password: str = Field(default="", description="Dashboard password")
 
     # Cached KeyRing + credentials store (computed once in model_post_init).
     _keyring: KeyRing = PrivateAttr()
@@ -112,14 +111,6 @@ class Settings(BaseSettings):
             self._credentials_store[entry.access_key] = entry.secret_key
             keys[entry.access_key] = derive_kek(entry.kek)
         self._keyring = KeyRing(keys=keys)
-
-        if self.admin_ui and not self.admin_secret:
-            raise ValueError("S3PROXY_ADMIN_SECRET is required when the admin dashboard is enabled")
-
-    @property
-    def admin_session_secret(self) -> bytes:
-        """Stable 32-byte secret for signing admin session cookies."""
-        return hashlib.sha256(b"s3proxy-admin-session|" + self.admin_secret.encode()).digest()
 
     @property
     def keyring(self) -> KeyRing:

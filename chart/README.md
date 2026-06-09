@@ -27,20 +27,23 @@ helm install s3proxy oci://ghcr.io/serversidehannes/s3proxy-python/charts/s3prox
 | `secrets.existingSecrets.enabled` | `false` | Use pre-created K8s secret |
 | `secrets.existingSecrets.name` | `""` | Existing secret name |
 | `secrets.existingSecrets.keys.credentials` | `S3PROXY_CREDENTIALS` | Credentials key name in existing secret |
-| `admin.enabled` | `false` | Enable the admin dashboard |
-| `admin.path` | `/admin` | URL path prefix for the dashboard |
-| `admin.username` | `admin` | Dashboard username (stored in the Secret; override in production) |
-| `admin.password` | `admin` | Dashboard password (stored in the Secret; override in production) |
-| `admin.secret` | `change-me` | Secret signing dashboard session cookies (override in production) |
-| `admin.existingSecret.name` | `""` | Pre-created secret holding admin credentials |
-| `admin.existingSecret.usernameKey` | `S3PROXY_ADMIN_USERNAME` | Username key in the existing secret |
-| `admin.existingSecret.passwordKey` | `S3PROXY_ADMIN_PASSWORD` | Password key in the existing secret |
-| `admin.existingSecret.secretKey` | `S3PROXY_ADMIN_SECRET` | Session-secret key in the existing secret |
-| `admin.ingress.enabled` | `false` | Dedicated Ingress for the dashboard (keep off unless intentionally exposing it) |
-| `admin.ingress.className` | `""` | Ingress class for the admin Ingress (set to your cluster's controller) |
-| `admin.ingress.host` | `""` | Hostname for the dashboard (required when enabled) |
-| `admin.ingress.annotations` | `{}` | Annotations (e.g. IP allowlist) for the admin Ingress |
-| `admin.ingress.tls` | `[]` | TLS config for the admin Ingress |
+| `dashboard.enabled` | `false` | Enable the dashboard |
+| `dashboard.path` | `/dashboard` | URL path prefix for the dashboard |
+| `dashboard.username` | `admin` | Dashboard username (stored in the Secret; override in production) |
+| `dashboard.password` | `admin` | Dashboard password (stored in the Secret; override in production) |
+| `dashboard.frontend.enabled` | `true` | Run the Svelte UI as its own Deployment (nginx serving the static build + reverse-proxying the API) |
+| `dashboard.frontend.image.repository` | `ghcr.io/serversidehannes/s3proxy-dashboard` | Dashboard UI image |
+| `dashboard.frontend.image.tag` | `latest` | Dashboard UI image tag |
+| `dashboard.frontend.replicaCount` | `1` | Dashboard UI replicas |
+| `dashboard.frontend.service.port` | `80` | Dashboard Service port |
+| `dashboard.existingSecret.name` | `""` | Pre-created secret holding dashboard credentials |
+| `dashboard.existingSecret.usernameKey` | `S3PROXY_DASHBOARD_USERNAME` | Username key in the existing secret |
+| `dashboard.existingSecret.passwordKey` | `S3PROXY_DASHBOARD_PASSWORD` | Password key in the existing secret |
+| `dashboard.ingress.enabled` | `false` | Dedicated Ingress for the dashboard (keep off unless intentionally exposing it) |
+| `dashboard.ingress.className` | `""` | Ingress class for the dashboard Ingress (set to your cluster's controller) |
+| `dashboard.ingress.host` | `""` | Hostname for the dashboard (required when enabled) |
+| `dashboard.ingress.annotations` | `{}` | Annotations (e.g. IP allowlist) for the dashboard Ingress |
+| `dashboard.ingress.tls` | `[]` | TLS config for the dashboard Ingress |
 | `redis.enabled` | `true` | Deploy the bundled single Redis pod (transient upload state) |
 | `redis.image.repository` | `redis` | Redis image (bump manually; not tracked by dependabot) |
 | `redis.image.tag` | `7-alpine` | Redis image tag |

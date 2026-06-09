@@ -64,12 +64,18 @@ def create_lifespan(settings: Settings, credentials_store: dict[str, str]) -> As
             ttl_seconds=settings.redis_upload_ttl_seconds,
         )
 
-        # Admin stats store — Redis-backed (cluster-wide) when Redis is
+        # Dashboard stats store — Redis-backed (cluster-wide) when Redis is
         # configured, else per-pod in-memory. Mirrors create_state_store().
-        from .admin.stats_store import create_stats_store, set_store
+        from .dashboard.stats_store import create_stats_store, set_store
 
         stats_store = create_stats_store(settings)
         set_store(stats_store)  # used by the synchronous record_request path
+
+        if settings.dashboard_ui:
+            from .dashboard.auth import RedisSessionStore
+            from .state.redis import get_redis
+
+            app.state.session_store = RedisSessionStore(get_redis())
 
         # Create handler and verifier with properly initialized manager
         verifier = SigV4Verifier(credentials_store)
@@ -108,12 +114,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     _register_exception_handlers(app)
 
-    if settings.admin_ui:
-        from .admin import create_admin_router
+    if settings.dashboard_ui:
+        from .dashboard import create_dashboard_router
 
         app.include_router(
-            create_admin_router(settings, credentials_store),
-            prefix=settings.admin_path,
+            create_dashboard_router(settings, credentials_store),
+            prefix=settings.dashboard_path,
         )
 
     _register_routes(app)
@@ -128,7 +134,7 @@ def _register_exception_handlers(app: FastAPI) -> None:
     async def s3_exception_handler(request: Request, exc: HTTPException):
         """Return S3-compatible error response with request ID.
 
-        Non-S3 exceptions that carry their own headers (e.g. admin auth 401 with
+        Non-S3 exceptions that carry their own headers (e.g. dashboard auth 401 with
         WWW-Authenticate) are passed through so browsers can prompt for credentials.
         """
         if not isinstance(exc, S3Error) and getattr(exc, "headers", None):
@@ -177,7 +183,7 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/favicon.ico")
     async def favicon() -> Response:
         # Silence browser favicon probes so they don't fall through to the
-        # S3 catch-all and pollute the admin activity feed as a "bucket".
+        # S3 catch-all and pollute the dashboard activity feed as a "bucket".
         return Response(status_code=204)
 
     @app.get("/metrics")

@@ -1,4 +1,4 @@
-"""Tests for the admin dashboard."""
+"""Tests for the dashboard."""
 
 from __future__ import annotations
 
@@ -8,45 +8,43 @@ import pytest
 from fastapi.testclient import TestClient
 
 from s3proxy import metrics
-from s3proxy.admin import collectors, record_request
-from s3proxy.admin.auth import AdminCredentials, create_auth_dependency
-from s3proxy.admin.router import create_admin_router
-from s3proxy.admin.stats_store import (
+from s3proxy.config import Settings
+from s3proxy.dashboard import collectors, record_request
+from s3proxy.dashboard.auth import DashboardCredentials, create_auth_dependency
+from s3proxy.dashboard.router import create_dashboard_router
+from s3proxy.dashboard.stats_store import (
     MemoryStatsStore,
     RedisStatsStore,
     RequestSample,
     bucket_series,
     set_store,
 )
-from s3proxy.admin.templates import render_dashboard
-from s3proxy.config import Settings
 
 
 @pytest.fixture
-def admin_settings():
+def dashboard_settings():
     return Settings(
         host="http://localhost:9000",
-        admin_ui=True,
-        admin_username="admin",
-        admin_password="secret",
-        admin_secret="test-admin-secret",
+        dashboard_ui=True,
+        dashboard_username="creds",
+        dashboard_password="secret",
         credentials=[{"access_key": "AKIA-TEST", "secret_key": "s", "kek": "k"}],
     )
 
 
 @pytest.fixture
-def mem_store(admin_settings):
+def mem_store(dashboard_settings):
     """A fresh per-pod in-memory store, registered as the global record target."""
-    store = MemoryStatsStore(admin_settings)
+    store = MemoryStatsStore(dashboard_settings)
     set_store(store)
     yield store
     set_store(None)
 
 
 @pytest.fixture
-def redis_store(admin_settings, mock_redis):
+def redis_store(dashboard_settings, mock_redis):
     """A Redis-backed store on fakeredis, registered as the global target."""
-    store = RedisStatsStore(mock_redis, admin_settings)
+    store = RedisStatsStore(mock_redis, dashboard_settings)
     set_store(store)
     yield store
     set_store(None)
@@ -71,7 +69,7 @@ async def test_record_request_splits_bucket_and_key(mem_store) -> None:
     assert e.client_ip == "10.0.0.1"
 
 
-async def test_collect_all_builds_expected_sections(admin_settings, mem_store) -> None:
+async def test_collect_all_builds_expected_sections(dashboard_settings, mem_store) -> None:
     await record_request(
         "PUT", "/customer-data/invoice.pdf", "PutObject", 200, 0.05, 2048, "10.0.0.1"
     )
@@ -79,7 +77,7 @@ async def test_collect_all_builds_expected_sections(admin_settings, mem_store) -
 
     start = time.monotonic() - 120  # 2 minutes
     data = await collectors.collect_all(
-        mem_store, admin_settings, start_time=start, version="9.9.9"
+        mem_store, dashboard_settings, start_time=start, version="9.9.9"
     )
 
     assert data["header"]["title"] == "S3 Encryption Proxy"
@@ -104,18 +102,18 @@ async def test_collect_all_builds_expected_sections(admin_settings, mem_store) -
     assert data["footer"]["version"] == "9.9.9"
 
 
-async def test_activity_timestamp_is_absolute(admin_settings, mem_store) -> None:
+async def test_activity_timestamp_is_absolute(dashboard_settings, mem_store) -> None:
     await record_request("GET", "/b/k", "GetObject", 200, 0.01, 1, "10.0.0.1")
-    data = await collectors.collect_all(mem_store, admin_settings, start_time=time.monotonic())
+    data = await collectors.collect_all(mem_store, dashboard_settings, start_time=time.monotonic())
     row = data["activity"][0]
     # Absolute "YYYY-MM-DD HH:MM:SS" primary display; relative kept as a tooltip.
     assert row["time"][:2] == "20" and row["time"][4] == "-" and ":" in row["time"]
     assert row["time_relative"].endswith("ago")
 
 
-async def test_collector_does_not_crash_on_empty_metrics(admin_settings, mem_store) -> None:
+async def test_collector_does_not_crash_on_empty_metrics(dashboard_settings, mem_store) -> None:
     """collect_all must work even before any request has been recorded."""
-    data = await collectors.collect_all(mem_store, admin_settings, start_time=time.monotonic())
+    data = await collectors.collect_all(mem_store, dashboard_settings, start_time=time.monotonic())
     expected = f"{int(collectors._read_labeled_counter_sum(metrics.REQUEST_COUNT)):,}"
     assert data["cards"]["requests"]["value"] == expected
     assert data["activity"] == []
@@ -154,9 +152,9 @@ async def test_redis_store_records_and_paginates(redis_store) -> None:
     assert page3["has_more"] is False
 
 
-async def test_redis_store_caps_the_log(admin_settings, mock_redis) -> None:
-    admin_settings.request_log_cap = 5
-    store = RedisStatsStore(mock_redis, admin_settings)
+async def test_redis_store_caps_the_log(dashboard_settings, mock_redis) -> None:
+    dashboard_settings.request_log_cap = 5
+    store = RedisStatsStore(mock_redis, dashboard_settings)
     for i in range(20):
         await store.record(
             RequestSample(time.time(), "GET", "GetObject", "b", f"k{i}", 200, 1.0, 1, "ip")
@@ -164,7 +162,7 @@ async def test_redis_store_caps_the_log(admin_settings, mock_redis) -> None:
     total = await mock_redis.llen("s3proxy:stats:reqlog")
     assert total == 5
     ttl = await mock_redis.ttl("s3proxy:stats:reqlog")
-    assert 0 < ttl <= admin_settings.request_log_ttl_seconds
+    assert 0 < ttl <= dashboard_settings.request_log_ttl_seconds
 
 
 async def test_redis_store_filter_pagination(redis_store) -> None:
@@ -199,14 +197,14 @@ def _sample(method="GET", status=200, size=0, dur_ms=10.0):
     )
 
 
-async def test_redis_store_cluster_wide_aggregate(admin_settings, mock_redis) -> None:
+async def test_redis_store_cluster_wide_aggregate(dashboard_settings, mock_redis) -> None:
     """Counters are written per-request by record() so they sum across pods.
 
     Two store instances on the same Redis simulate two replicas — the aggregate
     must reflect both, regardless of which pod serves the dashboard.
     """
-    pod_a = RedisStatsStore(mock_redis, admin_settings)
-    pod_b = RedisStatsStore(mock_redis, admin_settings)
+    pod_a = RedisStatsStore(mock_redis, dashboard_settings)
+    pod_b = RedisStatsStore(mock_redis, dashboard_settings)
 
     # pod A handles 7 GET + 3 PUT (one PUT errors 500), pod B handles 5 GET (one 404)
     for _ in range(7):
@@ -229,9 +227,9 @@ async def test_redis_store_cluster_wide_aggregate(admin_settings, mock_redis) ->
     assert agg.bytes_decrypted == 7 * 100 + 5 * 50
 
 
-async def test_redis_store_latency_is_cluster_wide(admin_settings, mock_redis) -> None:
-    pod_a = RedisStatsStore(mock_redis, admin_settings)
-    pod_b = RedisStatsStore(mock_redis, admin_settings)
+async def test_redis_store_latency_is_cluster_wide(dashboard_settings, mock_redis) -> None:
+    pod_a = RedisStatsStore(mock_redis, dashboard_settings)
+    pod_b = RedisStatsStore(mock_redis, dashboard_settings)
     for _ in range(10):
         await pod_a.record(_sample(dur_ms=5.0))  # 0.005s bucket
     for _ in range(10):
@@ -293,82 +291,62 @@ async def test_redis_throughput_split_by_direction(redis_store) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_render_dashboard_injects_api_url() -> None:
-    html = render_dashboard(admin_path="/ops")
-    assert '"/ops/api/status"' in html
-    assert '"/ops/api/series"' in html
-    assert "__API_URL__" not in html
-    assert "__SERIES_URL__" not in html
-
-
 def _make_app(settings: Settings, store=None):
     from fastapi import FastAPI
 
     app = FastAPI()
-    router = create_admin_router(settings, credentials_store={}, version="1.2.3")
-    app.include_router(router, prefix=settings.admin_path)
+    router = create_dashboard_router(settings, credentials_store={}, version="1.2.3")
+    app.include_router(router, prefix=settings.dashboard_path)
     app.state.settings = settings
     app.state.start_time = time.monotonic()
     app.state.stats_store = store or MemoryStatsStore(settings)
+    from s3proxy.dashboard.auth import RedisSessionStore
+    from s3proxy.state.redis import get_redis
+
+    app.state.session_store = RedisSessionStore(get_redis())
     return app
 
 
-def test_dashboard_redirects_to_login_without_auth(admin_settings) -> None:
-    client = TestClient(_make_app(admin_settings), follow_redirects=False)
-    r = client.get("/admin/")
+def test_status_api_redirects_unauthenticated_to_401(dashboard_settings) -> None:
+    client = TestClient(_make_app(dashboard_settings), follow_redirects=False)
+    r = client.get("/dashboard/api/status")
+    assert r.status_code == 401
+
+
+def test_login_post_sets_cookie_and_redirects(dashboard_settings) -> None:
+    client = TestClient(_make_app(dashboard_settings), follow_redirects=False)
+    r = client.post("/dashboard/api/login", data={"username": "creds", "password": "secret"})
     assert r.status_code == 303
-    assert r.headers["location"].endswith("/admin/login")
-
-
-def test_dashboard_html_served_with_basic_auth(admin_settings) -> None:
-    client = TestClient(_make_app(admin_settings))
-    r = client.get("/admin/", auth=("admin", "secret"))
-    assert r.status_code == 200
-    assert "S3 Encryption Proxy" in r.text
-    assert "Recent Activity" in r.text
-
-
-def test_login_page_renders(admin_settings) -> None:
-    client = TestClient(_make_app(admin_settings))
-    r = client.get("/admin/login")
-    assert r.status_code == 200
-    assert "Sign in to the admin dashboard" in r.text
-
-
-def test_login_post_sets_cookie_and_redirects(admin_settings) -> None:
-    client = TestClient(_make_app(admin_settings), follow_redirects=False)
-    r = client.post("/admin/login", data={"username": "admin", "password": "secret"})
-    assert r.status_code == 303
-    assert r.headers["location"].endswith("/admin/")
+    assert r.headers["location"].endswith("/dashboard/")
     assert "s3proxy_session=" in r.headers.get("set-cookie", "")
 
 
-def test_login_post_rejects_bad_credentials(admin_settings) -> None:
-    client = TestClient(_make_app(admin_settings), follow_redirects=False)
-    r = client.post("/admin/login", data={"username": "admin", "password": "wrong"})
+def test_login_post_rejects_bad_credentials(dashboard_settings) -> None:
+    client = TestClient(_make_app(dashboard_settings), follow_redirects=False)
+    r = client.post("/dashboard/api/login", data={"username": "creds", "password": "wrong"})
     assert r.status_code == 303
     assert "error=1" in r.headers["location"]
 
 
-def test_session_cookie_authenticates_dashboard(admin_settings) -> None:
-    client = TestClient(_make_app(admin_settings), follow_redirects=False)
-    r = client.post("/admin/login", data={"username": "admin", "password": "secret"})
+def test_session_cookie_authenticates_api(dashboard_settings) -> None:
+    client = TestClient(_make_app(dashboard_settings), follow_redirects=False)
+    r = client.post("/dashboard/api/login", data={"username": "creds", "password": "secret"})
     cookie = r.headers["set-cookie"].split(";")[0]
-    r2 = client.get("/admin/", headers={"Cookie": cookie})
+    r2 = client.get("/dashboard/api/status", headers={"Cookie": cookie})
     assert r2.status_code == 200
 
 
-def test_logout_clears_cookie(admin_settings) -> None:
-    client = TestClient(_make_app(admin_settings), follow_redirects=False)
-    r = client.get("/admin/logout")
+def test_logout_clears_cookie(dashboard_settings) -> None:
+    client = TestClient(_make_app(dashboard_settings), follow_redirects=False)
+    r = client.get("/dashboard/api/logout")
     assert r.status_code == 303
-    assert r.headers["location"].endswith("/admin/login")
+    assert r.headers["location"].endswith("/dashboard/login")
     assert "s3proxy_session=" in r.headers.get("set-cookie", "")
 
 
-def test_status_api_returns_expected_shape(admin_settings) -> None:
-    client = TestClient(_make_app(admin_settings))
-    r = client.get("/admin/api/status", auth=("admin", "secret"))
+def test_status_api_returns_expected_shape(dashboard_settings) -> None:
+    client = TestClient(_make_app(dashboard_settings))
+    r = client.get("/dashboard/api/status", auth=("creds", "secret"))
     assert r.status_code == 200
     payload = r.json()
     assert payload["header"]["status"] == "Running"
@@ -378,9 +356,9 @@ def test_status_api_returns_expected_shape(admin_settings) -> None:
         assert "breakdown" in payload["cards"][key]
 
 
-def test_series_api_returns_shape(admin_settings) -> None:
-    client = TestClient(_make_app(admin_settings))
-    r = client.get("/admin/api/series?metric=requests&range=3h", auth=("admin", "secret"))
+def test_series_api_returns_shape(dashboard_settings) -> None:
+    client = TestClient(_make_app(dashboard_settings))
+    r = client.get("/dashboard/api/series?metric=requests&range=3h", auth=("creds", "secret"))
     assert r.status_code == 200
     payload = r.json()
     assert payload["metric"] == "requests"
@@ -388,9 +366,9 @@ def test_series_api_returns_shape(admin_settings) -> None:
     assert "spark" in payload and "spark_times" in payload
 
 
-def test_throughput_api_returns_two_series(admin_settings) -> None:
-    client = TestClient(_make_app(admin_settings))
-    r = client.get("/admin/api/throughput?range=24h", auth=("admin", "secret"))
+def test_throughput_api_returns_two_series(dashboard_settings) -> None:
+    client = TestClient(_make_app(dashboard_settings))
+    r = client.get("/dashboard/api/throughput?range=24h", auth=("creds", "secret"))
     assert r.status_code == 200
     payload = r.json()
     assert payload["range"] == "24h"
@@ -400,42 +378,40 @@ def test_throughput_api_returns_two_series(admin_settings) -> None:
         assert "spark" in s and "spark_times" in s
 
 
-def test_logs_api_paginates(admin_settings) -> None:
-    client = TestClient(_make_app(admin_settings))
-    r = client.get("/admin/api/logs?limit=10&offset=0", auth=("admin", "secret"))
+def test_logs_api_paginates(dashboard_settings) -> None:
+    client = TestClient(_make_app(dashboard_settings))
+    r = client.get("/dashboard/api/logs?limit=10&offset=0", auth=("creds", "secret"))
     assert r.status_code == 200
     payload = r.json()
     for key in ("entries", "count", "offset", "limit", "total", "has_more", "operations"):
         assert key in payload
 
 
-def test_status_api_401_without_auth(admin_settings) -> None:
-    client = TestClient(_make_app(admin_settings))
-    r = client.get("/admin/api/status")
+def test_status_api_401_without_auth(dashboard_settings) -> None:
+    client = TestClient(_make_app(dashboard_settings))
+    r = client.get("/dashboard/api/status")
     assert r.status_code == 401
 
 
 def test_auth_uses_explicit_credentials_not_aws() -> None:
     settings = Settings(
         host="http://localhost:9000",
-        admin_ui=True,
-        admin_username="admin",
-        admin_password="admin",
-        admin_secret="test-admin-secret",
+        dashboard_ui=True,
+        dashboard_username="admin",
+        dashboard_password="admin",
     )
-    admin = AdminCredentials(settings, {"AKIAEXAMPLE": "secret-key"})
-    assert admin.valid("admin", "admin")
+    creds = DashboardCredentials(settings, {"AKIAEXAMPLE": "secret-key"})
+    assert creds.valid("admin", "admin")
     # The AWS access key / secret must NOT work as dashboard credentials.
-    assert not admin.valid("AKIAEXAMPLE", "secret-key")
+    assert not creds.valid("AKIAEXAMPLE", "secret-key")
 
 
 def test_auth_raises_when_credentials_blank() -> None:
     settings = Settings(
         host="http://localhost:9000",
-        admin_ui=True,
-        admin_username="",
-        admin_password="",
-        admin_secret="test-admin-secret",
+        dashboard_ui=True,
+        dashboard_username="",
+        dashboard_password="",
     )
     with pytest.raises(RuntimeError):
         create_auth_dependency(settings, {})

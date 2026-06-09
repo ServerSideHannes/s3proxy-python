@@ -1,4 +1,4 @@
-"""Stats store backends for the admin dashboard.
+"""Stats store backends for the dashboard.
 
 Mirrors the Strategy Pattern in ``state/storage.py``: a ``StatsStore`` ABC with
 an in-memory implementation (per-pod, the single-instance default) and a
@@ -311,7 +311,7 @@ class RedisStatsStore(StatsStore):
                 pipe.expire(self._k("reqlog"), self._log_ttl)
                 # Per-request cluster-wide counters — incremented on every pod for
                 # every request, so the dashboard totals are correct regardless of
-                # which pod serves the admin view (no per-pod Prometheus sampling).
+                # which pod serves the dashboard view (no per-pod Prometheus sampling).
                 c = self._k("counters")
                 pipe.hincrby(c, "requests", 1)
                 pipe.expire(c, self._stats_ttl)

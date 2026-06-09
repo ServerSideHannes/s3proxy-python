@@ -1,0 +1,200 @@
+import uPlot from 'uplot';
+import { formatNumber, formatTime, niceTicks } from './format';
+
+// uPlot configuration that reproduces the previous hand-rolled SVG chart:
+// blue 2px line over a vertical blue-fade area fill, nice Y ticks, HH:MM:SS X
+// labels, and a dark value/time tooltip following the cursor.
+
+const ACCENT = '#2563eb';
+const AXIS_FONT = '13px -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Helvetica, Arial, sans-serif';
+const AXIS_COLOR = '#6b7280';
+const GRID_COLOR = '#eef0f3';
+
+function areaFill(u: uPlot): CanvasGradient | string {
+  const ctx = u.ctx;
+  const { top, height } = u.bbox;
+  const g = ctx.createLinearGradient(0, top, 0, top + height);
+  g.addColorStop(0, 'rgba(37,99,235,0.22)');
+  g.addColorStop(1, 'rgba(37,99,235,0)');
+  return g;
+}
+
+// A value formatter for the Y axis + tooltip. Returns a fully-formatted string
+// INCLUDING any unit (e.g. "2.5 GB" or "1.3k req"), so the chart never appends
+// a unit itself — that's what produced "1.3B GB".
+export type ValueFormat = (v: number) => string;
+
+export interface ChartHandle {
+  setData(times: number[], values: number[], format: ValueFormat): void;
+  resize(): void;
+  destroy(): void;
+}
+
+function tooltipPlugin(fmt: () => ValueFormat): uPlot.Plugin {
+  let tip: HTMLDivElement;
+  return {
+    hooks: {
+      init: (u) => {
+        tip = document.createElement('div');
+        tip.className = 'u-tooltip';
+        u.over.appendChild(tip);
+        u.over.addEventListener('mouseleave', () => (tip.style.display = 'none'));
+      },
+      setCursor: (u) => {
+        const idx = u.cursor.idx;
+        if (idx == null) {
+          tip.style.display = 'none';
+          return;
+        }
+        const t = u.data[0][idx];
+        const v = u.data[1][idx];
+        if (t == null || v == null) {
+          tip.style.display = 'none';
+          return;
+        }
+        const left = u.valToPos(t, 'x');
+        const top = u.valToPos(v, 'y');
+        tip.style.display = 'block';
+        tip.style.left = left + 'px';
+        tip.style.top = top + 'px';
+        tip.innerHTML =
+          `<span class="tip-v">${fmt()(v)}</span>` +
+          `<span class="tip-t">${formatTime(t)}</span>`;
+      }
+    }
+  };
+}
+
+export function createChart(el: HTMLElement): ChartHandle {
+  let chart: uPlot | null = null;
+  let format: ValueFormat = formatNumber;
+  // Y top is data-dependent; uPlot reads it through the scale range callback so
+  // we can update it on setData without recreating the chart.
+  let niceMax = 1;
+  let ticks: number[] = [0, 1];
+  // Time span (seconds) of the current series — drives X-label format so wide
+  // ranges (24h/7d) show day/hour instead of HH:MM:SS, which overlapped.
+  let spanSec = 3600;
+
+  // Format an epoch-seconds X tick based on the visible span.
+  function fmtX(t: number): string {
+    const d = new Date(t * 1000);
+    const p = (n: number) => String(n).padStart(2, '0');
+    if (spanSec > 36 * 3600) {
+      // multi-day: show "Jun 9" style
+      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    }
+    if (spanSec > 3 * 3600) {
+      // several hours to ~1.5 days: show HH:MM
+      return `${p(d.getHours())}:${p(d.getMinutes())}`;
+    }
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
+
+  function recomputeY(values: number[]) {
+    // Scale to the TRUE max (rounded up to a nice value) so the whole line is
+    // visible with headroom and the top gridline is a real, labelled tick.
+    const max = Math.max(...values, 1);
+    const r = niceTicks(max, 5);
+    niceMax = r.niceMax;
+    ticks = r.ticks;
+  }
+
+  function recomputeSpan(times: number[]) {
+    spanSec = times.length >= 2 ? Math.max(1, times[times.length - 1] - times[0]) : 3600;
+  }
+
+  // The container (.chart-wrap--big) has a fixed height + overflow:hidden, so
+  // reading clientWidth/clientHeight (content box, excludes padding) is stable
+  // and uPlot's injected canvas can't feed back into it — repeated setSize() is
+  // idempotent, which is what stops the chart growing on every redraw.
+  function measure(): { width: number; height: number } {
+    return {
+      width: Math.max(1, el.clientWidth),
+      height: Math.max(1, el.clientHeight)
+    };
+  }
+
+  function build(times: number[], values: number[]) {
+    recomputeY(values);
+    recomputeSpan(times);
+    const { width, height } = measure();
+
+    const opts: uPlot.Options = {
+      width,
+      height,
+      padding: [18, 20, 6, 12],
+      cursor: {
+        x: true,
+        y: false,
+        points: { size: 8, width: 2, stroke: ACCENT, fill: '#fff' }
+      },
+      legend: { show: false },
+      scales: {
+        x: { time: false },
+        // Read niceMax lazily so range tab switches update the top without a rebuild.
+        y: { range: () => [0, niceMax] }
+      },
+      axes: [
+        {
+          stroke: AXIS_COLOR,
+          grid: { show: false },
+          ticks: { show: true, stroke: '#d1d5db', size: 4 },
+          font: AXIS_FONT,
+          size: 34,
+          // Min px between ticks so labels never overlap (was the 24h/7d crowding).
+          space: 90,
+          values: (_u, vals) => vals.map((v) => fmtX(v))
+        },
+        {
+          stroke: AXIS_COLOR,
+          grid: { stroke: GRID_COLOR, width: 1 },
+          ticks: { show: false },
+          font: AXIS_FONT,
+          // Reserve enough left gutter that multi-digit/byte labels aren't clipped.
+          size: 64,
+          splits: () => ticks,
+          values: (_u, vals) => vals.map((v) => format(v))
+        }
+      ],
+      series: [
+        {},
+        {
+          stroke: ACCENT,
+          width: 2,
+          fill: areaFill,
+          points: { show: false }
+        }
+      ],
+      plugins: [tooltipPlugin(() => format)]
+    };
+    chart = new uPlot(opts, [times, values], el);
+  }
+
+  return {
+    setData(times, values, fmt) {
+      format = fmt;
+      recomputeSpan(times);
+      if (!chart) {
+        build(times, values);
+        return;
+      }
+      // Update in place — never destroy/recreate (recreating re-measured the
+      // container and grew the chart on every range click). setData + an
+      // explicit, deterministic size keep it stable.
+      recomputeY(values);
+      chart.setSize(measure());
+      chart.setData([times, values]);
+    },
+    // Reflow to the current container size (e.g. window resize) without changing data.
+    resize() {
+      if (chart) chart.setSize(measure());
+    },
+    destroy() {
+      if (chart) {
+        chart.destroy();
+        chart = null;
+      }
+    }
+  };
+}

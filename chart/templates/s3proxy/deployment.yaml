@@ -30,17 +30,17 @@ spec:
             - secretRef:
                 name: {{ printf "%s-secrets" .Chart.Name }}
           {{- end }}
-          {{- /* Admin creds need an explicit env block only when they are NOT already
-                 pulled in via the chart-secret envFrom above (i.e. an admin existingSecret
+          {{- /* Dashboard creds need an explicit env block only when they are NOT already
+                 pulled in via the chart-secret envFrom above (i.e. an dashboard existingSecret
                  is set, or the app uses an existing secret so envFrom never fires). */ -}}
-          {{- $adminFromChartSecret := and .Values.admin.enabled (not .Values.admin.existingSecret.name) (not .Values.secrets.existingSecrets.enabled) }}
-          {{- $adminNeedsEnv := and .Values.admin.enabled (not $adminFromChartSecret) }}
+          {{- $dashboardFromChartSecret := and .Values.dashboard.enabled (not .Values.dashboard.existingSecret.name) (not .Values.secrets.existingSecrets.enabled) }}
+          {{- $dashboardNeedsEnv := and .Values.dashboard.enabled (not $dashboardFromChartSecret) }}
           {{- /* Redis password is needed when the bundled Redis has auth on, or
                  external Redis is used with an existing secret. */ -}}
           {{- $redisAuth := and .Values.redis.enabled .Values.redis.auth.enabled }}
           {{- $extRedisAuth := and (not .Values.redis.enabled) .Values.externalRedis.existingSecret }}
           {{- /* Determine if we need env section */ -}}
-          {{- $needsEnv := or .Values.secrets.existingSecrets.enabled $adminNeedsEnv $redisAuth $extRedisAuth }}
+          {{- $needsEnv := or .Values.secrets.existingSecrets.enabled $dashboardNeedsEnv $redisAuth $extRedisAuth }}
           {{- if $needsEnv }}
           env:
             {{- /* App secrets from existing secret */ -}}
@@ -51,24 +51,19 @@ spec:
                   name: {{ .Values.secrets.existingSecrets.name }}
                   key: {{ .Values.secrets.existingSecrets.keys.credentials }}
             {{- end }}
-            {{- /* Admin dashboard credentials (when not pulled via the chart-secret envFrom) */ -}}
-            {{- if $adminNeedsEnv }}
-            {{- $adminSecret := .Values.admin.existingSecret.name | default (printf "%s-secrets" .Chart.Name) }}
-            - name: S3PROXY_ADMIN_USERNAME
+            {{- /* Dashboard credentials (when not pulled via the chart-secret envFrom) */ -}}
+            {{- if $dashboardNeedsEnv }}
+            {{- $dashboardSecret := .Values.dashboard.existingSecret.name | default (printf "%s-secrets" .Chart.Name) }}
+            - name: S3PROXY_DASHBOARD_USERNAME
               valueFrom:
                 secretKeyRef:
-                  name: {{ $adminSecret }}
-                  key: {{ .Values.admin.existingSecret.usernameKey }}
-            - name: S3PROXY_ADMIN_PASSWORD
+                  name: {{ $dashboardSecret }}
+                  key: {{ .Values.dashboard.existingSecret.usernameKey }}
+            - name: S3PROXY_DASHBOARD_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ $adminSecret }}
-                  key: {{ .Values.admin.existingSecret.passwordKey }}
-            - name: S3PROXY_ADMIN_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $adminSecret }}
-                  key: {{ .Values.admin.existingSecret.secretKey }}
+                  name: {{ $dashboardSecret }}
+                  key: {{ .Values.dashboard.existingSecret.passwordKey }}
             {{- end }}
             {{- /* Redis password from the bundled Redis secret */ -}}
             {{- if $redisAuth }}

@@ -79,19 +79,3 @@ class TestSettingsKeyRing:
         s = Settings(credentials=[{"access_key": "AKIA-A", "secret_key": "s", "kek": "e"}])
         with pytest.raises(KeyError):
             s.keyring.key_for("AKIA-NOT-CONFIGURED")
-
-
-class TestAdminSecret:
-    def test_admin_ui_requires_secret(self):
-        with pytest.raises(ValidationError):
-            Settings(admin_ui=True, admin_username="a", admin_password="b")
-
-    def test_admin_session_secret_is_stable(self):
-        a = Settings(
-            admin_ui=True, admin_username="a", admin_password="b", admin_secret="sek"
-        ).admin_session_secret
-        b = Settings(
-            admin_ui=True, admin_username="a", admin_password="b", admin_secret="sek"
-        ).admin_session_secret
-        assert a == b
-        assert len(a) == 32

@@ -13,7 +13,7 @@ from fastapi.responses import PlainTextResponse
 from structlog.stdlib import BoundLogger
 
 from . import concurrency, crypto
-from .admin import record_request
+from .dashboard import record_request
 from .errors import S3Error, raise_for_client_error, raise_for_exception
 from .handlers import S3ProxyHandler
 from .metrics import (
@@ -33,17 +33,17 @@ UNSIGNED_PAYLOAD = "UNSIGNED-PAYLOAD"
 STREAMING_PAYLOAD_PREFIX = "STREAMING-"
 
 
-def _is_admin_path(request: Request, path: str) -> bool:
-    """True if the path targets the admin dashboard (so it's excluded from stats).
+def _is_dashboard_path(request: Request, path: str) -> bool:
+    """True if the path targets the dashboard (so it's excluded from stats).
 
-    The admin router is mounted at settings.admin_path; requests there (including a
+    The dashboard router is mounted at settings.dashboard_path; requests there (including a
     bare prefix with no trailing slash that misses the router and falls through to
     the S3 catch-all) must not be recorded as proxied S3 traffic.
     """
     settings = getattr(request.app.state, "settings", None)
-    if settings is None or getattr(settings, "admin_ui", False) is not True:
+    if settings is None or getattr(settings, "dashboard_ui", False) is not True:
         return False
-    prefix = getattr(settings, "admin_path", "")
+    prefix = getattr(settings, "dashboard_path", "")
     if not isinstance(prefix, str) or not prefix:
         return False
     prefix = prefix.rstrip("/")
@@ -134,6 +134,7 @@ async def handle_proxy_request(
             path=path,
         )
 
+    response = None
     try:
         response = await _handle_proxy_request_impl(request, handler, verifier)
         if response is not None:
@@ -153,15 +154,18 @@ async def handle_proxy_request(
         REQUEST_DURATION.labels(method=method, operation=operation).observe(duration)
 
         try:
-            size = int(request.headers.get("content-length", "0"))
+            if method == "GET" and response is not None:
+                size = int(response.headers.get("content-length", "0"))
+            else:
+                size = int(request.headers.get("content-length", "0"))
         except ValueError:
             size = 0
         client_ip = request.client.host if request.client else ""
         # Don't record dashboard requests in the dashboard's own stats. A bare
-        # "/admin" (no trailing slash) doesn't match the mounted admin router and
+        # "/dashboard" (no trailing slash) doesn't match the mounted dashboard router and
         # falls through to this S3 catch-all, where it would otherwise be logged
-        # as a phantom "admin" bucket.
-        if not _is_admin_path(request, path):
+        # as a phantom "dashboard" bucket.
+        if not _is_dashboard_path(request, path):
             await record_request(method, path, operation, status_code, duration, size, client_ip)
 
         if reserved_memory > 0:

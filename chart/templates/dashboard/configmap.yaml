@@ -1,0 +1,55 @@
+{{- if and .Values.dashboard.enabled .Values.dashboard.frontend.enabled -}}
+{{- $base := .Values.dashboard.path | trimSuffix "/" -}}
+{{- $proxy := printf "http://%s.%s.svc.cluster.local:%v" .Chart.Name .Release.Namespace .Values.service.port -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Chart.Name }}-dashboard-nginx
+  labels:
+    {{- include "s3proxy.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+data:
+  default.conf: |
+    # Serves the static dashboard under dashboard.path and reverse-proxies the API +
+    # auth endpoints to the proxy service, so the dashboard is single-origin: the
+    # SPA's relative /api fetches and the session cookie work whether reached via
+    # this pod directly (a single port-forward) or through the ingress.
+    server {
+        listen {{ .Values.dashboard.frontend.containerPort }};
+        server_name _;
+
+        root /usr/share/nginx/html;
+
+        # API + SSE and form auth (POST /api/login, GET /api/logout) all live in
+        # the proxy process. The /login page itself is the static SPA below.
+        location {{ $base }}/api/ {
+            proxy_pass {{ $proxy }};
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            # SSE: stream events as they arrive rather than buffering.
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_read_timeout 1h;
+        }
+
+        # Hashed, immutable build assets.
+        location {{ $base }}/_app/ {
+            alias /usr/share/nginx/html/_app/;
+            access_log off;
+            expires 1y;
+            add_header Cache-Control "public, immutable";
+        }
+
+        # Everything else under dashboard.path falls back to the SPA shell so client
+        # hash routing and the {{ $base }}/login page work on hard refresh.
+        location {{ $base }} {
+            try_files $uri /index.html;
+        }
+
+        location = / {
+            return 302 {{ $base }};
+        }
+    }
+{{- end }}

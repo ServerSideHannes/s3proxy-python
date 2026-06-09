@@ -129,7 +129,8 @@ A request signed by an access key with no configured KEK is rejected. Via Helm: 
 | `s3.region` | `us-east-1` | AWS region |
 | `secrets.credentials` | `[]` | AWS credentials, each `{accessKey, secretKey, kek}` |
 | `secrets.existingSecrets.enabled` | `false` | Use existing K8s secret |
-| `admin.secret` | `change-me` | Secret signing admin session cookies (when admin UI on) |
+| `dashboard.enabled` | `false` | Enable the dashboard API + its separate UI deployment |
+| `dashboard.secret` | `change-me` | Secret signing dashboard session cookies (when the dashboard is on) |
 | `redis.enabled` | `true` | Deploy the bundled single Redis pod (transient upload state) |
 | `frontproxy.enabled` | `false` | Bundled HAProxy for even load distribution (no external dependency) |
 | `ingress.enabled` | `false` | Expose S3 outside the cluster via Ingress (requires `frontproxy.enabled`) |
