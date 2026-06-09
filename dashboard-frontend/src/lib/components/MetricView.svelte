@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { fetchSeries } from '$lib/api';
   import { createChart, type ChartHandle } from '$lib/chart';
   import { formatBytes, formatNumber } from '$lib/format';
@@ -92,12 +93,18 @@
     void loadRange();
   }
 
+  // Mount once. This effect must NOT read range/direction reactively — it writes
+  // them, and if it also tracked them, every tab click would re-run the effect,
+  // reset the selection back to 1h/put, and recreate the chart. The component is
+  // already remounted per metric via {#key} in the parent, so a plain mount hook
+  // is the right scope.
   $effect(() => {
     chart = createChart(chartEl);
-    // Reset to 1h / PUT each time a metric view mounts, matching navigateFromHash.
-    range = '1h';
-    direction = 'put';
-    void loadRange();
+    untrack(() => {
+      range = '1h';
+      direction = 'put';
+      void loadRange();
+    });
     const onResize = () => chart?.resize();
     window.addEventListener('resize', onResize);
     return () => {
