@@ -5,6 +5,7 @@
   import { FILE_ICON, FOLDER_ICON, LOCK_ICON } from '$lib/icons';
   import { bucketHref, objectHref, prefixHref } from '$lib/route';
   import type { BucketPayload } from '$lib/types';
+  import Pager from './Pager.svelte';
 
   let { bucket, prefix }: { bucket: string; prefix: string } = $props();
 
@@ -45,29 +46,10 @@
     );
   });
 
-  let pageStatus = $derived.by(() => {
-    if (!data) return '—';
-    const totalObj = data.total_objects != null ? data.total_objects : data.objects.length;
-    if (totalObj === 0) return '—';
-    const from = data.offset + 1;
-    const to = data.offset + data.objects.length;
-    return `${from}–${to} of ${totalObj}`;
-  });
-
-  // Page-number navigation, derived from the server's offset/total.
+  // Total objects reported by the server (folders aren't paginated).
   let totalObjects = $derived(
     data ? (data.total_objects != null ? data.total_objects : data.objects.length) : 0
   );
-  let totalPages = $derived(Math.max(1, Math.ceil(totalObjects / PAGE)));
-  let currentPage = $derived(data ? Math.floor(data.offset / PAGE) + 1 : 1);
-  // A compact window of page numbers around the current page (with first/last).
-  let pageNumbers = $derived.by(() => {
-    const tp = totalPages;
-    if (tp <= 1) return [] as number[];
-    const cur = currentPage;
-    const set = new Set<number>([1, tp, cur, cur - 1, cur + 1, cur - 2, cur + 2]);
-    return [...set].filter((p) => p >= 1 && p <= tp).sort((a, b) => a - b);
-  });
 
   async function load() {
     loading = true;
@@ -81,9 +63,8 @@
     }
   }
 
-  function goToPage(p: number) {
-    const target = Math.min(Math.max(1, p), totalPages);
-    offset = (target - 1) * PAGE;
+  function goOffset(o: number) {
+    offset = o;
     void load();
   }
 
@@ -102,30 +83,8 @@
 </script>
 
 {#snippet pager()}
-  {#if data && totalPages > 1}
-    <div class="logs-pager">
-      <button type="button" class="pager-btn" disabled={currentPage <= 1} onclick={() => goToPage(currentPage - 1)}>← Prev</button>
-      {#each pageNumbers as p, i}
-        {#if i > 0 && p - pageNumbers[i - 1] > 1}<span class="pager-gap">…</span>{/if}
-        <button type="button" class="pager-num" class:active={p === currentPage} onclick={() => goToPage(p)}>{p}</button>
-      {/each}
-      <button type="button" class="pager-btn" disabled={currentPage >= totalPages} onclick={() => goToPage(currentPage + 1)}>Next →</button>
-      <span class="pager-jump">
-        Go to
-        <input
-          type="number"
-          min="1"
-          max={totalPages}
-          placeholder={String(currentPage)}
-          onkeydown={(e) => {
-            if (e.key === 'Enter') {
-              const v = Number((e.currentTarget as HTMLInputElement).value);
-              if (v) goToPage(v);
-            }
-          }} />
-        <span class="pager-status">/ {totalPages} ({pageStatus})</span>
-      </span>
-    </div>
+  {#if data}
+    <Pager total={totalObjects} pageSize={PAGE} offset={data.offset} onGo={goOffset} />
   {/if}
 {/snippet}
 

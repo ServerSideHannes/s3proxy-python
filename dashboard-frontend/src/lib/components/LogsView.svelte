@@ -3,6 +3,7 @@
   import { fetchLogs } from '$lib/api';
   import { bucketHref, objectHref } from '$lib/route';
   import type { LogsPayload } from '$lib/types';
+  import Pager from './Pager.svelte';
 
   // Initial filters come from the hash (#logs&q=..&op=..&status=..).
   let { initialQ = '', initialOp = '', initialStatus = '' }: {
@@ -11,7 +12,7 @@
     initialStatus?: string;
   } = $props();
 
-  const LIMIT = 50;
+  const LIMIT = 25;
   const POLL_MS = 2000;
 
   // Seed the editable filters once from the route; the parent remounts this
@@ -34,12 +35,11 @@
     return `${from}–${to} of ${data.total} entries`;
   });
   let subText = $derived(data ? `${data.total} entries (24h, capped)` : '—');
-  let pageText = $derived.by(() => {
-    if (!data) return '—';
-    const from = data.total === 0 ? 0 : data.offset + 1;
-    const to = data.offset + data.count;
-    return `${from}–${to} of ${data.total}`;
-  });
+
+  function goOffset(o: number) {
+    offset = o;
+    void load();
+  }
 
   async function load() {
     try {
@@ -146,23 +146,7 @@
       </tbody>
     </table>
   </div>
-  <div class="logs-pager">
-    <button
-      type="button"
-      class="pager-btn"
-      disabled={!data || data.offset <= 0}
-      onclick={() => {
-        offset = Math.max(0, offset - LIMIT);
-        void load();
-      }}>← Prev</button>
-    <span class="pager-status">{pageText}</span>
-    <button
-      type="button"
-      class="pager-btn"
-      disabled={!data || !data.has_more}
-      onclick={() => {
-        offset += LIMIT;
-        void load();
-      }}>Next →</button>
-  </div>
+  {#if data}
+    <Pager total={data.total} pageSize={LIMIT} offset={data.offset} onGo={goOffset} />
+  {/if}
 </section>
