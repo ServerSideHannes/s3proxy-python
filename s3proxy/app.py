@@ -71,6 +71,12 @@ def create_lifespan(settings: Settings, credentials_store: dict[str, str]) -> As
         stats_store = create_stats_store(settings)
         set_store(stats_store)  # used by the synchronous record_request path
 
+        if settings.dashboard_ui:
+            from .dashboard.auth import RedisSessionStore
+            from .state.redis import get_redis
+
+            app.state.session_store = RedisSessionStore(get_redis())
+
         # Create handler and verifier with properly initialized manager
         verifier = SigV4Verifier(credentials_store)
         handler = S3ProxyHandler(settings, credentials_store, multipart_manager)

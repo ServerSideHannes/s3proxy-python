@@ -1,7 +1,5 @@
 """Configuration management for S3Proxy."""
 
-import hashlib
-
 from pydantic import BaseModel, Field, PrivateAttr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -99,10 +97,6 @@ class Settings(BaseSettings):
     )
     dashboard_username: str = Field(default="", description="Dashboard username")
     dashboard_password: str = Field(default="", description="Dashboard password")
-    dashboard_secret: str = Field(
-        default="",
-        description="Secret for signing dashboard session cookies (required when dashboard_ui)",
-    )
 
     # Cached KeyRing + credentials store (computed once in model_post_init).
     _keyring: KeyRing = PrivateAttr()
@@ -117,16 +111,6 @@ class Settings(BaseSettings):
             self._credentials_store[entry.access_key] = entry.secret_key
             keys[entry.access_key] = derive_kek(entry.kek)
         self._keyring = KeyRing(keys=keys)
-
-        if self.dashboard_ui and not self.dashboard_secret:
-            raise ValueError("S3PROXY_DASHBOARD_SECRET is required when the dashboard is enabled")
-
-    @property
-    def dashboard_session_secret(self) -> bytes:
-        """Stable 32-byte secret for signing dashboard session cookies."""
-        return hashlib.sha256(
-            b"s3proxy-dashboard-session|" + self.dashboard_secret.encode()
-        ).digest()
 
     @property
     def keyring(self) -> KeyRing:

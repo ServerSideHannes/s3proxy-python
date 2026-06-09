@@ -88,14 +88,10 @@ dashboard:
   path: "/dashboard"
   username: "admin"
   password: "admin"
-  # Stable secret used to sign dashboard session cookies. Required when enabled.
-  # Override in production; keep it stable so sessions survive pod restarts.
-  secret: "change-me"
   existingSecret:
     name: ""
     usernameKey: "S3PROXY_DASHBOARD_USERNAME"
     passwordKey: "S3PROXY_DASHBOARD_PASSWORD"
-    secretKey: "S3PROXY_DASHBOARD_SECRET"
 
   # Separate Deployment serving the Svelte dashboard (the static build from
   # dashboard-frontend/), with an nginx that also reverse-proxies the API.

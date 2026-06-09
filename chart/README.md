@@ -31,7 +31,6 @@ helm install s3proxy oci://ghcr.io/serversidehannes/s3proxy-python/charts/s3prox
 | `dashboard.path` | `/dashboard` | URL path prefix for the dashboard |
 | `dashboard.username` | `admin` | Dashboard username (stored in the Secret; override in production) |
 | `dashboard.password` | `admin` | Dashboard password (stored in the Secret; override in production) |
-| `dashboard.secret` | `change-me` | Secret signing dashboard session cookies (override in production) |
 | `dashboard.frontend.enabled` | `true` | Run the Svelte UI as its own Deployment (nginx serving the static build + reverse-proxying the API) |
 | `dashboard.frontend.image.repository` | `ghcr.io/serversidehannes/s3proxy-dashboard` | Dashboard UI image |
 | `dashboard.frontend.image.tag` | `latest` | Dashboard UI image tag |
@@ -40,7 +39,6 @@ helm install s3proxy oci://ghcr.io/serversidehannes/s3proxy-python/charts/s3prox
 | `dashboard.existingSecret.name` | `""` | Pre-created secret holding dashboard credentials |
 | `dashboard.existingSecret.usernameKey` | `S3PROXY_DASHBOARD_USERNAME` | Username key in the existing secret |
 | `dashboard.existingSecret.passwordKey` | `S3PROXY_DASHBOARD_PASSWORD` | Password key in the existing secret |
-| `dashboard.existingSecret.secretKey` | `S3PROXY_DASHBOARD_SECRET` | Session-secret key in the existing secret |
 | `dashboard.ingress.enabled` | `false` | Dedicated Ingress for the dashboard (keep off unless intentionally exposing it) |
 | `dashboard.ingress.className` | `""` | Ingress class for the dashboard Ingress (set to your cluster's controller) |
 | `dashboard.ingress.host` | `""` | Hostname for the dashboard (required when enabled) |

@@ -12,9 +12,9 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 
 from .auth import (
+    SESSION_COOKIE,
     DashboardCredentials,
     clear_session_cookie,
-    issue_session,
     make_verify_api,
     set_session_cookie,
 )
@@ -56,18 +56,21 @@ def create_dashboard_router(
 
     @router.post("/api/login")
     async def login_submit(
-        username: str = Form(...), password: str = Form(...)
+        request: Request, username: str = Form(...), password: str = Form(...)
     ) -> RedirectResponse:
         if not dashboard.valid(username, password):
             dest = f"{prefix}/login?error=1"
             return RedirectResponse(dest, status_code=status.HTTP_303_SEE_OTHER)
-        token = issue_session(username, dashboard.session_secret)
+        token = await request.app.state.session_store.create(username)
         response = RedirectResponse(f"{prefix}/", status_code=status.HTTP_303_SEE_OTHER)
         set_session_cookie(response, token, secure=cookie_secure)
         return response
 
     @router.get("/api/logout")
-    async def logout() -> RedirectResponse:
+    async def logout(request: Request) -> RedirectResponse:
+        token = request.cookies.get(SESSION_COOKIE)
+        if token:
+            await request.app.state.session_store.delete(token)
         response = RedirectResponse(f"{prefix}/login", status_code=status.HTTP_303_SEE_OTHER)
         clear_session_cookie(response)
         return response

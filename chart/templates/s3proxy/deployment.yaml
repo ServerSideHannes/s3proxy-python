@@ -64,11 +64,6 @@ spec:
                 secretKeyRef:
                   name: {{ $dashboardSecret }}
                   key: {{ .Values.dashboard.existingSecret.passwordKey }}
-            - name: S3PROXY_DASHBOARD_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $dashboardSecret }}
-                  key: {{ .Values.dashboard.existingSecret.secretKey }}
             {{- end }}
             {{- /* Redis password from the bundled Redis secret */ -}}
             {{- if $redisAuth }}

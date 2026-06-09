@@ -2,13 +2,7 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
-import hashlib
-import hmac
-import json
 import secrets
-import time
 from typing import TYPE_CHECKING
 
 from fastapi import Depends, HTTPException, Request, status
@@ -23,8 +17,29 @@ SESSION_TTL_SECONDS = 24 * 3600
 _BASIC_REALM = "S3Proxy Dashboard"
 
 
+class RedisSessionStore:
+    """Redis-backed session store (HA / multi-replica mode)."""
+
+    _PREFIX = "s3proxy:session:"
+
+    def __init__(self, redis) -> None:
+        self._redis = redis
+
+    async def create(self, username: str, ttl: int = SESSION_TTL_SECONDS) -> str:
+        token = secrets.token_hex(32)
+        await self._redis.setex(f"{self._PREFIX}{token}", ttl, username.encode())
+        return token
+
+    async def get(self, token: str) -> str | None:
+        val = await self._redis.get(f"{self._PREFIX}{token}")
+        return val.decode() if val is not None else None
+
+    async def delete(self, token: str) -> None:
+        await self._redis.delete(f"{self._PREFIX}{token}")
+
+
 class DashboardCredentials:
-    """Resolved dashboard credentials with session-signing key."""
+    """Resolved dashboard credentials."""
 
     def __init__(self, settings: Settings, credentials_store: dict[str, str]):
         if not (settings.dashboard_username and settings.dashboard_password):
@@ -33,50 +48,11 @@ class DashboardCredentials:
             )
         self.username = settings.dashboard_username
         self.password = settings.dashboard_password
-        # Stable session-signing secret (survives pod restarts, shared across replicas).
-        self.session_secret = settings.dashboard_session_secret
 
     def valid(self, username: str, password: str) -> bool:
         return secrets.compare_digest(username.encode(), self.username.encode()) and (
             secrets.compare_digest(password.encode(), self.password.encode())
         )
-
-
-# ---------------------------------------------------------------------------
-# Session cookie — base64(json({u, exp})) "." hex(hmac-sha256)
-# ---------------------------------------------------------------------------
-
-
-def _b64url_encode(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
-
-
-def _b64url_decode(s: str) -> bytes:
-    padding = "=" * ((4 - len(s) % 4) % 4)
-    return base64.urlsafe_b64decode(s + padding)
-
-
-def issue_session(username: str, secret: bytes, ttl: int = SESSION_TTL_SECONDS) -> str:
-    payload = {"u": username, "e": int(time.time()) + ttl}
-    body = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode())
-    mac = hmac.new(secret, body.encode(), hashlib.sha256).hexdigest()
-    return f"{body}.{mac}"
-
-
-def verify_session(token: str, secret: bytes) -> str | None:
-    if not token or "." not in token:
-        return None
-    body, _, mac = token.rpartition(".")
-    try:
-        expected = hmac.new(secret, body.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(mac, expected):
-            return None
-        payload = json.loads(_b64url_decode(body))
-    except ValueError, binascii.Error, json.JSONDecodeError:
-        return None
-    if int(payload.get("e", 0)) < int(time.time()):
-        return None
-    return str(payload.get("u", ""))
 
 
 # ---------------------------------------------------------------------------
@@ -94,11 +70,11 @@ def _check_basic(creds: HTTPBasicCredentials | None, dashboard: DashboardCredent
     return dashboard.username if dashboard.valid(creds.username, creds.password) else None
 
 
-def _check_cookie(request: Request, dashboard: DashboardCredentials) -> str | None:
+async def _check_cookie(request: Request, store) -> str | None:
     token = request.cookies.get(SESSION_COOKIE)
     if not token:
         return None
-    return verify_session(token, dashboard.session_secret)
+    return await store.get(token)
 
 
 def make_verify_api(dashboard: DashboardCredentials):
@@ -115,7 +91,8 @@ def make_verify_api(dashboard: DashboardCredentials):
         request: Request,
         creds: HTTPBasicCredentials | None = _basic_dep,
     ) -> str:
-        user = _check_cookie(request, dashboard) or _check_basic(creds, dashboard)
+        store = request.app.state.session_store
+        user = await _check_cookie(request, store) or _check_basic(creds, dashboard)
         if user:
             return user
         headers = {}

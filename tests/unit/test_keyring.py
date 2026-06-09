@@ -79,21 +79,3 @@ class TestSettingsKeyRing:
         s = Settings(credentials=[{"access_key": "AKIA-A", "secret_key": "s", "kek": "e"}])
         with pytest.raises(KeyError):
             s.keyring.key_for("AKIA-NOT-CONFIGURED")
-
-
-class TestDashboardSecret:
-    def test_dashboard_ui_requires_secret(self):
-        with pytest.raises(ValidationError):
-            Settings(dashboard_ui=True, dashboard_username="a", dashboard_password="b")
-
-    def test_dashboard_session_secret_is_stable(self):
-        kw = {
-            "dashboard_ui": True,
-            "dashboard_username": "a",
-            "dashboard_password": "b",
-            "dashboard_secret": "sek",
-        }
-        a = Settings(**kw).dashboard_session_secret
-        b = Settings(**kw).dashboard_session_secret
-        assert a == b
-        assert len(a) == 32

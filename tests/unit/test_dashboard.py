@@ -28,7 +28,6 @@ def dashboard_settings():
         dashboard_ui=True,
         dashboard_username="creds",
         dashboard_password="secret",
-        dashboard_secret="test-dashboard-secret",
         credentials=[{"access_key": "AKIA-TEST", "secret_key": "s", "kek": "k"}],
     )
 
@@ -301,6 +300,10 @@ def _make_app(settings: Settings, store=None):
     app.state.settings = settings
     app.state.start_time = time.monotonic()
     app.state.stats_store = store or MemoryStatsStore(settings)
+    from s3proxy.dashboard.auth import RedisSessionStore
+    from s3proxy.state.redis import get_redis
+
+    app.state.session_store = RedisSessionStore(get_redis())
     return app
 
 
@@ -396,7 +399,6 @@ def test_auth_uses_explicit_credentials_not_aws() -> None:
         dashboard_ui=True,
         dashboard_username="admin",
         dashboard_password="admin",
-        dashboard_secret="test-dashboard-secret",
     )
     creds = DashboardCredentials(settings, {"AKIAEXAMPLE": "secret-key"})
     assert creds.valid("admin", "admin")
@@ -410,7 +412,6 @@ def test_auth_raises_when_credentials_blank() -> None:
         dashboard_ui=True,
         dashboard_username="",
         dashboard_password="",
-        dashboard_secret="test-dashboard-secret",
     )
     with pytest.raises(RuntimeError):
         create_auth_dependency(settings, {})

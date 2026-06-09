@@ -23,7 +23,6 @@ def _settings(**kw) -> Settings:
         "dashboard_ui": True,
         "dashboard_username": "admin",
         "dashboard_password": "admin",
-        "dashboard_secret": "s",
         "credentials": [{"access_key": "AK", "secret_key": "s", "kek": "k"}],
     }
     base.update(kw)
@@ -53,6 +52,5 @@ def test_custom_dashboard_path() -> None:
 
 
 def test_not_filtered_when_dashboard_ui_disabled() -> None:
-    # dashboard_secret not required when dashboard_ui is off
-    r = _req(_settings(dashboard_ui=False, dashboard_secret=""))
+    r = _req(_settings(dashboard_ui=False))
     assert _is_dashboard_path(r, "/dashboard") is False
