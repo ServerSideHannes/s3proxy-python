@@ -134,6 +134,7 @@ async def handle_proxy_request(
             path=path,
         )
 
+    response = None
     try:
         response = await _handle_proxy_request_impl(request, handler, verifier)
         if response is not None:
