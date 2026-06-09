@@ -72,6 +72,24 @@ export function createChart(el: HTMLElement): ChartHandle {
   // we can update it on setData without recreating the chart.
   let niceMax = 1;
   let ticks: number[] = [0, 1];
+  // Time span (seconds) of the current series — drives X-label format so wide
+  // ranges (24h/7d) show day/hour instead of HH:MM:SS, which overlapped.
+  let spanSec = 3600;
+
+  // Format an epoch-seconds X tick based on the visible span.
+  function fmtX(t: number): string {
+    const d = new Date(t * 1000);
+    const p = (n: number) => String(n).padStart(2, '0');
+    if (spanSec > 36 * 3600) {
+      // multi-day: show "Jun 9" style
+      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    }
+    if (spanSec > 3 * 3600) {
+      // several hours to ~1.5 days: show HH:MM
+      return `${p(d.getHours())}:${p(d.getMinutes())}`;
+    }
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
 
   function recomputeY(values: number[]) {
     // Scale to the TRUE max (rounded up to a nice value) so the whole line is
@@ -82,16 +100,24 @@ export function createChart(el: HTMLElement): ChartHandle {
     ticks = r.ticks;
   }
 
+  function recomputeSpan(times: number[]) {
+    spanSec = times.length >= 2 ? Math.max(1, times[times.length - 1] - times[0]) : 3600;
+  }
+
+  // The container (.chart-wrap--big) has a fixed height + overflow:hidden, so
+  // reading clientWidth/clientHeight (content box, excludes padding) is stable
+  // and uPlot's injected canvas can't feed back into it — repeated setSize() is
+  // idempotent, which is what stops the chart growing on every redraw.
   function measure(): { width: number; height: number } {
-    const rect = el.getBoundingClientRect();
     return {
-      width: Math.max(1, Math.floor(rect.width)),
-      height: Math.max(1, Math.floor(rect.height))
+      width: Math.max(1, el.clientWidth),
+      height: Math.max(1, el.clientHeight)
     };
   }
 
   function build(times: number[], values: number[]) {
     recomputeY(values);
+    recomputeSpan(times);
     const { width, height } = measure();
 
     const opts: uPlot.Options = {
@@ -116,7 +142,9 @@ export function createChart(el: HTMLElement): ChartHandle {
           ticks: { show: true, stroke: '#d1d5db', size: 4 },
           font: AXIS_FONT,
           size: 34,
-          values: (_u, vals) => vals.map((v) => formatTime(v))
+          // Min px between ticks so labels never overlap (was the 24h/7d crowding).
+          space: 90,
+          values: (_u, vals) => vals.map((v) => fmtX(v))
         },
         {
           stroke: AXIS_COLOR,
@@ -146,16 +174,16 @@ export function createChart(el: HTMLElement): ChartHandle {
   return {
     setData(times, values, fmt) {
       format = fmt;
+      recomputeSpan(times);
       if (!chart) {
         build(times, values);
         return;
       }
-      // Update in place — never destroy/recreate. Recreating re-measures the
-      // container (which has aspect-ratio sizing) and made the chart grow on
-      // every range click; setData + an explicit size keep it stable.
+      // Update in place — never destroy/recreate (recreating re-measured the
+      // container and grew the chart on every range click). setData + an
+      // explicit, deterministic size keep it stable.
       recomputeY(values);
-      const { width, height } = measure();
-      chart.setSize({ width, height });
+      chart.setSize(measure());
       chart.setData([times, values]);
     },
     // Reflow to the current container size (e.g. window resize) without changing data.

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ICON_BUCKET, ICON_ERR, ICON_LOCK, ICON_REQUESTS } from '$lib/icons';
+  import { ICON_ERR, ICON_LOCK, ICON_REQUESTS } from '$lib/icons';
   import { bucketHref, objectHref } from '$lib/route';
   import type { StatusPayload } from '$lib/types';
   import MetricCard from './MetricCard.svelte';
@@ -26,13 +26,6 @@
     card={cards?.data_encrypted}
   />
   <MetricCard metricKey="errors" icon={ICON_ERR} fallbackLabel="Errors" card={cards?.errors} />
-  <MetricCard
-    metricKey="active_buckets"
-    icon={ICON_BUCKET}
-    fallbackLabel="Active Buckets"
-    card={cards?.active_buckets}
-    showRange={false}
-  />
 </section>
 
 <section class="section">

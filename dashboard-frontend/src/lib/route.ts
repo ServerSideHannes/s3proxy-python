@@ -23,7 +23,13 @@ export function parseHash(hash: string): Route {
     };
   }
   if (h.startsWith('metric=')) {
-    return { view: 'metric', metric: h.substring('metric='.length) };
+    const metric = h.substring('metric='.length);
+    // Only these metrics have a chart detail view. active_buckets was removed;
+    // anything unknown falls through to the dashboard.
+    if (metric === 'requests' || metric === 'data_encrypted' || metric === 'errors') {
+      return { view: 'metric', metric };
+    }
+    return { view: 'dashboard' };
   }
   const params = new URLSearchParams(h);
   const bucket = params.get('bucket');
