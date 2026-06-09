@@ -9,6 +9,17 @@ export function formatNumber(v: number): string {
   return Math.round(v).toString();
 }
 
+// Raw-byte formatter (B/KB/MB/GB/TB) — the bytes_* series are raw byte counts,
+// so they need byte units, not the count suffixes formatNumber() produces. The
+// returned string already includes its unit, so callers must not append one.
+export function formatBytes(v: number): string {
+  if (v <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  const i = Math.min(units.length - 1, Math.floor(Math.log(v) / Math.log(1024)));
+  const n = v / Math.pow(1024, i);
+  return (i === 0 ? Math.round(n).toString() : n.toFixed(1)) + ' ' + units[i];
+}
+
 export function niceCeil(x: number): number {
   if (x <= 0) return 1;
   const exp = Math.floor(Math.log10(x));

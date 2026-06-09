@@ -7,6 +7,10 @@ import type { StatusPayload } from './types';
 
 class StatusFeed {
   current = $state<StatusPayload | null>(null);
+  // 'pending' until the first status fetch resolves; 'ok' once authenticated.
+  // The page gates its chrome on this so an unauthenticated visit redirects to
+  // the login page instead of flashing an empty dashboard.
+  auth = $state<'pending' | 'ok'>('pending');
 
   #es: EventSource | null = null;
   #retry = 0;
@@ -30,8 +34,10 @@ class StatusFeed {
   async refresh() {
     try {
       this.current = await fetchStatus();
+      this.auth = 'ok';
     } catch {
-      // 401 already redirected; transient errors are ignored — next tick retries.
+      // 401 has already navigated to the login page (see api.ts toLogin()).
+      // Transient errors are ignored — the SSE stream / next refresh retries.
     }
   }
 

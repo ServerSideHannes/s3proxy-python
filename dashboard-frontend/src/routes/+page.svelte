@@ -26,6 +26,7 @@
   });
 
   let status = $derived(statusFeed.current);
+  let authed = $derived(statusFeed.auth === 'ok');
 
   function refresh() {
     void statusFeed.refresh();
@@ -34,6 +35,7 @@
   }
 </script>
 
+{#if authed}
 <div class="page">
   <Header {status} />
 
@@ -59,3 +61,4 @@
 </div>
 
 <Footer {status} onRefresh={refresh} />
+{/if}

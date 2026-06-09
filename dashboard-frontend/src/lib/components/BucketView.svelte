@@ -72,11 +72,31 @@
     offset = 0;
     void load();
   });
-
-  function encClass(enc: boolean | null): string {
-    return enc === true ? 'on' : 'off';
-  }
 </script>
+
+{#snippet pager()}
+  {#if data && (data.has_more || data.offset > 0)}
+    <div class="logs-pager">
+      <button
+        type="button"
+        class="pager-btn"
+        disabled={data.offset <= 0}
+        onclick={() => {
+          offset = Math.max(0, offset - PAGE);
+          void load();
+        }}>← Prev</button>
+      <span class="pager-status">{pageStatus}</span>
+      <button
+        type="button"
+        class="pager-btn"
+        disabled={!data.has_more}
+        onclick={() => {
+          offset += PAGE;
+          void load();
+        }}>Next →</button>
+    </div>
+  {/if}
+{/snippet}
 
 <section class="section">
   <div class="section-head">
@@ -99,6 +119,7 @@
       <span class="live"><span class="dot"></span>Live</span>
     </div>
   </div>
+  {@render pager()}
   <table class="explorer">
     <thead>
       <tr>
@@ -149,23 +170,5 @@
       {/if}
     </tbody>
   </table>
-  <div class="logs-pager">
-    <button
-      type="button"
-      class="pager-btn"
-      disabled={!data || data.offset <= 0}
-      onclick={() => {
-        offset = Math.max(0, offset - PAGE);
-        void load();
-      }}>← Prev</button>
-    <span class="pager-status">{pageStatus}</span>
-    <button
-      type="button"
-      class="pager-btn"
-      disabled={!data || !data.has_more}
-      onclick={() => {
-        offset += PAGE;
-        void load();
-      }}>Next →</button>
-  </div>
+  {@render pager()}
 </section>

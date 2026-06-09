@@ -373,6 +373,12 @@ td.truncate {
   overflow: hidden; text-overflow: ellipsis;
 }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+/* Object-detail values: long keys/etags must wrap, overriding the table's nowrap. */
+.ov-value {
+  white-space: normal;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
 .pill {
   display: inline-block;
   padding: 2px 10px; border-radius: 999px;

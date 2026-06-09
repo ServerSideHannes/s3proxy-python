@@ -1,7 +1,7 @@
 <script lang="ts">
   import { fetchSeries } from '$lib/api';
   import { createChart, type ChartHandle } from '$lib/chart';
-  import { formatNumber } from '$lib/format';
+  import { formatBytes, formatNumber } from '$lib/format';
   import type { Card } from '$lib/types';
 
   let { metricKey, card }: { metricKey: string; card: Card | undefined } = $props();
@@ -56,21 +56,26 @@
     if (metricKey === 'data_encrypted') {
       metric = direction === 'get' ? 'bytes_get' : 'bytes_put';
     }
+    // The bytes_* series are raw byte counts -> byte units. Other metrics are
+    // plain counts -> formatNumber + the card's unit (e.g. "req"). The formatter
+    // returns a complete string incl. unit, so the chart never appends one.
+    const fmt: (v: number) => string =
+      metricKey === 'data_encrypted'
+        ? formatBytes
+        : (v) => formatNumber(v) + (unit ? ' ' + unit : '');
     try {
       const d = await fetchSeries(metric, range);
       const vals = d.spark || [];
       const times = d.spark_times || [];
       if (chart) {
         if (vals.length < 2 || times.length !== vals.length) {
-          chart.setData([], [], unit);
+          chart.setData([], [], fmt);
           chartMeta = '';
         } else {
-          chart.setData(times, vals, unit);
+          chart.setData(times, vals, fmt);
           const rawMax = Math.max(...vals, 1);
           const lastV = vals[vals.length - 1];
-          chartMeta =
-            'peak ' + formatNumber(rawMax) + (unit ? ' ' + unit : '') +
-            ' · latest ' + formatNumber(lastV) + (unit ? ' ' + unit : '');
+          chartMeta = 'peak ' + fmt(rawMax) + ' · latest ' + fmt(lastV);
         }
       }
     } catch {
@@ -93,7 +98,7 @@
     range = '1h';
     direction = 'put';
     void loadRange();
-    const onResize = () => void loadRange();
+    const onResize = () => chart?.resize();
     window.addEventListener('resize', onResize);
     return () => {
       window.removeEventListener('resize', onResize);

@@ -70,8 +70,8 @@
       {:else}
         {#each rows as [k, v]}
           <tr>
-            <td style="color:var(--text-muted);width:200px;vertical-align:top">{k}</td>
-            <td class="mono" style="word-break:break-all;overflow-wrap:anywhere">{v}</td>
+            <td style="color:var(--text-muted);width:200px;vertical-align:top;white-space:normal">{k}</td>
+            <td class="mono ov-value">{v}</td>
           </tr>
         {/each}
       {/if}
