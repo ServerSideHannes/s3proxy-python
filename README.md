@@ -185,12 +185,25 @@ Yes. The proxy verifies the presigned signature, then makes its own authenticate
 
 ### 2026.6.0
 
-- **Per-credential encryption keys** — each credential now has its own KEK; a compromised key exposes only that credential's data. The encrypting access key is recorded in object metadata (`isec-kid`), so decryption always uses the correct key and reconfiguring credentials never orphans existing objects.
-- **Bundled HAProxy front proxy** (`frontproxy.enabled=true`) — per-request L7 load balancing across all s3proxy replicas; self-contained, no ingress controller required. Comes with a PDB and a dedicated Ingress option for external access.
-- **Bundled Redis** — replaces the redis-ha dependency with a single lightweight Redis pod (`redis.enabled=true`, the default). External HA Redis still supported via `externalRedis.url`.
-- **Svelte admin dashboard** (`dashboard.enabled=true`) — rebuilt as a separate deployment (`dashboard-frontend`) serving a compiled Svelte SPA. Adds Redis-backed cluster-wide stats, per-bucket/object views, request logs with pagination, sparkline charts, and an encryption-status panel.
-- **Redis-backed dashboard sessions** — opaque session tokens stored in Redis replace signed cookies; `S3PROXY_DASHBOARD_SECRET` is removed. Sessions are properly cluster-scoped and invalidate on logout across all replicas.
-- Helm chart templates reorganised under `templates/s3proxy/`, `templates/dashboard/`, `templates/frontproxy/`, and `templates/redis/`.
+#### New features
+
+- **Per-credential encryption keys** — each credential has its own KEK. A compromised key exposes only that credential's data. The encrypting access key is stored in object metadata (`isec-kid`), so decryption always uses the right key even after credential rotation.
+- **Bundled HAProxy front proxy** — set `frontproxy.enabled=true` to add a self-contained HAProxy that balances per-request (L7) across all s3proxy replicas. No ingress controller needed. Includes a PDB and optional external Ingress.
+- **Bundled Redis** — replaces the `redis-ha` Helm dependency with a single lightweight Redis pod (default on). Use `externalRedis.url` to point at your own HA Redis instead.
+- **Svelte admin dashboard** — `dashboard.enabled=true` now deploys a separate `dashboard-frontend` pod (compiled Svelte SPA). Shows cluster-wide request stats, per-bucket and per-object views, paginated request logs, sparkline charts, and an encryption status panel.
+- **Redis-backed dashboard sessions** — session tokens are stored in Redis instead of signed cookies. Sessions invalidate cluster-wide on logout.
+
+#### Upgrading from 2026.2.0
+
+**`dashboard.secret` / `S3PROXY_DASHBOARD_SECRET` removed.** If you were setting either, remove them — they are no longer read. Sessions are now backed by Redis (which is already required), so no replacement value is needed.
+
+**`redis-ha` dependency dropped.** The chart no longer pulls in the `redis-ha` sub-chart. If you were passing `redis-ha.*` values, remove them. The bundled Redis is controlled by `redis.*` (see [chart/README.md](chart/README.md)).
+
+**Dashboard is now a separate Deployment.** When `dashboard.enabled=true`, the chart creates a second Deployment (`dashboard-frontend`) and a second Service. If you previously exposed the dashboard via a custom Ingress pointing at the s3proxy Service, update it to point at the `dashboard-frontend` Service instead (or use `dashboard.ingress.enabled=true`).
+
+Everything else is backwards-compatible. Existing encrypted objects are unaffected.
+
+---
 
 ### 2026.2.0
 
@@ -203,6 +216,7 @@ Yes. The proxy verifies the presigned signature, then makes its own authenticate
 - CI workflows for ruff linting and unit tests
 - Prometheus-compatible metrics endpoint
 - Slimmer Dockerfile and Makefile improvements
+
 ---
 
 ## License
