@@ -102,7 +102,14 @@ def _check_cookie(request: Request, dashboard: DashboardCredentials) -> str | No
 
 
 def make_verify_api(dashboard: DashboardCredentials):
-    """Auth dep for JSON API routes — returns 401 if not logged in."""
+    """Auth dep for JSON API routes — returns 401 if not logged in.
+
+    Only challenges with ``WWW-Authenticate: Basic`` when the caller is actually
+    doing Basic Auth (sent an ``Authorization`` header) — i.e. CLI/programmatic
+    clients like the e2e encryption check. Browser fetch/EventSource requests get
+    a plain 401 so the SPA can redirect to its own login page instead of the
+    browser popping up the native Basic Auth dialog.
+    """
 
     async def verify(
         request: Request,
@@ -111,10 +118,13 @@ def make_verify_api(dashboard: DashboardCredentials):
         user = _check_cookie(request, dashboard) or _check_basic(creds, dashboard)
         if user:
             return user
+        headers = {}
+        if request.headers.get("authorization"):
+            headers["WWW-Authenticate"] = f'Basic realm="{_BASIC_REALM}"'
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
-            headers={"WWW-Authenticate": f'Basic realm="{_BASIC_REALM}"'},
+            headers=headers,
         )
 
     return verify

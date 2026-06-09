@@ -61,8 +61,11 @@
     debounce = setTimeout(reloadFromStart, 150);
   }
 
+  // Mount-only: initial load + a low-rate poll. untrack() so the effect doesn't
+  // depend on q/op/status/offset (load reads them) — otherwise every filter or
+  // page change would tear down and rebuild the interval and double-load.
   $effect(() => {
-    void load();
+    untrack(() => void load());
     const id = setInterval(() => void load(), POLL_MS);
     return () => {
       clearInterval(id);

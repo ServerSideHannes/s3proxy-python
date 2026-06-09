@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { fetchBucket } from '$lib/api';
   import { formatIsoShort } from '$lib/format';
   import { FILE_ICON, FOLDER_ICON, LOCK_ICON } from '$lib/icons';
@@ -53,6 +54,21 @@
     return `${from}–${to} of ${totalObj}`;
   });
 
+  // Page-number navigation, derived from the server's offset/total.
+  let totalObjects = $derived(
+    data ? (data.total_objects != null ? data.total_objects : data.objects.length) : 0
+  );
+  let totalPages = $derived(Math.max(1, Math.ceil(totalObjects / PAGE)));
+  let currentPage = $derived(data ? Math.floor(data.offset / PAGE) + 1 : 1);
+  // A compact window of page numbers around the current page (with first/last).
+  let pageNumbers = $derived.by(() => {
+    const tp = totalPages;
+    if (tp <= 1) return [] as number[];
+    const cur = currentPage;
+    const set = new Set<number>([1, tp, cur, cur - 1, cur + 1, cur - 2, cur + 2]);
+    return [...set].filter((p) => p >= 1 && p <= tp).sort((a, b) => a - b);
+  });
+
   async function load() {
     loading = true;
     errorStatus = null;
@@ -65,35 +81,50 @@
     }
   }
 
-  // Reset to the first page whenever the bucket or prefix changes.
+  function goToPage(p: number) {
+    const target = Math.min(Math.max(1, p), totalPages);
+    offset = (target - 1) * PAGE;
+    void load();
+  }
+
+  // Reset to the first page ONLY when the bucket or prefix changes. load() reads
+  // offset, so without untrack() the effect would also depend on offset — and
+  // every page click would re-run it, reset offset to 0, and snap back to page 1
+  // (the pagination bug). Track bucket/prefix explicitly; do the rest untracked.
   $effect(() => {
     bucket;
     prefix;
-    offset = 0;
-    void load();
+    untrack(() => {
+      offset = 0;
+      void load();
+    });
   });
 </script>
 
 {#snippet pager()}
-  {#if data && (data.has_more || data.offset > 0)}
+  {#if data && totalPages > 1}
     <div class="logs-pager">
-      <button
-        type="button"
-        class="pager-btn"
-        disabled={data.offset <= 0}
-        onclick={() => {
-          offset = Math.max(0, offset - PAGE);
-          void load();
-        }}>← Prev</button>
-      <span class="pager-status">{pageStatus}</span>
-      <button
-        type="button"
-        class="pager-btn"
-        disabled={!data.has_more}
-        onclick={() => {
-          offset += PAGE;
-          void load();
-        }}>Next →</button>
+      <button type="button" class="pager-btn" disabled={currentPage <= 1} onclick={() => goToPage(currentPage - 1)}>← Prev</button>
+      {#each pageNumbers as p, i}
+        {#if i > 0 && p - pageNumbers[i - 1] > 1}<span class="pager-gap">…</span>{/if}
+        <button type="button" class="pager-num" class:active={p === currentPage} onclick={() => goToPage(p)}>{p}</button>
+      {/each}
+      <button type="button" class="pager-btn" disabled={currentPage >= totalPages} onclick={() => goToPage(currentPage + 1)}>Next →</button>
+      <span class="pager-jump">
+        Go to
+        <input
+          type="number"
+          min="1"
+          max={totalPages}
+          placeholder={String(currentPage)}
+          onkeydown={(e) => {
+            if (e.key === 'Enter') {
+              const v = Number((e.currentTarget as HTMLInputElement).value);
+              if (v) goToPage(v);
+            }
+          }} />
+        <span class="pager-status">/ {totalPages} ({pageStatus})</span>
+      </span>
     </div>
   {/if}
 {/snippet}

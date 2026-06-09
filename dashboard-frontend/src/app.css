@@ -522,6 +522,27 @@ td.truncate {
 .pager-btn:hover:not(:disabled) { border-color: var(--border-strong); }
 .pager-btn:disabled { opacity: 0.4; cursor: default; }
 .pager-status { color: var(--text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.pager-num {
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--text); font: inherit; font-size: 13px;
+  min-width: 30px; padding: 5px 8px; border-radius: 7px; cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.pager-num:hover { border-color: var(--border-strong); }
+.pager-num.active {
+  background: var(--accent); color: #fff; border-color: var(--accent);
+}
+.pager-gap { color: var(--text-subtle); padding: 0 2px; }
+.pager-jump {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--text-muted); font-size: 12px; margin-left: 8px;
+}
+.pager-jump input {
+  width: 56px; padding: 4px 6px;
+  border: 1px solid var(--border-strong); border-radius: 7px;
+  font: inherit; font-size: 13px; text-align: center;
+}
+.pager-jump input:focus { outline: none; border-color: var(--dark); }
 
 /* ---- Footer ---- */
 .footer {
