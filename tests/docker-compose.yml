@@ -20,7 +20,7 @@ services:
     profiles: ["oom"]
     build:
       context: ../
-      dockerfile: Dockerfile
+      dockerfile: s3proxy/Dockerfile
     container_name: s3proxy-test-server
     mem_limit: 256m
     ports:

@@ -1,0 +1,92 @@
+{{- if and .Values.dashboard.enabled .Values.dashboard.frontend.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Chart.Name }}-dashboard
+  labels:
+    {{- include "s3proxy.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+spec:
+  replicas: {{ .Values.dashboard.frontend.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "s3proxy.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: dashboard
+  template:
+    metadata:
+      labels:
+        {{- include "s3proxy.labels" . | nindent 8 }}
+        app.kubernetes.io/component: dashboard
+      annotations:
+        checksum/nginx: {{ include (print $.Template.BasePath "/dashboard/configmap.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: dashboard
+          image: "{{ .Values.dashboard.frontend.image.repository }}:{{ .Values.dashboard.frontend.image.tag }}"
+          imagePullPolicy: {{ .Values.dashboard.frontend.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.dashboard.frontend.containerPort }}
+              protocol: TCP
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+              readOnly: true
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /tmp
+          resources:
+            {{- toYaml .Values.dashboard.frontend.resources | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.dashboard.path | trimSuffix "/" }}
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 2
+            timeoutSeconds: 3
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.dashboard.path | trimSuffix "/" }}
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.dashboard.path | trimSuffix "/" }}
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 101
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+      volumes:
+        - name: nginx-conf
+          configMap:
+            name: {{ .Chart.Name }}-dashboard-nginx
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
+      terminationGracePeriodSeconds: 15
+      {{- with .Values.dashboard.frontend.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.dashboard.frontend.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.dashboard.frontend.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

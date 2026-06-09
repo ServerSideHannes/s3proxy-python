@@ -22,10 +22,11 @@ jobs:
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             VERSION=${GITHUB_REF#refs/tags/}
-            echo "tags=ghcr.io/${OWNER}/s3proxy-python:${VERSION}" >> $GITHUB_OUTPUT
           else
-            echo "tags=ghcr.io/${OWNER}/s3proxy-python:latest" >> $GITHUB_OUTPUT
+            VERSION=latest
           fi
+          echo "proxy=ghcr.io/${OWNER}/s3proxy-python:${VERSION}" >> $GITHUB_OUTPUT
+          echo "dashboard=ghcr.io/${OWNER}/s3proxy-dashboard:${VERSION}" >> $GITHUB_OUTPUT
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -37,12 +38,24 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker image
+      - name: Build and push proxy image
         uses: docker/build-push-action@v7
         with:
           context: .
+          file: s3proxy/Dockerfile
           push: true
-          tags: ${{ steps.tags.outputs.tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ steps.tags.outputs.proxy }}
+          cache-from: type=gha,scope=proxy
+          cache-to: type=gha,mode=max,scope=proxy
+          platforms: linux/amd64,linux/arm64
+
+      - name: Build and push dashboard image
+        uses: docker/build-push-action@v7
+        with:
+          context: dashboard-frontend
+          file: dashboard-frontend/Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.dashboard }}
+          cache-from: type=gha,scope=dashboard
+          cache-to: type=gha,mode=max,scope=dashboard
           platforms: linux/amd64,linux/arm64

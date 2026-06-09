@@ -18,7 +18,7 @@ spec:
         {{- include "s3proxy.labels" . | nindent 8 }}
         app.kubernetes.io/component: frontproxy
       annotations:
-        checksum/config: {{ include (print $.Template.BasePath "/frontproxy-configmap.yaml") . | sha256sum }}
+        checksum/config: {{ include (print $.Template.BasePath "/frontproxy/configmap.yaml") . | sha256sum }}
     spec:
       containers:
         - name: haproxy

@@ -1,4 +1,4 @@
-"""Auth for admin dashboard — session cookies + Basic Auth fallback."""
+"""Auth for dashboard — session cookies + Basic Auth fallback."""
 
 from __future__ import annotations
 
@@ -20,21 +20,21 @@ if TYPE_CHECKING:
 
 SESSION_COOKIE = "s3proxy_session"
 SESSION_TTL_SECONDS = 24 * 3600
-_BASIC_REALM = "S3Proxy Admin"
+_BASIC_REALM = "S3Proxy Dashboard"
 
 
-class AdminCredentials:
-    """Resolved admin credentials with session-signing key."""
+class DashboardCredentials:
+    """Resolved dashboard credentials with session-signing key."""
 
     def __init__(self, settings: Settings, credentials_store: dict[str, str]):
-        if not (settings.admin_username and settings.admin_password):
+        if not (settings.dashboard_username and settings.dashboard_password):
             raise RuntimeError(
-                "Admin dashboard requires S3PROXY_ADMIN_USERNAME and S3PROXY_ADMIN_PASSWORD"
+                "Dashboard requires S3PROXY_DASHBOARD_USERNAME and S3PROXY_DASHBOARD_PASSWORD"
             )
-        self.username = settings.admin_username
-        self.password = settings.admin_password
+        self.username = settings.dashboard_username
+        self.password = settings.dashboard_password
         # Stable session-signing secret (survives pod restarts, shared across replicas).
-        self.session_secret = settings.admin_session_secret
+        self.session_secret = settings.dashboard_session_secret
 
     def valid(self, username: str, password: str) -> bool:
         return secrets.compare_digest(username.encode(), self.username.encode()) and (
@@ -88,45 +88,27 @@ _basic_security = HTTPBasic(realm=_BASIC_REALM, auto_error=False)
 _basic_dep = Depends(_basic_security)
 
 
-def _check_basic(creds: HTTPBasicCredentials | None, admin: AdminCredentials) -> str | None:
+def _check_basic(creds: HTTPBasicCredentials | None, dashboard: DashboardCredentials) -> str | None:
     if creds is None:
         return None
-    return admin.username if admin.valid(creds.username, creds.password) else None
+    return dashboard.username if dashboard.valid(creds.username, creds.password) else None
 
 
-def _check_cookie(request: Request, admin: AdminCredentials) -> str | None:
+def _check_cookie(request: Request, dashboard: DashboardCredentials) -> str | None:
     token = request.cookies.get(SESSION_COOKIE)
     if not token:
         return None
-    return verify_session(token, admin.session_secret)
+    return verify_session(token, dashboard.session_secret)
 
 
-def make_verify_html(admin: AdminCredentials, login_url: str):
-    """Auth dep for HTML routes — redirects to login_url if not logged in."""
-
-    async def verify(
-        request: Request,
-        creds: HTTPBasicCredentials | None = _basic_dep,
-    ) -> str:
-        user = _check_cookie(request, admin) or _check_basic(creds, admin)
-        if user:
-            return user
-        raise HTTPException(
-            status_code=status.HTTP_303_SEE_OTHER,
-            headers={"Location": login_url},
-        )
-
-    return verify
-
-
-def make_verify_api(admin: AdminCredentials):
+def make_verify_api(dashboard: DashboardCredentials):
     """Auth dep for JSON API routes — returns 401 if not logged in."""
 
     async def verify(
         request: Request,
         creds: HTTPBasicCredentials | None = _basic_dep,
     ) -> str:
-        user = _check_cookie(request, admin) or _check_basic(creds, admin)
+        user = _check_cookie(request, dashboard) or _check_basic(creds, dashboard)
         if user:
             return user
         raise HTTPException(
@@ -156,5 +138,5 @@ def clear_session_cookie(response: RedirectResponse) -> None:
 
 # Backwards-compat helper for existing tests.
 def create_auth_dependency(settings: Settings, credentials_store: dict[str, str]):
-    admin = AdminCredentials(settings, credentials_store)
-    return make_verify_api(admin)
+    dashboard = DashboardCredentials(settings, credentials_store)
+    return make_verify_api(dashboard)

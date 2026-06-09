@@ -1,0 +1,42 @@
+{{- if and .Values.dashboard.enabled .Values.dashboard.ingress.enabled -}}
+{{- if not .Values.dashboard.ingress.host }}
+{{- fail "dashboard.ingress.enabled is true but dashboard.ingress.host is empty — set a hostname for the dashboard" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Chart.Name }}-dashboard
+  labels:
+    {{- include "s3proxy.labels" . | nindent 4 }}
+  {{- with .Values.dashboard.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.dashboard.ingress.className }}
+  {{- with .Values.dashboard.ingress.tls }}
+  tls:
+    {{- range . }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.dashboard.ingress.host | quote }}
+      http:
+        paths:
+          # The whole dashboard.path goes to the dashboard Deployment. Its nginx serves
+          # the static UI and reverse-proxies dashboard.path/api (JSON + SSE) and the
+          # form-auth endpoints to the proxy service, so the dashboard is single
+          # origin behind one backend.
+          - path: {{ .Values.dashboard.path }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Chart.Name }}-dashboard
+                port:
+                  number: {{ .Values.dashboard.frontend.service.port }}
+{{- end }}

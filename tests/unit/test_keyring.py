@@ -81,17 +81,19 @@ class TestSettingsKeyRing:
             s.keyring.key_for("AKIA-NOT-CONFIGURED")
 
 
-class TestAdminSecret:
-    def test_admin_ui_requires_secret(self):
+class TestDashboardSecret:
+    def test_dashboard_ui_requires_secret(self):
         with pytest.raises(ValidationError):
-            Settings(admin_ui=True, admin_username="a", admin_password="b")
+            Settings(dashboard_ui=True, dashboard_username="a", dashboard_password="b")
 
-    def test_admin_session_secret_is_stable(self):
-        a = Settings(
-            admin_ui=True, admin_username="a", admin_password="b", admin_secret="sek"
-        ).admin_session_secret
-        b = Settings(
-            admin_ui=True, admin_username="a", admin_password="b", admin_secret="sek"
-        ).admin_session_secret
+    def test_dashboard_session_secret_is_stable(self):
+        kw = {
+            "dashboard_ui": True,
+            "dashboard_username": "a",
+            "dashboard_password": "b",
+            "dashboard_secret": "sek",
+        }
+        a = Settings(**kw).dashboard_session_secret
+        b = Settings(**kw).dashboard_session_secret
         assert a == b
         assert len(a) == 32

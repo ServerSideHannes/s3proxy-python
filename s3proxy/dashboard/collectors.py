@@ -1,4 +1,4 @@
-"""Data collectors for the admin dashboard."""
+"""Data collectors for the dashboard."""
 
 from __future__ import annotations
 
@@ -549,7 +549,7 @@ async def list_bucket_objects(
 
         # Per-object encryption status, the same check the object-detail view uses
         # (on-object isec tag, else multipart sidecar). Run only on the current
-        # page (≈page_size HEADs). These admin HEADs use this S3Client directly
+        # page (≈page_size HEADs). These dashboard HEADs use this S3Client directly
         # (not the proxy), so they don't pollute the dashboard stats.
         await _annotate_encryption(settings, client, bucket, objects)
 

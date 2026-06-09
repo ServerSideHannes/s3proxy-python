@@ -1,4 +1,4 @@
-"""Admin dashboard router."""
+"""Dashboard router."""
 
 from __future__ import annotations
 
@@ -9,14 +9,13 @@ from typing import TYPE_CHECKING
 
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 
 from .auth import (
-    AdminCredentials,
+    DashboardCredentials,
     clear_session_cookie,
     issue_session,
     make_verify_api,
-    make_verify_html,
     set_session_cookie,
 )
 from .collectors import (
@@ -28,65 +27,50 @@ from .collectors import (
     list_logs,
 )
 from .stats_store import DEFAULT_RANGE, RANGE_SPECS
-from .templates import render_dashboard, render_login
 
 if TYPE_CHECKING:
     from ..config import Settings
 
 
-def create_admin_router(
+def create_dashboard_router(
     settings: Settings,
     credentials_store: dict[str, str],
     version: str = "1.0.0",
 ) -> APIRouter:
-    """Build the admin dashboard router with session cookie + Basic Auth."""
-    admin = AdminCredentials(settings, credentials_store)
-    prefix = settings.admin_path.rstrip("/")
-    login_url = f"{prefix}/login"
-    verify_html = make_verify_html(admin, login_url)
-    verify_api = make_verify_api(admin)
+    """Build the dashboard API router with session cookie + Basic Auth.
+
+    The dashboard UI is a Svelte static build served by its own deployment; the
+    proxy exposes only the JSON/SSE API plus form auth under ``{prefix}/api``.
+    That deployment's nginx serves the static UI and reverse-proxies
+    ``{prefix}/api`` here, so the login page is served statically and posts back
+    to ``{prefix}/api/login``.
+    """
+    dashboard = DashboardCredentials(settings, credentials_store)
+    prefix = settings.dashboard_path.rstrip("/")
+    verify_api = make_verify_api(dashboard)
     cookie_secure = not settings.no_tls
 
     router = APIRouter()
 
-    # ---- Login / logout (unauthenticated) ------------------------------------
+    # ---- Auth (unauthenticated) ----------------------------------------------
 
-    @router.get("/login", response_class=HTMLResponse)
-    async def login_page(request: Request) -> HTMLResponse:
-        error = request.query_params.get("error")
-        return HTMLResponse(render_login(admin_path=settings.admin_path, error=error))
-
-    @router.post("/login")
+    @router.post("/api/login")
     async def login_submit(
-        request: Request,
-        username: str = Form(...),
-        password: str = Form(...),
+        username: str = Form(...), password: str = Form(...)
     ) -> RedirectResponse:
-        if not admin.valid(username, password):
-            dest = f"{settings.admin_path.rstrip('/')}/login?error=1"
+        if not dashboard.valid(username, password):
+            dest = f"{prefix}/login?error=1"
             return RedirectResponse(dest, status_code=status.HTTP_303_SEE_OTHER)
-        token = issue_session(username, admin.session_secret)
-        response = RedirectResponse(
-            settings.admin_path.rstrip("/") + "/",
-            status_code=status.HTTP_303_SEE_OTHER,
-        )
+        token = issue_session(username, dashboard.session_secret)
+        response = RedirectResponse(f"{prefix}/", status_code=status.HTTP_303_SEE_OTHER)
         set_session_cookie(response, token, secure=cookie_secure)
         return response
 
-    @router.get("/logout")
+    @router.get("/api/logout")
     async def logout() -> RedirectResponse:
-        response = RedirectResponse(
-            settings.admin_path.rstrip("/") + "/login",
-            status_code=status.HTTP_303_SEE_OTHER,
-        )
+        response = RedirectResponse(f"{prefix}/login", status_code=status.HTTP_303_SEE_OTHER)
         clear_session_cookie(response)
         return response
-
-    # ---- Authenticated routes ------------------------------------------------
-
-    @router.get("/", response_class=HTMLResponse, dependencies=[Depends(verify_html)])
-    async def dashboard() -> HTMLResponse:
-        return HTMLResponse(render_dashboard(admin_path=settings.admin_path))
 
     def _range(request: Request) -> str:
         r = request.query_params.get("range", DEFAULT_RANGE)

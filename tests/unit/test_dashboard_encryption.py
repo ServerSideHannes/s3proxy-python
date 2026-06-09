@@ -1,14 +1,14 @@
-"""Admin encryption-status detection (issue #47 #6).
+"""Dashboard encryption-status detection (issue #47 #6).
 
 Multipart objects store the wrapped DEK in a sidecar object, not an on-object
 ``isec`` tag — the create-time metadata does not survive CompleteMultipartUpload.
-The admin dashboard must consult the sidecar before reporting "not encrypted".
+The dashboard must consult the sidecar before reporting "not encrypted".
 """
 
 from __future__ import annotations
 
 import s3proxy.client as client_mod
-from s3proxy.admin.collectors import _has_multipart_sidecar, list_bucket_objects
+from s3proxy.dashboard.collectors import _has_multipart_sidecar, list_bucket_objects
 from s3proxy.state.metadata import save_multipart_metadata
 from s3proxy.state.models import MultipartMetadata
 
@@ -45,7 +45,7 @@ async def test_sidecar_lookup_swallows_errors(mock_s3) -> None:
 
 async def test_listing_annotates_per_object_encryption(mock_s3, settings) -> None:
     """list-style annotation: on-object tag, multipart sidecar, and plaintext."""
-    from s3proxy.admin.collectors import _annotate_encryption
+    from s3proxy.dashboard.collectors import _annotate_encryption
 
     # 1) single-PUT encrypted: on-object isec tag
     await mock_s3.put_object(

@@ -77,33 +77,60 @@ secrets:
 
 logLevel: "DEBUG"
 
-# Admin dashboard — served on the main service port at `admin.path`.
+# Dashboard. The proxy serves the dashboard API (JSON + SSE) and form auth under
+# `dashboard.path` when enabled. The UI itself is a Svelte static build served by
+# its own Deployment (`dashboard.frontend`); that pod's nginx reverse-proxies the
+# API + auth to the proxy, so the dashboard is single-origin behind one service.
 # Credentials are stored in a Secret. Override username/password in production,
 # or point existingSecret at your own Secret holding the credential keys below.
-admin:
+dashboard:
   enabled: false
-  path: "/admin"
+  path: "/dashboard"
   username: "admin"
   password: "admin"
-  # Stable secret used to sign admin session cookies. Required when enabled.
+  # Stable secret used to sign dashboard session cookies. Required when enabled.
   # Override in production; keep it stable so sessions survive pod restarts.
   secret: "change-me"
   existingSecret:
     name: ""
-    usernameKey: "S3PROXY_ADMIN_USERNAME"
-    passwordKey: "S3PROXY_ADMIN_PASSWORD"
-    secretKey: "S3PROXY_ADMIN_SECRET"
+    usernameKey: "S3PROXY_DASHBOARD_USERNAME"
+    passwordKey: "S3PROXY_DASHBOARD_PASSWORD"
+    secretKey: "S3PROXY_DASHBOARD_SECRET"
 
-  # Optional dedicated Ingress for the dashboard. OFF by default — the admin UI
+  # Separate Deployment serving the Svelte dashboard (the static build from
+  # dashboard-frontend/), with an nginx that also reverse-proxies the API.
+  frontend:
+    enabled: true
+    replicaCount: 1
+    image:
+      repository: ghcr.io/serversidehannes/s3proxy-dashboard
+      tag: "latest"
+      pullPolicy: IfNotPresent
+    containerPort: 8080
+    service:
+      port: 80
+    resources:
+      requests:
+        cpu: "10m"
+        memory: "16Mi"
+      limits:
+        cpu: "100m"
+        memory: "64Mi"
+    nodeSelector: {}
+    affinity: {}
+    tolerations: []
+
+  # Optional dedicated Ingress for the dashboard. OFF by default — the dashboard
   # should not be internet-facing unless you explicitly expose it (ideally behind
-  # an internal ingress class, an IP allowlist, or VPN). Routes `admin.path` to the
-  # proxy service. Set `className` to whatever ingress controller your cluster runs.
+  # an internal ingress class, an IP allowlist, or VPN). Routes `dashboard.path`
+  # to the dashboard Deployment. Set `className` to whatever ingress controller
+  # your cluster runs.
   ingress:
     enabled: false
     className: ""
     host: ""
     annotations: {}
-    tls: []  # e.g. [{ secretName: admin-tls, hosts: [admin.example.com] }]
+    tls: []  # e.g. [{ secretName: dashboard-tls, hosts: [dashboard.example.com] }]
 
 resources:
   requests:

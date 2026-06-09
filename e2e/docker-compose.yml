@@ -18,9 +18,9 @@ services:
     privileged: true
     depends_on:
       - registry
-    # Publish the s3proxy admin panel to the host. After the cluster is up, the
+    # Publish the s3proxy dashboard to the host. After the cluster is up, the
     # entrypoint runs `kubectl port-forward` (on 0.0.0.0) onto container :14433,
-    # so the dashboard is reachable at http://localhost:14433/admin (admin/admin).
+    # so the dashboard is reachable at http://localhost:14433/dashboard (admin/admin).
     ports:
       - "14433:14433"
     volumes:
@@ -60,8 +60,12 @@ services:
         echo "=== Starting parallel prep (docker build + helm + kind cluster) ==="
 
         # 1. Docker builds (background, parallel)
-        docker build -t s3proxy:latest /repo &
+        docker build -t s3proxy:latest -f /repo/s3proxy/Dockerfile /repo &
         BUILD_PID=$$!
+
+        # Dashboard image (Svelte static build served by nginx)
+        docker build -t s3proxy-dashboard:latest /repo/dashboard-frontend &
+        DASHBOARD_BUILD_PID=$$!
 
         # Build esrally image with dependencies pre-installed (parallel)
         # Pinned to 3.12 because yappi (esrally dep) has no 3.14 wheel yet
@@ -402,6 +406,8 @@ services:
         echo "=== Waiting for docker builds ==="
         wait $$BUILD_PID || { echo "s3proxy build failed"; exit 1; }
         echo "✓ s3proxy build complete"
+        wait $$DASHBOARD_BUILD_PID || { echo "dashboard build failed"; exit 1; }
+        echo "✓ dashboard build complete"
         wait $$ESRALLY_BUILD_PID || { echo "esrally build failed"; exit 1; }
         echo "✓ esrally build complete"
         wait $$MC_BUILD_PID || { echo "mc build failed"; exit 1; }
@@ -410,7 +416,7 @@ services:
 
         # 4. Load locally built images into Kind (only custom images, rest uses registry cache)
         echo "=== Loading locally built images into Kind ==="
-        kind load docker-image s3proxy:latest esrally:latest mc:latest --name db-backup-test
+        kind load docker-image s3proxy:latest s3proxy-dashboard:latest esrally:latest mc:latest --name db-backup-test
         echo "✓ Local images loaded"
 
         kubectl create namespace s3proxy 2>/dev/null || true
@@ -446,11 +452,14 @@ services:
           --set secrets.credentials[0].accessKey="minioadmin" \
           --set secrets.credentials[0].secretKey="minioadmin" \
           --set secrets.credentials[0].kek="$$ENCRYPT_KEY" \
-          --set admin.secret="$$ENCRYPT_KEY" \
+          --set dashboard.secret="$$ENCRYPT_KEY" \
           --set logLevel="DEBUG" \
           --set performance.memoryLimitMb=64 \
           --set frontproxy.enabled=true \
-          --set admin.enabled=true \
+          --set dashboard.enabled=true \
+          --set dashboard.frontend.image.repository=s3proxy-dashboard \
+          --set dashboard.frontend.image.tag=latest \
+          --set dashboard.frontend.image.pullPolicy=IfNotPresent \
           --set redis.enabled=true \
           --set redis.auth.enabled=true \
           --set redis.auth.password=testredispassword &
@@ -475,18 +484,19 @@ services:
         kubectl get pods -n s3proxy
         kubectl get svc -n s3proxy
 
-        # Expose the s3proxy admin panel to the host. The container publishes
-        # :14433; this self-healing forward maps it to the in-cluster service so
-        # the dashboard is reachable at http://localhost:14433/admin on the host.
+        # Expose the s3proxy dashboard to the host. The dashboard is served
+        # by the dashboard Deployment's nginx, which also reverse-proxies the API +
+        # SSE to the proxy service — so a single forward to the dashboard service
+        # makes the whole dashboard reachable at http://localhost:14433/dashboard.
         ( while true; do
-            kubectl port-forward -n s3proxy --address 0.0.0.0 svc/s3proxy-python 14433:4433 >/dev/null 2>&1 || true
+            kubectl port-forward -n s3proxy --address 0.0.0.0 svc/s3proxy-python-dashboard 14433:80 >/dev/null 2>&1 || true
             sleep 2
           done ) &
 
         echo ""
         echo "S3 Proxy endpoint for databases: http://s3proxy-python-frontproxy.s3proxy.svc.cluster.local:80"
         echo "Direct MinIO (unencrypted):      http://minio.minio.svc.cluster.local:9000"
-        echo "Admin panel (host browser):      http://localhost:14433/admin  (login: admin / admin)"
+        echo "Dashboard (host browser):      http://localhost:14433/dashboard  (login: admin / admin)"
 
         echo ""
         echo "=========================================="
