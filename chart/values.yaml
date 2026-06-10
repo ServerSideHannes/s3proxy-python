@@ -29,7 +29,7 @@ redis:
     # NOTE: not auto-bumped by dependabot (it doesn't track image tags in
     # values.yaml). Bump this tag manually when upgrading Redis.
     repository: redis
-    tag: "7-alpine"
+    tag: "8"
     pullPolicy: IfNotPresent
   port: 6379
   # maxmemory-policy noeviction so the proxy gets an error rather than silent
@@ -151,7 +151,7 @@ frontproxy:
   replicaCount: 2
   image:
     repository: haproxy
-    tag: "3.0-alpine"
+    tag: "3.4"
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
