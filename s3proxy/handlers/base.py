@@ -95,6 +95,15 @@ class BaseHandler:
         """Raise appropriate S3Error for bucket operations. Always raises."""
         raise_for_client_error(e, bucket)
 
+    def _internal_meta_keys(self) -> set[str]:
+        """Metadata keys owned by s3proxy that must never leak to clients."""
+        return {
+            self.settings.dektag_name.lower(),
+            self.settings.kidtag_name.lower(),
+            "client-etag",
+            "plaintext-size",
+        }
+
     def _parse_range(self, header: str, size: int) -> tuple[int, int]:
         if not header.startswith("bytes="):
             raise S3Error.invalid_range("Invalid range header format")

@@ -418,7 +418,7 @@ class UploadPartMixin(BaseHandler):
         part_num: int,
     ) -> None:
         for result in results:
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 exc_name = type(result).__name__
                 is_no_such_upload = False
 

@@ -27,7 +27,7 @@ class RedisSessionStore:
 
     async def create(self, username: str, ttl: int = SESSION_TTL_SECONDS) -> str:
         token = secrets.token_hex(32)
-        await self._redis.setex(f"{self._PREFIX}{token}", ttl, username.encode())
+        await self._redis.set(f"{self._PREFIX}{token}", username.encode(), ex=ttl)
         return token
 
     async def get(self, token: str) -> str | None:
