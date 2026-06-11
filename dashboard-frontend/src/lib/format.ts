@@ -75,11 +75,3 @@ export function formatIsoShort(iso?: string): string {
   }
 }
 
-// Robust Y max: scale to p98 so a single early spike doesn't squash the series
-// flat. Matches the previous chart's behaviour.
-export function robustMax(vals: number[]): number {
-  const sorted = vals.slice().sort((a, b) => a - b);
-  const p98 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.98))] || 0;
-  const rawMax = Math.max(...vals, 1);
-  return Math.max(1, p98 > 0 ? p98 : rawMax);
-}

@@ -75,12 +75,7 @@ class GetObjectMixin(BaseHandler):
                 response.headers["ETag"] = f'"{effective_etag}"'
 
                 # Add user metadata (x-amz-meta-*), excluding internal keys
-                internal_keys = {
-                    self.settings.dektag_name.lower(),
-                    self.settings.kidtag_name.lower(),
-                    "client-etag",
-                    "plaintext-size",
-                }
+                internal_keys = self._internal_meta_keys()
                 for k, v in metadata.items():
                     if k.lower() not in internal_keys:
                         response.headers[f"x-amz-meta-{k}"] = v

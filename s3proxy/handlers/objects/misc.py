@@ -98,12 +98,7 @@ class MiscObjectMixin(BaseHandler):
             extra["x-amz-tagging-count"] = str(resp["TagCount"])
         # Include user metadata (x-amz-meta-*) excluding internal s3proxy keys
         metadata = resp.get("Metadata", {})
-        internal_keys = {
-            self.settings.dektag_name.lower(),
-            self.settings.kidtag_name.lower(),
-            "client-etag",
-            "plaintext-size",
-        }
+        internal_keys = self._internal_meta_keys()
         for key, value in metadata.items():
             if key.lower() not in internal_keys:
                 extra[f"x-amz-meta-{key}"] = value
@@ -318,12 +313,7 @@ class MiscObjectMixin(BaseHandler):
         else:
             # Copy user metadata from source (excluding our internal keys)
             src_metadata = head_resp.get("Metadata", {})
-            internal_keys = {
-                self.settings.dektag_name.lower(),
-                self.settings.kidtag_name.lower(),
-                "client-etag",
-                "plaintext-size",
-            }
+            internal_keys = self._internal_meta_keys()
             for meta_key, meta_value in src_metadata.items():
                 if meta_key.lower() not in internal_keys:
                     dest_metadata[meta_key] = meta_value
