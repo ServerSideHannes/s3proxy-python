@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import re
+from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import NoReturn
 from urllib.parse import parse_qs, unquote
@@ -234,27 +235,28 @@ class BaseHandler:
         wrapped_dek = base64.b64decode(wrapped_dek_b64)
         return crypto.decrypt_object(ciphertext, wrapped_dek, self.keyring.key_by_id(kid))
 
-    async def _download_encrypted_multipart(
+    async def _iter_multipart_plaintext(
         self,
         client: S3Client,
         bucket: str,
         key: str,
         meta,
+        dek: bytes,
         range_start: int | None = None,
         range_end: int | None = None,
-    ) -> bytes:
-        """Download and decrypt multipart encrypted object, optionally with range."""
-        dek = crypto.unwrap_key(meta.wrapped_dek, self.keyring.key_by_id(meta.kid))
-        sorted_parts = sorted(meta.parts, key=lambda p: p.part_number)
+    ) -> AsyncIterator[bytes]:
+        """Yield decrypted plaintext for each part of a multipart-encrypted object.
 
-        plaintext_chunks = []
+        Parts outside the requested byte range are skipped. Parts that partially
+        overlap the range are trimmed before yielding.
+        """
+        sorted_parts = sorted(meta.parts, key=lambda p: p.part_number)
         pt_offset = 0
         ct_offset = 0
 
         for part in sorted_parts:
             part_pt_end = pt_offset + part.plaintext_size - 1
 
-            # Check if part is in range (or no range specified)
             in_range = range_start is None or (
                 part_pt_end >= range_start and pt_offset <= range_end
             )
@@ -266,18 +268,34 @@ class BaseHandler:
                     ciphertext = await body.read()
                 part_plaintext = crypto.decrypt(ciphertext, dek)
 
-                # Trim if range specified
                 if range_start is not None:
                     trim_start = max(0, range_start - pt_offset)
                     trim_end = min(part.plaintext_size, range_end - pt_offset + 1)
                     part_plaintext = part_plaintext[trim_start:trim_end]
 
-                plaintext_chunks.append(part_plaintext)
+                yield part_plaintext
 
             pt_offset = part_pt_end + 1
             ct_offset += part.ciphertext_size
 
-        return b"".join(plaintext_chunks)
+    async def _download_encrypted_multipart(
+        self,
+        client: S3Client,
+        bucket: str,
+        key: str,
+        meta,
+        range_start: int | None = None,
+        range_end: int | None = None,
+    ) -> bytes:
+        """Download and decrypt multipart encrypted object, optionally with range."""
+        dek = crypto.unwrap_key(meta.wrapped_dek, self.keyring.key_by_id(meta.kid))
+        chunks = [
+            chunk
+            async for chunk in self._iter_multipart_plaintext(
+                client, bucket, key, meta, dek, range_start, range_end
+            )
+        ]
+        return b"".join(chunks)
 
     async def forward_request(self, request: Request, creds: S3Credentials) -> Response:
         """Forward unhandled requests to S3.
