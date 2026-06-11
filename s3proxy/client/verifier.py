@@ -48,11 +48,10 @@ class SigV4Verifier:
 
         Returns: (credentials, date_stamp, region, service, error)
         """
-        try:
-            parts = credential.split("/")
-            access_key, date_stamp, region, service = parts[0], parts[1], parts[2], parts[3]
-        except (IndexError, ValueError):
+        parts = credential.split("/")
+        if len(parts) < 4:
             return None, "", "", "", "Invalid credential format"
+        access_key, date_stamp, region, service = parts[0], parts[1], parts[2], parts[3]
 
         secret_key = self.credentials_store.get(access_key)
         if not secret_key:
