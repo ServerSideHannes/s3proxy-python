@@ -20,7 +20,6 @@ from s3proxy.state import (
     save_multipart_metadata,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -76,9 +75,7 @@ class TestCopyPlaintextSize:
     def test_single_encrypted_falls_back_to_content_length(self, handler, settings):
         # No plaintext-size metadata → derive from ciphertext ContentLength
         head = {"ContentLength": crypto.NONCE_SIZE + 50 + crypto.TAG_SIZE, "Metadata": {}}
-        assert (
-            handler._copy_plaintext_size(head, None, "wrapped-dek", None) == 50
-        )
+        assert handler._copy_plaintext_size(head, None, "wrapped-dek", None) == 50
 
     def test_multipart_encrypted_total_size(self, handler):
         meta = type("M", (), {"total_plaintext_size": 1024 * 1024})()
@@ -249,9 +246,7 @@ class TestUploadPartCopyStreaming:
         assert bytes(recovered) == plaintext[:range_size]
 
     @pytest.mark.asyncio
-    async def test_large_multipart_encrypted_source(
-        self, mock_s3, settings, manager, credentials
-    ):
+    async def test_large_multipart_encrypted_source(self, mock_s3, settings, manager, credentials):
         """Large multipart-encrypted source → iterates source parts, re-encrypts in chunks."""
         handler = _make_handler(settings, manager)
         await mock_s3.create_bucket("bucket")
@@ -347,9 +342,7 @@ class TestCopyObjectStreaming:
     """End-to-end streaming CopyObject tests."""
 
     @pytest.mark.asyncio
-    async def test_small_source_uses_put_object_path(
-        self, mock_s3, settings, manager, credentials
-    ):
+    async def test_small_source_uses_put_object_path(self, mock_s3, settings, manager, credentials):
         """Source ≤ STREAMING_THRESHOLD → put_object path (no internal multipart)."""
         handler = _make_misc_handler(settings, manager)
         await mock_s3.create_bucket("bucket")
@@ -533,9 +526,7 @@ class TestCopyObjectStreaming:
         dst_meta = await load_multipart_metadata(mock_s3, "bucket", "dst")
         assert dst_meta is not None
 
-        recovered = await handler._download_encrypted_multipart(
-            mock_s3, "bucket", "dst", dst_meta
-        )
+        recovered = await handler._download_encrypted_multipart(mock_s3, "bucket", "dst", dst_meta)
         assert recovered == src_plaintext
 
     @pytest.mark.asyncio
@@ -608,7 +599,5 @@ class TestCopyObjectStreaming:
         dst_meta = await load_multipart_metadata(mock_s3, "bucket", "dst")
         assert dst_meta is not None
         # Content is still correct
-        recovered = await handler._download_encrypted_multipart(
-            mock_s3, "bucket", "dst", dst_meta
-        )
+        recovered = await handler._download_encrypted_multipart(mock_s3, "bucket", "dst", dst_meta)
         assert recovered == src_plaintext

@@ -3,8 +3,9 @@
 import asyncio
 import base64
 import re
+from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import AsyncIterator, NoReturn
+from typing import NoReturn
 from urllib.parse import parse_qs, unquote
 
 import httpx

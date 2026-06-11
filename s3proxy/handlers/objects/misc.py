@@ -438,8 +438,16 @@ class MiscObjectMixin(BaseHandler):
 
         try:
             s3_parts, meta_parts, total_plaintext = await self._stream_copy_to_multipart(
-                client, bucket, key, upload_id, dek,
-                src_bucket, src_key, src_wrapped_dek, src_multipart_meta, head_resp,
+                client,
+                bucket,
+                key,
+                upload_id,
+                dek,
+                src_bucket,
+                src_key,
+                src_wrapped_dek,
+                src_multipart_meta,
+                head_resp,
             )
 
             await client.complete_multipart_upload(bucket, key, upload_id, s3_parts)
@@ -461,9 +469,7 @@ class MiscObjectMixin(BaseHandler):
             ),
         )
 
-        etag = hashlib.md5(
-            str(total_plaintext).encode(), usedforsecurity=False
-        ).hexdigest()
+        etag = hashlib.md5(str(total_plaintext).encode(), usedforsecurity=False).hexdigest()
 
         logger.info(
             "COPY_ENCRYPTED_STREAMING_COMPLETE",
@@ -514,20 +520,42 @@ class MiscObjectMixin(BaseHandler):
             while len(buf) >= crypto.MAX_BUFFER_SIZE:
                 chunk = bytes(buf[: crypto.MAX_BUFFER_SIZE])
                 del buf[: crypto.MAX_BUFFER_SIZE]
-                part_number, s3_parts, meta_parts, total_plaintext = (
-                    await self._encrypt_and_upload_chunk(
-                        client, bucket, key, upload_id, dek,
-                        chunk, part_number, s3_parts, meta_parts, total_plaintext,
-                    )
+                (
+                    part_number,
+                    s3_parts,
+                    meta_parts,
+                    total_plaintext,
+                ) = await self._encrypt_and_upload_chunk(
+                    client,
+                    bucket,
+                    key,
+                    upload_id,
+                    dek,
+                    chunk,
+                    part_number,
+                    s3_parts,
+                    meta_parts,
+                    total_plaintext,
                 )
 
         if buf:
             chunk = bytes(buf)
-            part_number, s3_parts, meta_parts, total_plaintext = (
-                await self._encrypt_and_upload_chunk(
-                    client, bucket, key, upload_id, dek,
-                    chunk, part_number, s3_parts, meta_parts, total_plaintext,
-                )
+            (
+                part_number,
+                s3_parts,
+                meta_parts,
+                total_plaintext,
+            ) = await self._encrypt_and_upload_chunk(
+                client,
+                bucket,
+                key,
+                upload_id,
+                dek,
+                chunk,
+                part_number,
+                s3_parts,
+                meta_parts,
+                total_plaintext,
             )
 
         return s3_parts, meta_parts, total_plaintext

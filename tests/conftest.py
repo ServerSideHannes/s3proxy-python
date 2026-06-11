@@ -126,6 +126,7 @@ class MockS3Response:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         return None
 
+
 class MockS3Client:
     """Mock S3 client for testing without real S3 backend."""
 

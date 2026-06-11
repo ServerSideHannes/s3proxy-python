@@ -44,9 +44,7 @@ class CopyPartMixin(BaseHandler):
                     raise S3Error.no_such_upload(upload_id)
                 wrapped_dek, kid = state_data
                 dek = crypto.unwrap_key(wrapped_dek, self.keyring.key_by_id(kid))
-                state = await self.multipart_manager.create_upload(
-                    bucket, key, upload_id, dek, kid
-                )
+                state = await self.multipart_manager.create_upload(bucket, key, upload_id, dek, kid)
 
             try:
                 head_resp = await client.head_object(src_bucket, src_key)
@@ -162,9 +160,7 @@ class CopyPartMixin(BaseHandler):
         )
         last_modified = format_iso8601(datetime.now(UTC))
         return Response(
-            content=xml_responses.upload_part_copy_result(
-                resp["ETag"].strip('"'), last_modified
-            ),
+            content=xml_responses.upload_part_copy_result(resp["ETag"].strip('"'), last_modified),
             media_type="application/xml",
         )
 
@@ -197,9 +193,7 @@ class CopyPartMixin(BaseHandler):
                 client, src_bucket, src_key, src_wrapped_dek, src_kid
             )
             if copy_source_range:
-                start, end = self._parse_copy_source_range(
-                    copy_source_range, len(full_plaintext)
-                )
+                start, end = self._parse_copy_source_range(copy_source_range, len(full_plaintext))
                 return full_plaintext[start : end + 1]
             return full_plaintext
 
@@ -249,18 +243,16 @@ class CopyPartMixin(BaseHandler):
             src_metadata,
         )
 
-        internal_parts, total_plaintext, total_ciphertext, md5 = (
-            await self._pump_copy_chunks(
-                client,
-                bucket,
-                key,
-                upload_id,
-                part_num,
-                state,
-                src_iter,
-                chunk_size,
-                internal_part_start,
-            )
+        internal_parts, total_plaintext, total_ciphertext, md5 = await self._pump_copy_chunks(
+            client,
+            bucket,
+            key,
+            upload_id,
+            part_num,
+            state,
+            src_iter,
+            chunk_size,
+            internal_part_start,
         )
 
         etag = md5.hexdigest()
@@ -287,9 +279,7 @@ class CopyPartMixin(BaseHandler):
             internal_parts=len(internal_parts),
         )
         return Response(
-            content=xml_responses.upload_part_copy_result(
-                etag, format_iso8601(datetime.now(UTC))
-            ),
+            content=xml_responses.upload_part_copy_result(etag, format_iso8601(datetime.now(UTC))),
             media_type="application/xml",
         )
 
@@ -308,9 +298,7 @@ class CopyPartMixin(BaseHandler):
         if src_multipart_meta:
             total = src_multipart_meta.total_plaintext_size
             if copy_source_range:
-                range_start, range_end = self._parse_copy_source_range(
-                    copy_source_range, total
-                )
+                range_start, range_end = self._parse_copy_source_range(copy_source_range, total)
             else:
                 range_start, range_end = None, None
             dek = crypto.unwrap_key(
@@ -327,15 +315,11 @@ class CopyPartMixin(BaseHandler):
                 client, src_bucket, src_key, src_wrapped_dek, src_kid
             )
             if copy_source_range:
-                start, end = self._parse_copy_source_range(
-                    copy_source_range, len(plaintext)
-                )
+                start, end = self._parse_copy_source_range(copy_source_range, len(plaintext))
                 plaintext = plaintext[start : end + 1]
             yield plaintext
         else:
-            resp = await client.get_object(
-                src_bucket, src_key, range_header=copy_source_range
-            )
+            resp = await client.get_object(src_bucket, src_key, range_header=copy_source_range)
             async with resp["Body"] as body:
                 while True:
                     chunk = await body.read(crypto.MAX_BUFFER_SIZE)
@@ -410,7 +394,8 @@ class CopyPartMixin(BaseHandler):
         self._check_upload_results(results, bucket, key, upload_id, part_num)  # type: ignore[attr-defined]
 
         results_by_part: dict[int, InternalPartMetadata] = {
-            r.internal_part_number: r for r in results  # type: ignore[union-attr]
+            r.internal_part_number: r
+            for r in results  # type: ignore[union-attr]
         }
         internal_parts = []
         total_ciphertext = 0
