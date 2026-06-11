@@ -25,7 +25,7 @@ dependencies = [
     "aioboto3>=15.5.0",
     "boto3>=1.40.0",
     "botocore>=1.40.0",
-    "cryptography>=48.0.0",
+    "cryptography>=48.0.1",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.1",
     "structlog>=26.1.0",
@@ -51,8 +51,8 @@ dev = [
     "moto[s3]>=5.2.2",
     "ruff>=0.15.16",
     "mypy>=2.1.0",
-    "boto3-stubs[s3]>=1.43.24",
-    "fakeredis>=2.36.0",
+    "boto3-stubs[s3]>=1.43.26",
+    "fakeredis>=2.36.1",
     "requests>=2.34.2",
 ]
 
