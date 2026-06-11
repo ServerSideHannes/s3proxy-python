@@ -18,7 +18,8 @@ app does not reshape it.
 src/
   app.css                 design tokens + styles, ported 1:1 from the old UI
   lib/
-    api.ts                fetch wrappers (relative URLs, 401 -> login)
+    api.ts                fetch wrappers (relative URLs, 401 -> login, typed HttpError)
+    loader.svelte.ts      shared load state: loading/errorStatus + stale-response guard
     status.svelte.ts      SSE feed + initial fetch
     chart.ts              uPlot wrapper matching the old chart look
     route.ts              hash-route parser (#, #logs, #metric=, #bucket=, ...)

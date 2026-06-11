@@ -22,6 +22,15 @@ export const STREAM_URL = `${API}/stream`;
 
 class Unauthorized extends Error {}
 
+// Carries the HTTP status as a field instead of encoding it in the message, so
+// callers (createLoader) can branch on `err.status` without string-parsing.
+export class HttpError extends Error {
+  constructor(readonly status: number) {
+    super(`HTTP ${status}`);
+    this.name = 'HttpError';
+  }
+}
+
 function toLogin(): never {
   window.location.href = LOGIN_URL;
   throw new Unauthorized();
@@ -30,7 +39,7 @@ function toLogin(): never {
 async function getJSON<T>(url: string): Promise<T> {
   const r = await fetch(url, { credentials: 'same-origin' });
   if (r.status === 401) toLogin();
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new HttpError(r.status);
   return (await r.json()) as T;
 }
 

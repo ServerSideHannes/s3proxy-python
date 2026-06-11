@@ -1,7 +1,9 @@
 """GET object operations with encryption support."""
 
+import asyncio
 import base64
-from collections.abc import AsyncIterator
+import contextlib
+from collections.abc import AsyncIterator, Awaitable, Callable
 from itertools import accumulate
 from typing import Any
 
@@ -275,19 +277,25 @@ class GetObjectMixin(BaseHandler):
                 part_meta, ct_start = part_info[part_num]
 
                 if part_meta.internal_parts:
-                    async for chunk in self._stream_internal_parts(
-                        stream_client,
-                        bucket,
-                        key,
-                        part_num,
-                        part_meta,
-                        ct_start,
-                        off_start,
-                        off_end,
-                        dek,
-                        actual_size,
-                    ):
-                        yield chunk
+                    # aclosing() so a client disconnect deterministically tears down
+                    # the prefetch lookahead (cancelling its in-flight fetch and
+                    # releasing its memory reservation) rather than waiting on GC.
+                    async with contextlib.aclosing(
+                        self._stream_internal_parts(
+                            stream_client,
+                            bucket,
+                            key,
+                            part_num,
+                            part_meta,
+                            ct_start,
+                            off_start,
+                            off_end,
+                            dek,
+                            actual_size,
+                        )
+                    ) as parts_stream:
+                        async for chunk in parts_stream:
+                            yield chunk
                 else:
                     chunk = await self._fetch_and_decrypt_part(
                         stream_client,
@@ -324,37 +332,75 @@ class GetObjectMixin(BaseHandler):
             internal_part_count=len(part_meta.internal_parts),
         )
 
+        # Resolve which internal parts intersect the requested range FIRST, with
+        # absolute ciphertext bounds and the plaintext slice to emit. The prefetch
+        # below only ever looks ahead within this filtered list, so it never
+        # fetches a part the range would skip.
+        needed: list[tuple[Any, int, int, int, int]] = []
         ct_offset = ct_start
         pt_offset = 0
-
         for ip in sorted(part_meta.internal_parts, key=lambda p: p.internal_part_number):
             pt_end = pt_offset + ip.plaintext_size - 1
-
-            # Skip parts before our range
-            if pt_end < off_start:
+            if pt_end < off_start:  # entirely before the range
                 ct_offset += ip.ciphertext_size
                 pt_offset += ip.plaintext_size
                 continue
-            # Stop after our range
-            if pt_offset > off_end:
+            if pt_offset > off_end:  # entirely after the range
                 break
-
             ct_end = ct_offset + ip.ciphertext_size - 1
             self._validate_ciphertext_range(
                 bucket, key, part_num, ip.internal_part_number, ct_end, actual_size
             )
-
-            chunk = await self._fetch_internal_part(
-                client, bucket, key, part_num, ip, ct_offset, ct_end, dek
-            )
-
-            # Slice to requested range within this part
             slice_start = max(0, off_start - pt_offset)
             slice_end = min(ip.plaintext_size, off_end - pt_offset + 1)
-            yield chunk[slice_start:slice_end]
-
+            needed.append((ip, ct_offset, ct_end, slice_start, slice_end))
             ct_offset += ip.ciphertext_size
             pt_offset += ip.plaintext_size
+
+        def fetch(item: tuple[Any, int, int, int, int]) -> Awaitable[bytes]:
+            ip, c_start, c_end, _, _ = item
+            return self._fetch_internal_part(client, bucket, key, part_num, ip, c_start, c_end, dek)
+
+        # aclosing() guarantees the prefetch generator's finally (which cancels an
+        # in-flight lookahead and releases its memory reservation) runs when this
+        # stream is torn down — e.g. on client disconnect.
+        async with contextlib.aclosing(self._stream_parts_with_prefetch(needed, fetch)) as stream:
+            async for item, chunk in stream:
+                _, _, _, slice_start, slice_end = item
+                yield chunk[slice_start:slice_end]
+
+    async def _stream_parts_with_prefetch(
+        self,
+        items: list,
+        fetch: Callable[[Any], Awaitable[bytes]],
+    ) -> AsyncIterator[tuple[Any, bytes]]:
+        """Yield ``(item, fetched_bytes)`` with single-part lookahead (double buffer).
+
+        While the caller consumes item N, item N+1 is fetched concurrently as a
+        task — overlapping backend fetch+decrypt with the client send so each part
+        boundary no longer serializes a full backend TTFB behind sending the
+        previous part. Lookahead depth is fixed at 1: at most one extra fetch is in
+        flight, holding at most one extra memory reservation (acquired inside
+        ``fetch``), so the memory ceiling is unchanged. On early exit / client
+        disconnect the pending prefetch is cancelled and ``fetch``'s own ``finally``
+        releases its reservation.
+        """
+        if not items:
+            return
+        next_task = asyncio.create_task(fetch(items[0]))
+        try:
+            for i, item in enumerate(items):
+                chunk = await next_task
+                if i + 1 < len(items):
+                    next_task = asyncio.create_task(fetch(items[i + 1]))
+                yield item, chunk
+        finally:
+            next_task.cancel()
+            # Drain the cancelled/failed lookahead so its reservation is released.
+            # Any exception here is from the abandoned task; the exception that
+            # triggered cleanup (if any) re-propagates after this block.
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await next_task
 
     def _validate_ciphertext_range(
         self,

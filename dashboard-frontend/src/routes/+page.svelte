@@ -43,7 +43,11 @@
     <Dashboard {status} />
   {:else if route.view === 'metric'}
     {#key route.metric}
-      <MetricView metricKey={route.metric} card={status?.cards[route.metric]} />
+      <MetricView
+        metricKey={route.metric}
+        card={status?.cards[route.metric]}
+        clusterWide={status?.header.cluster_wide ?? true}
+      />
     {/key}
   {:else if route.view === 'bucket'}
     {#key route.bucket + '|' + route.prefix}

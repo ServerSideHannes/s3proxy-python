@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { fetchLogs } from '$lib/api';
+  import { createLoader } from '$lib/loader.svelte';
   import { bucketHref, objectHref } from '$lib/route';
   import type { LogsPayload } from '$lib/types';
   import Pager from './Pager.svelte';
@@ -41,15 +42,18 @@
     void load();
   }
 
+  const loader = createLoader();
+
   async function load() {
-    try {
-      const d = await fetchLogs({ q, operation: op, status: statusFilter, limit: LIMIT, offset });
-      const seen = new Set(operations);
-      for (const o of d.operations) if (!seen.has(o)) operations.push(o);
-      data = d;
-    } catch {
-      /* retry next tick */
-    }
+    // The poll and manual loads race; run() drops a superseded/errored response so
+    // a slow poll can't overwrite a fresher filtered result. Errors retry next tick.
+    const d = await loader.run(() =>
+      fetchLogs({ q, operation: op, status: statusFilter, limit: LIMIT, offset })
+    );
+    if (!d) return;
+    const seen = new Set(operations);
+    for (const o of d.operations) if (!seen.has(o)) operations.push(o);
+    data = d;
   }
 
   function reloadFromStart() {

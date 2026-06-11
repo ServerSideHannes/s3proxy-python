@@ -3,6 +3,7 @@
   import { fetchBucket } from '$lib/api';
   import { formatIsoShort } from '$lib/format';
   import { FILE_ICON, FOLDER_ICON, LOCK_ICON } from '$lib/icons';
+  import { createLoader } from '$lib/loader.svelte';
   import { bucketHref, objectHref, prefixHref } from '$lib/route';
   import type { BucketPayload } from '$lib/types';
   import Pager from './Pager.svelte';
@@ -12,8 +13,7 @@
   const PAGE = 20;
   let offset = $state(0);
   let data = $state<BucketPayload | null>(null);
-  let loading = $state(true);
-  let errorStatus = $state<number | null>(null);
+  const loader = createLoader();
 
   let crumbs = $derived.by(() => {
     const parts = (prefix || '').split('/').filter(Boolean);
@@ -52,15 +52,10 @@
   );
 
   async function load() {
-    loading = true;
-    errorStatus = null;
-    try {
-      data = await fetchBucket(bucket, prefix, offset, PAGE);
-    } catch (e) {
-      errorStatus = e instanceof Error && e.message.startsWith('HTTP ') ? Number(e.message.slice(5)) : -1;
-    } finally {
-      loading = false;
-    }
+    // loader.run() supplies the loading/error state and a request-token guard, so
+    // fast prefix/offset changes can't let a stale response overwrite newer data.
+    const d = await loader.run(() => fetchBucket(bucket, prefix, offset, PAGE));
+    if (d) data = d;
   }
 
   function goOffset(o: number) {
@@ -120,10 +115,10 @@
       </tr>
     </thead>
     <tbody>
-      {#if loading && !data}
+      {#if loader.loading && !data}
         <tr><td colspan="4" class="empty-state">Loading…</td></tr>
-      {:else if errorStatus != null}
-        <tr><td colspan="4" class="empty-state">Failed to load: {errorStatus}</td></tr>
+      {:else if loader.errorStatus != null}
+        <tr><td colspan="4" class="empty-state">Failed to load: {loader.errorStatus}</td></tr>
       {:else if data && data.folders.length + data.objects.length === 0}
         <tr><td colspan="4" class="empty-state">Empty folder.</td></tr>
       {:else if data}

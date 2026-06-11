@@ -70,6 +70,7 @@ def create_lifespan(settings: Settings, credentials_store: dict[str, str]) -> As
 
         stats_store = create_stats_store(settings)
         set_store(stats_store)  # used by the synchronous record_request path
+        await stats_store.start()  # background flush loop (Redis store only; no-op for memory)
 
         if settings.dashboard_ui:
             from .dashboard.auth import RedisSessionStore
@@ -90,6 +91,7 @@ def create_lifespan(settings: Settings, credentials_store: dict[str, str]) -> As
 
         yield
 
+        await stats_store.aclose()  # flush buffered samples before Redis closes
         await close_redis()
         await close_http_client()
         logger.info("Shutting down")
