@@ -108,21 +108,23 @@ class MockS3Response:
     """Mock S3 response object."""
 
     def __init__(self, data: bytes):
-        self.data = data
-        self._read = False
+        self._buf = bytearray(data)
 
-    async def read(self):
-        """Read response body."""
-        return self.data
+    async def read(self, n: int = -1) -> bytes:
+        """Read response body, optionally limited to n bytes."""
+        if n == -1:
+            result = bytes(self._buf)
+            self._buf = bytearray()
+            return result
+        result = bytes(self._buf[:n])
+        del self._buf[:n]
+        return result
 
     async def __aenter__(self):
-        """Async context manager entry."""
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit."""
         return None
-
 
 class MockS3Client:
     """Mock S3 client for testing without real S3 backend."""

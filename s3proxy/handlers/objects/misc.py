@@ -13,10 +13,14 @@ from structlog.stdlib import BoundLogger
 
 from ... import crypto, xml_responses
 from ...errors import S3Error
-from ...s3client import S3Credentials
+from ...s3client import S3Client, S3Credentials
 from ...state import (
+    InternalPartMetadata,
+    MultipartMetadata,
+    PartMetadata,
     delete_multipart_metadata,
     load_multipart_metadata,
+    save_multipart_metadata,
 )
 from ...utils import format_http_date, format_iso8601
 from ...xml_utils import find_element, find_elements
@@ -260,7 +264,7 @@ class MiscObjectMixin(BaseHandler):
 
     async def _copy_encrypted(
         self,
-        client,
+        client: S3Client,
         bucket: str,
         key: str,
         content_type: str | None,
@@ -283,23 +287,44 @@ class MiscObjectMixin(BaseHandler):
         )
 
         if src_multipart_meta:
-            # Multipart source carries its kid in the stored metadata.
+            plaintext_size = src_multipart_meta.total_plaintext_size
+        else:
+            size_str = head_resp.get("Metadata", {}).get("plaintext-size")
+            if size_str:
+                plaintext_size = int(size_str)
+            else:
+                plaintext_size = crypto.plaintext_size(head_resp.get("ContentLength", 0))
+
+        if plaintext_size > crypto.STREAMING_THRESHOLD:
+            return await self._copy_encrypted_streaming(
+                client,
+                bucket,
+                key,
+                content_type,
+                src_bucket,
+                src_key,
+                head_resp,
+                src_wrapped_dek,
+                src_multipart_meta,
+                metadata_directive,
+                new_metadata,
+                plaintext_size,
+            )
+
+        if src_multipart_meta:
             plaintext = await self._download_encrypted_multipart(
                 client, src_bucket, src_key, src_multipart_meta
             )
         else:
-            # Single-object source kid is on the head response we already fetched.
             src_kid = head_resp.get("Metadata", {}).get(self.settings.kidtag_name, "")
             plaintext = await self._download_encrypted_single(
                 client, src_bucket, src_key, src_wrapped_dek, src_kid
             )
 
-        # Re-encrypt under the calling credential's key.
         dest_kid, dest_kek = self.keyring.key_for(client.credentials.access_key)
         encrypted = crypto.encrypt_object(plaintext, dest_kek)
         etag = hashlib.md5(plaintext, usedforsecurity=False).hexdigest()
 
-        # Build destination metadata
         dest_metadata = {
             self.settings.dektag_name: base64.b64encode(encrypted.wrapped_dek).decode(),
             self.settings.kidtag_name: dest_kid,
@@ -308,17 +333,14 @@ class MiscObjectMixin(BaseHandler):
         }
 
         if metadata_directive == "REPLACE" and new_metadata is not None:
-            # Use new metadata from request
             dest_metadata.update(new_metadata)
         else:
-            # Copy user metadata from source (excluding our internal keys)
             src_metadata = head_resp.get("Metadata", {})
             internal_keys = self._internal_meta_keys()
             for meta_key, meta_value in src_metadata.items():
                 if meta_key.lower() not in internal_keys:
                     dest_metadata[meta_key] = meta_value
 
-        # Get source headers to preserve (only if not replacing)
         if metadata_directive == "REPLACE":
             src_cache_control = None
             src_expires = None
@@ -350,6 +372,232 @@ class MiscObjectMixin(BaseHandler):
             content=xml_responses.copy_object_result(etag, last_modified),
             media_type="application/xml",
         )
+
+    async def _copy_encrypted_streaming(
+        self,
+        client: S3Client,
+        bucket: str,
+        key: str,
+        content_type: str | None,
+        src_bucket: str,
+        src_key: str,
+        head_resp: dict,
+        src_wrapped_dek: str | None,
+        src_multipart_meta,
+        metadata_directive: str,
+        new_metadata: dict[str, str] | None,
+        plaintext_size: int,
+    ) -> Response:
+        """Re-encrypt a large source object via an internal multipart upload.
+
+        Streams the source plaintext in MAX_BUFFER_SIZE chunks to avoid buffering
+        the entire object in memory and to keep individual AES-GCM calls bounded.
+        """
+        logger.info(
+            "COPY_ENCRYPTED_STREAMING",
+            src_bucket=src_bucket,
+            src_key=src_key,
+            dest_bucket=bucket,
+            dest_key=key,
+            plaintext_mb=f"{plaintext_size / 1024 / 1024:.2f}MB",
+        )
+
+        dest_kid, dest_kek = self.keyring.key_for(client.credentials.access_key)
+        dek = crypto.generate_dek()
+        wrapped_dek = crypto.wrap_key(dek, dest_kek)
+
+        upload_metadata: dict[str, str] = {
+            self.settings.dektag_name: base64.b64encode(wrapped_dek).decode(),
+            self.settings.kidtag_name: dest_kid,
+        }
+        if metadata_directive == "REPLACE" and new_metadata is not None:
+            upload_metadata.update(new_metadata)
+        else:
+            src_metadata = head_resp.get("Metadata", {})
+            internal_keys = self._internal_meta_keys()
+            for meta_key, meta_value in src_metadata.items():
+                if meta_key.lower() not in internal_keys:
+                    upload_metadata[meta_key] = meta_value
+
+        if metadata_directive == "REPLACE":
+            src_cache_control = None
+            src_expires = None
+        else:
+            src_cache_control = head_resp.get("CacheControl")
+            src_expires = head_resp.get("Expires")
+
+        resp = await client.create_multipart_upload(
+            bucket,
+            key,
+            content_type=content_type or head_resp.get("ContentType", "application/octet-stream"),
+            metadata=upload_metadata,
+            cache_control=src_cache_control,
+            expires=src_expires,
+        )
+        upload_id = resp["UploadId"]
+
+        try:
+            s3_parts, meta_parts, total_plaintext = await self._stream_copy_to_multipart(
+                client, bucket, key, upload_id, dek,
+                src_bucket, src_key, src_wrapped_dek, src_multipart_meta, head_resp,
+            )
+
+            await client.complete_multipart_upload(bucket, key, upload_id, s3_parts)
+        except Exception:
+            await self._safe_abort(client, bucket, key, upload_id)
+            raise
+
+        await save_multipart_metadata(
+            client,
+            bucket,
+            key,
+            MultipartMetadata(
+                version=2,
+                part_count=len(meta_parts),
+                total_plaintext_size=total_plaintext,
+                parts=meta_parts,
+                wrapped_dek=wrapped_dek,
+                kid=dest_kid,
+            ),
+        )
+
+        etag = hashlib.md5(
+            str(total_plaintext).encode(), usedforsecurity=False
+        ).hexdigest()
+
+        logger.info(
+            "COPY_ENCRYPTED_STREAMING_COMPLETE",
+            src_bucket=src_bucket,
+            src_key=src_key,
+            dest_bucket=bucket,
+            dest_key=key,
+            plaintext_mb=f"{total_plaintext / 1024 / 1024:.2f}MB",
+            parts=len(meta_parts),
+        )
+        last_modified = format_iso8601(datetime.now(UTC))
+        return Response(
+            content=xml_responses.copy_object_result(etag, last_modified),
+            media_type="application/xml",
+        )
+
+    async def _stream_copy_to_multipart(
+        self,
+        client: S3Client,
+        bucket: str,
+        key: str,
+        upload_id: str,
+        dek: bytes,
+        src_bucket: str,
+        src_key: str,
+        src_wrapped_dek: str | None,
+        src_multipart_meta,
+        head_resp: dict,
+    ) -> tuple[list[dict], list[PartMetadata], int]:
+        """Stream-encrypt plaintext from source into an in-progress S3 multipart upload.
+
+        Returns the S3 parts list (for CompleteMultipartUpload), PartMetadata list
+        (for MultipartMetadata sidecar), and total plaintext bytes written.
+        """
+        s3_parts: list[dict] = []
+        meta_parts: list[PartMetadata] = []
+        total_plaintext = 0
+        part_number = 1
+
+        src_iter = self._iter_object_plaintext(
+            client, src_bucket, src_key, src_wrapped_dek, src_multipart_meta, head_resp
+        )
+
+        buf = bytearray()
+        async for raw in src_iter:
+            buf.extend(raw)
+
+            while len(buf) >= crypto.MAX_BUFFER_SIZE:
+                chunk = bytes(buf[: crypto.MAX_BUFFER_SIZE])
+                del buf[: crypto.MAX_BUFFER_SIZE]
+                part_number, s3_parts, meta_parts, total_plaintext = (
+                    await self._encrypt_and_upload_chunk(
+                        client, bucket, key, upload_id, dek,
+                        chunk, part_number, s3_parts, meta_parts, total_plaintext,
+                    )
+                )
+
+        if buf:
+            chunk = bytes(buf)
+            part_number, s3_parts, meta_parts, total_plaintext = (
+                await self._encrypt_and_upload_chunk(
+                    client, bucket, key, upload_id, dek,
+                    chunk, part_number, s3_parts, meta_parts, total_plaintext,
+                )
+            )
+
+        return s3_parts, meta_parts, total_plaintext
+
+    async def _encrypt_and_upload_chunk(
+        self,
+        client: S3Client,
+        bucket: str,
+        key: str,
+        upload_id: str,
+        dek: bytes,
+        chunk: bytes,
+        part_number: int,
+        s3_parts: list[dict],
+        meta_parts: list[PartMetadata],
+        total_plaintext: int,
+    ) -> tuple[int, list[dict], list[PartMetadata], int]:
+        nonce = crypto.derive_part_nonce(upload_id, part_number)
+        ciphertext = crypto.encrypt(chunk, dek, nonce)
+        resp = await client.upload_part(bucket, key, upload_id, part_number, ciphertext)
+        etag = resp["ETag"].strip('"')
+        plaintext_len = len(chunk)
+        ciphertext_len = len(ciphertext)
+        del ciphertext
+
+        s3_parts.append({"PartNumber": part_number, "ETag": f'"{etag}"'})
+        meta_parts.append(
+            PartMetadata(
+                part_number=part_number,
+                plaintext_size=plaintext_len,
+                ciphertext_size=ciphertext_len,
+                etag=etag,
+                md5="",
+                internal_parts=[
+                    InternalPartMetadata(
+                        internal_part_number=part_number,
+                        plaintext_size=plaintext_len,
+                        ciphertext_size=ciphertext_len,
+                        etag=etag,
+                    )
+                ],
+            )
+        )
+        return part_number + 1, s3_parts, meta_parts, total_plaintext + plaintext_len
+
+    async def _iter_object_plaintext(
+        self,
+        client: S3Client,
+        src_bucket: str,
+        src_key: str,
+        src_wrapped_dek: str | None,
+        src_multipart_meta,
+        head_resp: dict,
+    ):
+        """Yield plaintext bytes from an encrypted source object."""
+        if src_multipart_meta:
+            dek = crypto.unwrap_key(
+                src_multipart_meta.wrapped_dek,
+                self.keyring.key_by_id(src_multipart_meta.kid),
+            )
+            async for chunk in self._iter_multipart_plaintext(
+                client, src_bucket, src_key, src_multipart_meta, dek
+            ):
+                yield chunk
+        else:
+            src_kid = head_resp.get("Metadata", {}).get(self.settings.kidtag_name, "")
+            plaintext = await self._download_encrypted_single(
+                client, src_bucket, src_key, src_wrapped_dek, src_kid
+            )
+            yield plaintext
 
     async def handle_get_object_tagging(self, request: Request, creds: S3Credentials) -> Response:
         bucket, key = self._parse_path(request.url.path)
