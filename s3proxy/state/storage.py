@@ -117,60 +117,58 @@ class RedisStateStore(StateStore):
     async def delete(self, key: str) -> None:
         await self._client.delete(self._key(key))
 
-    async def get_and_delete(self, key: str, _retries: int = 0) -> bytes | None:
+    async def get_and_delete(self, key: str) -> bytes | None:
         """Atomically get and delete using Redis transaction."""
         import redis.asyncio as redis
 
         pk = self._key(key)
-        async with self._client.pipeline(transaction=True) as pipe:
-            try:
-                await pipe.watch(pk)
-                data = await self._client.get(pk)
-                if data is None:
-                    await pipe.unwatch()
-                    return None
+        for attempt in range(MAX_WATCH_RETRIES):
+            async with self._client.pipeline(transaction=True) as pipe:
+                try:
+                    await pipe.watch(pk)
+                    data = await self._client.get(pk)
+                    if data is None:
+                        await pipe.unwatch()
+                        return None
 
-                pipe.multi()
-                pipe.delete(pk)
-                await pipe.execute()
-                return data
+                    pipe.multi()
+                    pipe.delete(pk)
+                    await pipe.execute()
+                    return data
+                except redis.WatchError:
+                    if attempt == MAX_WATCH_RETRIES - 1:
+                        logger.error(
+                            "REDIS_WATCH_RETRIES_EXHAUSTED",
+                            key=key,
+                            operation="get_and_delete",
+                        )
+                        raise
+                    logger.debug("REDIS_WATCH_RETRY", key=key, attempt=attempt + 1)
+        return None
 
-            except redis.WatchError:
-                if _retries >= MAX_WATCH_RETRIES:
-                    logger.error(
-                        "REDIS_WATCH_RETRIES_EXHAUSTED",
-                        key=key,
-                        operation="get_and_delete",
-                    )
-                    raise
-                logger.debug("REDIS_WATCH_RETRY", key=key, attempt=_retries + 1)
-                return await self.get_and_delete(key, _retries=_retries + 1)
-
-    async def update(
-        self, key: str, updater: Updater, ttl_seconds: int, _retries: int = 0
-    ) -> bytes | None:
+    async def update(self, key: str, updater: Updater, ttl_seconds: int) -> bytes | None:
         """Atomically update using Redis WATCH/MULTI/EXEC."""
         import redis.asyncio as redis
 
         pk = self._key(key)
-        async with self._client.pipeline(transaction=True) as pipe:
-            try:
-                await pipe.watch(pk)
-                data = await self._client.get(pk)
-                if data is None:
-                    await pipe.unwatch()
-                    return None
+        for attempt in range(MAX_WATCH_RETRIES):
+            async with self._client.pipeline(transaction=True) as pipe:
+                try:
+                    await pipe.watch(pk)
+                    data = await self._client.get(pk)
+                    if data is None:
+                        await pipe.unwatch()
+                        return None
 
-                new_data = updater(data)
+                    new_data = updater(data)
 
-                pipe.multi()
-                pipe.set(pk, new_data, ex=ttl_seconds)
-                await pipe.execute()
-                return new_data
-
-            except redis.WatchError:
-                if _retries >= MAX_WATCH_RETRIES:
-                    logger.error("REDIS_WATCH_RETRIES_EXHAUSTED", key=key, operation="update")
-                    raise
-                logger.debug("REDIS_WATCH_RETRY", key=key, attempt=_retries + 1)
-                return await self.update(key, updater, ttl_seconds, _retries=_retries + 1)
+                    pipe.multi()
+                    pipe.set(pk, new_data, ex=ttl_seconds)
+                    await pipe.execute()
+                    return new_data
+                except redis.WatchError:
+                    if attempt == MAX_WATCH_RETRIES - 1:
+                        logger.error("REDIS_WATCH_RETRIES_EXHAUSTED", key=key, operation="update")
+                        raise
+                    logger.debug("REDIS_WATCH_RETRY", key=key, attempt=attempt + 1)
+        return None

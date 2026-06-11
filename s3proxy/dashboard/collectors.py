@@ -13,6 +13,7 @@ from .stats_store import (
     LocalCounters,
     RequestSample,
     StatsStore,
+    error_buckets,
     get_store,
 )
 
@@ -87,31 +88,19 @@ def _read_errors_total() -> float:
     return errs
 
 
-def _read_error_breakdown() -> dict[str, float]:
-    """Break errors down by status class (4xx / 5xx / 503)."""
-    out = {"4xx": 0.0, "5xx": 0.0, "503": 0.0}
-    for sample in metrics.REQUEST_COUNT.collect()[0].samples:
-        if not sample.name.endswith("_total"):
-            continue
-        status = str(sample.labels.get("status", ""))
-        if status == "503":
-            out["503"] += sample.value
-            out["5xx"] += sample.value
-        elif status.startswith("5"):
-            out["5xx"] += sample.value
-        elif status.startswith("4"):
-            out["4xx"] += sample.value
-    return out
-
-
-def _read_method_breakdown() -> dict[str, float]:
-    out: dict[str, float] = {}
+def _read_request_breakdowns() -> tuple[dict[str, float], dict[str, float]]:
+    """Single pass over REQUEST_COUNT samples: (errors_by_class, methods)."""
+    errors = {"4xx": 0.0, "5xx": 0.0, "503": 0.0}
+    methods: dict[str, float] = {}
     for sample in metrics.REQUEST_COUNT.collect()[0].samples:
         if not sample.name.endswith("_total"):
             continue
         method = str(sample.labels.get("method", "?"))
-        out[method] = out.get(method, 0.0) + sample.value
-    return out
+        methods[method] = methods.get(method, 0.0) + sample.value
+        status = str(sample.labels.get("status", ""))
+        for cls in error_buckets(status):
+            errors[cls] += sample.value
+    return errors, methods
 
 
 def _read_latency_buckets() -> dict[str, float]:
@@ -171,13 +160,14 @@ def _latency_percentiles(cumulative: dict[str, float] | None = None) -> dict[str
 
 def _local_counters() -> LocalCounters:
     """Snapshot this pod's Prometheus-derived counters for delta-syncing."""
+    errors_by_class, methods = _read_request_breakdowns()
     return LocalCounters(
         requests=_read_labeled_counter_sum(metrics.REQUEST_COUNT),
         errors=_read_errors_total(),
         bytes_encrypted=_read_counter(metrics.BYTES_ENCRYPTED),
         bytes_decrypted=_read_counter(metrics.BYTES_DECRYPTED),
-        methods=_read_method_breakdown(),
-        errors_by_class=_read_error_breakdown(),
+        methods=methods,
+        errors_by_class=errors_by_class,
         latency_buckets=_read_latency_buckets(),
     )
 

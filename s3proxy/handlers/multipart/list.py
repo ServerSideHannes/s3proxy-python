@@ -8,8 +8,8 @@ from fastapi import Request, Response
 from structlog.stdlib import BoundLogger
 
 from ... import xml_responses
+from ...client import S3Credentials
 from ...errors import S3Error
-from ...s3client import S3Credentials
 from ..base import BaseHandler
 
 logger: BoundLogger = structlog.get_logger(__name__)

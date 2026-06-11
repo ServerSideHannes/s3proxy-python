@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from s3proxy.s3client import (
+from s3proxy.client import (
     CLOCK_SKEW_TOLERANCE,
     ParsedRequest,
     S3Credentials,

@@ -17,12 +17,12 @@ from fastapi.responses import PlainTextResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from structlog.stdlib import BoundLogger
 
+from .client import SigV4Verifier
 from .config import Settings
 from .errors import S3Error, get_s3_error_code
 from .handlers import S3ProxyHandler
 from .handlers.base import close_http_client
 from .request_handler import handle_proxy_request
-from .s3client import SigV4Verifier
 from .state import MultipartStateManager, close_redis, create_state_store, init_redis
 
 # Configure logging

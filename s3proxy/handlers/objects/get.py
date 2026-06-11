@@ -14,9 +14,9 @@ from fastapi.responses import StreamingResponse
 from structlog.stdlib import BoundLogger
 
 from ... import concurrency, crypto
+from ...client import S3Client, S3Credentials
 from ...concurrency import MAX_BUFFER_SIZE
 from ...errors import S3Error
-from ...s3client import S3Client, S3Credentials
 from ...state import (
     MultipartMetadata,
     calculate_part_range,

@@ -12,8 +12,8 @@ from fastapi import Request, Response
 from structlog.stdlib import BoundLogger
 
 from ... import crypto, xml_responses
+from ...client import S3Client, S3Credentials
 from ...errors import S3Error
-from ...s3client import S3Client, S3Credentials
 from ...state import (
     InternalPartMetadata,
     MultipartMetadata,

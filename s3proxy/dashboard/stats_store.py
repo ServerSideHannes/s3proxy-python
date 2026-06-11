@@ -84,6 +84,18 @@ def _latency_bucket_le(duration_seconds: float) -> str:
     return "+Inf"
 
 
+def error_buckets(status: int | str) -> list[str]:
+    """Error-breakdown buckets a status contributes to ('503' implies '5xx')."""
+    s = str(status)
+    if s == "503":
+        return ["503", "5xx"]
+    if s.startswith("5"):
+        return ["5xx"]
+    if s.startswith("4"):
+        return ["4xx"]
+    return []
+
+
 def bucket_series(
     points: list[tuple[int, float]],
     window_seconds: int,
@@ -402,14 +414,8 @@ class RedisStatsStore(StatsStore):
             if s.status >= 400:
                 errors += 1
                 err_by_min[minute] += 1
-                sc = str(s.status)
-                if sc == "503":
-                    err_class["503"] += 1
-                    err_class["5xx"] += 1
-                elif sc.startswith("5"):
-                    err_class["5xx"] += 1
-                elif sc.startswith("4"):
-                    err_class["4xx"] += 1
+                for cls in error_buckets(s.status):
+                    err_class[cls] += 1
 
         c = self._k("counters")
         async with self._client.pipeline(transaction=False) as pipe:

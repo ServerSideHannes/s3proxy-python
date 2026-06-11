@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from s3proxy.client import S3Credentials
 from s3proxy.handlers import S3ProxyHandler
-from s3proxy.s3client import S3Credentials
 from s3proxy.state import InternalPartMetadata, PartMetadata
 
 
