@@ -254,11 +254,11 @@ class LifecycleMixin(BaseHandler):
         state = await self.multipart_manager.create_upload(bucket, key, upload_id, dek, kid)
 
         try:
-            parts_resp = await client.list_parts(bucket, key, upload_id)
+            all_parts = await client.list_all_parts(bucket, key, upload_id)
 
             # Group S3 internal parts by client part number
             client_parts: dict[int, list[dict]] = defaultdict(list)
-            for part in parts_resp.get("Parts", []):
+            for part in all_parts:
                 internal_part_num = part.get("PartNumber", 0)
                 client_part_num = internal_to_client_part(internal_part_num)
                 client_parts[client_part_num].append(part)
@@ -268,7 +268,7 @@ class LifecycleMixin(BaseHandler):
                 bucket=bucket,
                 key=key,
                 upload_id=upload_id[:20] + "...",
-                s3_parts=len(parts_resp.get("Parts", [])),
+                s3_parts=len(all_parts),
                 client_parts=sorted(client_parts.keys()),
             )
 

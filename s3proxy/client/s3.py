@@ -346,6 +346,17 @@ class S3Client:
         _add_optional_kwargs(kwargs, PartNumberMarker=part_number_marker)
         return await self._cached_client.list_parts(**kwargs)
 
+    async def list_all_parts(self, bucket: str, key: str, upload_id: str) -> list[dict[str, Any]]:
+        """List ALL parts of a multipart upload, following pagination."""
+        parts: list[dict[str, Any]] = []
+        marker: int | None = None
+        while True:
+            resp = await self.list_parts(bucket, key, upload_id, part_number_marker=marker)
+            parts.extend(resp.get("Parts", []))
+            if not resp.get("IsTruncated"):
+                return parts
+            marker = resp.get("NextPartNumberMarker")
+
     async def list_buckets(self) -> dict[str, Any]:
         """List all buckets owned by the authenticated user."""
         return await self._cached_client.list_buckets()
