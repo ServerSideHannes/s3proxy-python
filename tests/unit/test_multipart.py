@@ -686,19 +686,17 @@ class TestReconstructUploadStateFromS3:
         mock_body.read = mock_read
         mock_client.get_object = AsyncMock(return_value={"Body": mock_body})
 
-        # Mock list_parts to return some uploaded parts (using internal part numbers)
+        # Mock list_all_parts to return some uploaded parts (using internal part numbers)
         # With MAX_INTERNAL_PARTS_PER_CLIENT=20:
         # - Client part 1 -> internal part 1
         # - Client part 2 -> internal part 21
         # - Client part 3 -> internal part 41
-        mock_client.list_parts = AsyncMock(
-            return_value={
-                "Parts": [
-                    {"PartNumber": 1, "Size": 1028, "ETag": '"etag1"'},  # Client part 1
-                    {"PartNumber": 21, "Size": 2056, "ETag": '"etag2"'},  # Client part 2
-                    {"PartNumber": 41, "Size": 1028, "ETag": '"etag3"'},  # Client part 3
-                ]
-            }
+        mock_client.list_all_parts = AsyncMock(
+            return_value=[
+                {"PartNumber": 1, "Size": 1028, "ETag": '"etag1"'},  # Client part 1
+                {"PartNumber": 21, "Size": 2056, "ETag": '"etag2"'},  # Client part 2
+                {"PartNumber": 41, "Size": 1028, "ETag": '"etag3"'},  # Client part 3
+            ]
         )
 
         # Mock the crypto.unwrap_key to return the original DEK
@@ -767,8 +765,8 @@ class TestReconstructUploadStateFromS3:
         mock_body.read = mock_read
         mock_client.get_object = AsyncMock(return_value={"Body": mock_body})
 
-        # Mock list_parts to fail
-        mock_client.list_parts = AsyncMock(side_effect=Exception("Upload not found"))
+        # Mock list_all_parts to fail
+        mock_client.list_all_parts = AsyncMock(side_effect=Exception("Upload not found"))
 
         with patch("s3proxy.crypto.unwrap_key", return_value=original_dek):
             state = await reconstruct_upload_state_from_s3(
@@ -797,8 +795,8 @@ class TestReconstructUploadStateFromS3:
         mock_body.read = mock_read
         mock_client.get_object = AsyncMock(return_value={"Body": mock_body})
 
-        # Mock list_parts to return empty list
-        mock_client.list_parts = AsyncMock(return_value={"Parts": []})
+        # Mock list_all_parts to return empty list
+        mock_client.list_all_parts = AsyncMock(return_value=[])
 
         with patch("s3proxy.crypto.unwrap_key", return_value=original_dek):
             state = await reconstruct_upload_state_from_s3(

@@ -65,7 +65,7 @@ async def reconstruct_upload_state_from_s3(
 
     # Step 2: List all uploaded parts from S3
     try:
-        parts_response = await s3_client.list_parts(bucket, key, upload_id, max_parts=10000)
+        s3_parts = await s3_client.list_all_parts(bucket, key, upload_id)
     except Exception as e:
         logger.error(
             "RECONSTRUCT_LIST_PARTS_FAILED",
@@ -77,7 +77,6 @@ async def reconstruct_upload_state_from_s3(
         return None
 
     # Step 3: Group S3 parts by client part number
-    s3_parts = parts_response.get("Parts", [])
     logger.debug(
         "RECONSTRUCT_PARTS",
         bucket=bucket,
