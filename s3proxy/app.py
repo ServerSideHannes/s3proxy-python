@@ -17,12 +17,12 @@ from fastapi.responses import PlainTextResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from structlog.stdlib import BoundLogger
 
+from .client import SigV4Verifier
 from .config import Settings
 from .errors import S3Error, get_s3_error_code
 from .handlers import S3ProxyHandler
 from .handlers.base import close_http_client
 from .request_handler import handle_proxy_request
-from .s3client import SigV4Verifier
 from .state import MultipartStateManager, close_redis, create_state_store, init_redis
 
 # Configure logging
@@ -70,6 +70,7 @@ def create_lifespan(settings: Settings, credentials_store: dict[str, str]) -> As
 
         stats_store = create_stats_store(settings)
         set_store(stats_store)  # used by the synchronous record_request path
+        await stats_store.start()  # background flush loop (Redis store only; no-op for memory)
 
         if settings.dashboard_ui:
             from .dashboard.auth import RedisSessionStore
@@ -90,6 +91,7 @@ def create_lifespan(settings: Settings, credentials_store: dict[str, str]) -> As
 
         yield
 
+        await stats_store.aclose()  # flush buffered samples before Redis closes
         await close_redis()
         await close_http_client()
         logger.info("Shutting down")

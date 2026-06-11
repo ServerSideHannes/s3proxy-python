@@ -13,8 +13,8 @@ import pytest
 # Set environment variables before importing s3proxy modules
 os.environ.setdefault("S3PROXY_HOST", "http://localhost:9000")
 
+from s3proxy.client import S3Client, S3Credentials
 from s3proxy.config import Settings
-from s3proxy.s3client import S3Client, S3Credentials
 from s3proxy.state import MultipartStateManager
 from s3proxy.state import redis as state_redis
 

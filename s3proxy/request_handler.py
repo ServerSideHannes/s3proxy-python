@@ -13,6 +13,7 @@ from fastapi.responses import PlainTextResponse
 from structlog.stdlib import BoundLogger
 
 from . import concurrency, crypto
+from .client import ParsedRequest, SigV4Verifier
 from .dashboard import record_request
 from .errors import S3Error, raise_for_client_error, raise_for_exception
 from .handlers import S3ProxyHandler
@@ -23,7 +24,6 @@ from .metrics import (
     get_operation_name,
 )
 from .routing import RequestDispatcher
-from .s3client import ParsedRequest, SigV4Verifier
 
 pod_name = os.environ.get("HOSTNAME", "unknown")
 logger: BoundLogger = structlog.get_logger(__name__).bind(pod=pod_name)

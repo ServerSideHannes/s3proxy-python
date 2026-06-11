@@ -3,9 +3,19 @@
   import { fetchSeries } from '$lib/api';
   import { createChart, type ChartHandle } from '$lib/chart';
   import { formatBytes, formatNumber } from '$lib/format';
+  import { createLoader } from '$lib/loader.svelte';
   import type { Card } from '$lib/types';
 
-  let { metricKey, card }: { metricKey: string; card: Card | undefined } = $props();
+  // clusterWide gates the range tabs: single-pod (in-memory) stats ignore the
+  // range, so the tabs would be inert there. Default true so they show until the
+  // status payload (which carries cluster_wide) has loaded.
+  let {
+    metricKey,
+    card,
+    clusterWide = true
+  }: { metricKey: string; card: Card | undefined; clusterWide?: boolean } = $props();
+
+  const loader = createLoader();
 
   // metric-card key -> /api/series metric name (verbatim from the old SERIES_METRIC).
   const SERIES_METRIC: Record<string, string> = {
@@ -64,23 +74,20 @@
       metricKey === 'data_encrypted'
         ? formatBytes
         : (v) => formatNumber(v) + (unit ? ' ' + unit : '');
-    try {
-      const d = await fetchSeries(metric, range);
-      const vals = d.spark || [];
-      const times = d.spark_times || [];
-      if (chart) {
-        if (vals.length < 2 || times.length !== vals.length) {
-          chart.setData([], [], fmt);
-          chartMeta = '';
-        } else {
-          chart.setData(times, vals, fmt);
-          const rawMax = Math.max(...vals, 1);
-          const lastV = vals[vals.length - 1];
-          chartMeta = 'peak ' + fmt(rawMax) + ' · latest ' + fmt(lastV);
-        }
-      }
-    } catch {
-      /* leave chart as-is */
+    // run() guards against out-of-order responses: rapidly clicking range/direction
+    // tabs fires concurrent loads, and only the latest is allowed to touch the chart.
+    const d = await loader.run(() => fetchSeries(metric, range));
+    if (!d || !chart) return; // superseded, errored, or chart torn down — leave as-is
+    const vals = d.spark || [];
+    const times = d.spark_times || [];
+    if (vals.length < 2 || times.length !== vals.length) {
+      chart.setData([], [], fmt);
+      chartMeta = '';
+    } else {
+      chart.setData(times, vals, fmt);
+      const rawMax = Math.max(...vals, 1);
+      const lastV = vals[vals.length - 1];
+      chartMeta = 'peak ' + fmt(rawMax) + ' · latest ' + fmt(lastV);
     }
   }
 
@@ -136,11 +143,13 @@
             <button type="button" class="range-tab" class:active={direction === 'get'} onclick={() => setDirection('get')}>Decrypted</button>
           </span>
         {/if}
-        <span class="range-tabs">
-          {#each RANGES as r}
-            <button type="button" class="range-tab" class:active={range === r} onclick={() => setRange(r)}>{r}</button>
-          {/each}
-        </span>
+        {#if clusterWide}
+          <span class="range-tabs">
+            {#each RANGES as r}
+              <button type="button" class="range-tab" class:active={range === r} onclick={() => setRange(r)}>{r}</button>
+            {/each}
+          </span>
+        {/if}
         <span class="chart-subtle">{chartMeta || ' '}</span>
       </div>
       <div class="chart-wrap chart-wrap--big" bind:this={chartEl}></div>

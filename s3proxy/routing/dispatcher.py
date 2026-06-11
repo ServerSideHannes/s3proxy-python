@@ -7,8 +7,8 @@ from urllib.parse import parse_qs
 from fastapi import Request
 from fastapi.responses import PlainTextResponse
 
+from ..client import S3Credentials
 from ..handlers import S3ProxyHandler
-from ..s3client import S3Credentials
 
 # Query parameter constants
 QUERY_UPLOADS = "uploads"

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 
+import fakeredis.aioredis
 import pytest
 from fastapi.testclient import TestClient
 
@@ -140,6 +142,7 @@ async def test_redis_store_records_and_paginates(redis_store) -> None:
                 client_ip="10.0.0.1",
             )
         )
+    await redis_store.flush()
     page1 = await redis_store.page(0, 50, "", "", "")
     assert page1["count"] == 50
     assert page1["total"] == 120
@@ -159,6 +162,7 @@ async def test_redis_store_caps_the_log(dashboard_settings, mock_redis) -> None:
         await store.record(
             RequestSample(time.time(), "GET", "GetObject", "b", f"k{i}", 200, 1.0, 1, "ip")
         )
+    await store.flush()
     total = await mock_redis.llen("s3proxy:stats:reqlog")
     assert total == 5
     ttl = await mock_redis.ttl("s3proxy:stats:reqlog")
@@ -175,6 +179,7 @@ async def test_redis_store_filter_pagination(redis_store) -> None:
     await redis_store.record(
         RequestSample(time.time(), "GET", "GetObject", "b", "y", 200, 1, 1, "ip")
     )
+    await redis_store.flush()
     errors = await redis_store.page(0, 50, "", "", "error")
     assert errors["total"] == 1
     assert errors["entries"][0]["key"] == "x"
@@ -214,6 +219,8 @@ async def test_redis_store_cluster_wide_aggregate(dashboard_settings, mock_redis
     for i in range(5):
         await pod_b.record(_sample("GET", 404 if i == 0 else 200, size=50))
 
+    await pod_a.flush()
+    await pod_b.flush()
     agg = await pod_a.aggregate()  # any pod sees the cluster-wide totals
     assert agg is not None
     assert agg.requests == 15  # 10 (A) + 5 (B)
@@ -234,6 +241,8 @@ async def test_redis_store_latency_is_cluster_wide(dashboard_settings, mock_redi
         await pod_a.record(_sample(dur_ms=5.0))  # 0.005s bucket
     for _ in range(10):
         await pod_b.record(_sample(dur_ms=2000.0))  # 2.5s bucket
+    await pod_a.flush()
+    await pod_b.flush()
     agg = await pod_a.aggregate()
     assert agg.latency_buckets["+Inf"] == 20  # total observations, both pods
 
@@ -267,6 +276,7 @@ async def test_redis_series_buckets_recorded_requests(redis_store) -> None:
         await redis_store.record(
             RequestSample(time.time(), "GET", "GetObject", "b", "k", 200, 1, 1, "ip")
         )
+    await redis_store.flush()
     times, values = await redis_store.series("requests", "1h")
     assert sum(values) == 3.0
     assert len(times) == len(values)
@@ -280,10 +290,107 @@ async def test_redis_throughput_split_by_direction(redis_store) -> None:
     await redis_store.record(
         RequestSample(time.time(), "GET", "GetObject", "b", "k", 200, 1, 1024, "ip")
     )
+    await redis_store.flush()
     _, put_vals = await redis_store.series("bytes_put", "1h")
     _, get_vals = await redis_store.series("bytes_get", "1h")
     assert sum(put_vals) == 4096.0
     assert sum(get_vals) == 1024.0
+
+
+# ---------------------------------------------------------------------------
+# Background batcher (record() decoupled from the request path)
+# ---------------------------------------------------------------------------
+
+
+async def test_record_does_not_touch_redis_until_flush(redis_store, mock_redis) -> None:
+    """record() only enqueues — nothing hits Redis until a flush drains the queue."""
+    for _ in range(5):
+        await redis_store.record(_sample("GET", 200, size=10))
+    assert await mock_redis.llen("s3proxy:stats:reqlog") == 0
+    assert await mock_redis.hgetall("s3proxy:stats:counters") == {}
+
+    await redis_store.flush()
+    assert await mock_redis.llen("s3proxy:stats:reqlog") == 5
+    counters = await mock_redis.hgetall("s3proxy:stats:counters")
+    assert int(counters[b"requests"]) == 5
+
+
+async def test_batched_flush_matches_sequential_writes(dashboard_settings, mock_redis) -> None:
+    """One folded flush of N samples leaves Redis identical to N sequential writes."""
+    batched = RedisStatsStore(mock_redis, dashboard_settings)
+    samples = [
+        _sample("GET", 200, size=100, dur_ms=5.0),
+        _sample("PUT", 200, size=1000, dur_ms=30.0),
+        _sample("GET", 500, size=50, dur_ms=2000.0),
+        _sample("GET", 404, size=0, dur_ms=12.0),
+        _sample("POST", 200, size=200, dur_ms=8.0),
+    ]
+    for s in samples:
+        await batched.record(s)
+    await batched.flush()
+    agg_batched = await batched.aggregate()
+
+    # A second Redis, written one sample at a time via flush-per-sample.
+    seq_redis = fakeredis.aioredis.FakeRedis(decode_responses=False)
+    seq = RedisStatsStore(seq_redis, dashboard_settings)
+    for s in samples:
+        await seq.record(s)
+        await seq.flush()
+    agg_seq = await seq.aggregate()
+
+    assert agg_batched is not None and agg_seq is not None
+    assert agg_batched.requests == agg_seq.requests == 5
+    assert agg_batched.errors == agg_seq.errors == 2
+    assert agg_batched.methods == agg_seq.methods
+    assert agg_batched.errors_by_class == agg_seq.errors_by_class
+    assert agg_batched.bytes_encrypted == agg_seq.bytes_encrypted
+    assert agg_batched.bytes_decrypted == agg_seq.bytes_decrypted
+    assert agg_batched.latency_buckets == agg_seq.latency_buckets
+    await seq_redis.aclose()
+
+
+async def test_queue_is_bounded_drop_oldest(dashboard_settings, mock_redis) -> None:
+    """Beyond _MAX_QUEUE the oldest samples are dropped and counted, not retained."""
+    store = RedisStatsStore(mock_redis, dashboard_settings)
+    store._MAX_QUEUE = 3
+    for i in range(5):
+        await store.record(_sample("GET", 200, size=i + 1))
+    assert len(store._queue) == 3
+    assert store._dropped == 2
+    # The three survivors are the newest (sizes 3,4,5 -> 12 decrypted bytes).
+    await store.flush()
+    assert store._dropped == 0
+    counters = await mock_redis.hgetall("s3proxy:stats:counters")
+    assert int(counters[b"requests"]) == 3
+    assert float(counters[b"bytes_decrypted"]) == 3 + 4 + 5
+
+
+async def test_aclose_flushes_and_stops_loop(dashboard_settings, mock_redis) -> None:
+    """start() runs a background loop; aclose() drains the queue and cancels it."""
+    store = RedisStatsStore(mock_redis, dashboard_settings)
+    await store.start()
+    assert store._flush_task is not None
+    for _ in range(4):
+        await store.record(_sample("GET", 200, size=10))
+    await store.aclose()
+    assert store._flush_task is None
+    assert await mock_redis.llen("s3proxy:stats:reqlog") == 4
+
+
+async def test_background_loop_flushes_on_interval(dashboard_settings, mock_redis) -> None:
+    """The flush loop drains the queue without an explicit flush() call."""
+    store = RedisStatsStore(mock_redis, dashboard_settings)
+    store._FLUSH_INTERVAL = 0.01
+    await store.start()
+    try:
+        await store.record(_sample("GET", 200, size=10))
+        for _ in range(50):
+            if await mock_redis.llen("s3proxy:stats:reqlog") == 1:
+                break
+            await asyncio.sleep(0.01)
+        assert await mock_redis.llen("s3proxy:stats:reqlog") == 1
+    finally:
+        await store.aclose()
 
 
 # ---------------------------------------------------------------------------

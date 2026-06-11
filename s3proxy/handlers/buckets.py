@@ -12,8 +12,8 @@ from fastapi import Request, Response
 from structlog.stdlib import BoundLogger
 
 from .. import xml_responses
+from ..client import S3Credentials
 from ..errors import S3Error
-from ..s3client import S3Credentials
 from ..state import INTERNAL_PREFIX, META_SUFFIX_LEGACY, delete_multipart_metadata
 from ..xml_utils import find_element, find_elements
 from .base import BaseHandler

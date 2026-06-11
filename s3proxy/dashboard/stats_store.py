@@ -11,10 +11,12 @@ shares the same (``maxmemory 200mb, noeviction``) Redis.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 import time
 from abc import ABC, abstractmethod
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 
@@ -80,6 +82,18 @@ def _latency_bucket_le(duration_seconds: float) -> str:
         if duration_seconds <= le:
             return str(le)
     return "+Inf"
+
+
+def error_buckets(status: int | str) -> list[str]:
+    """Error-breakdown buckets a status contributes to ('503' implies '5xx')."""
+    s = str(status)
+    if s == "503":
+        return ["503", "5xx"]
+    if s.startswith("5"):
+        return ["5xx"]
+    if s.startswith("4"):
+        return ["4xx"]
+    return []
 
 
 def bucket_series(
@@ -197,6 +211,12 @@ class StatsStore(ABC):
 
     cluster_wide: bool = False
 
+    async def start(self) -> None:  # noqa: B027 - optional hook; default no-op, RedisStatsStore overrides
+        """Start any background machinery (e.g. the Redis flush loop). No-op by default."""
+
+    async def aclose(self) -> None:  # noqa: B027 - optional hook; default no-op, RedisStatsStore overrides
+        """Flush pending state and stop background machinery. No-op by default."""
+
     @abstractmethod
     async def record(self, sample: RequestSample) -> None:
         """Append a completed request to the log and bump counters."""
@@ -289,6 +309,15 @@ class RedisStatsStore(StatsStore):
 
     cluster_wide = True
 
+    # Recording is decoupled from the request path: record() only enqueues a
+    # sample (no Redis I/O), and a background loop drains the queue every
+    # _FLUSH_INTERVAL into a single folded pipeline. This keeps a slow Redis off
+    # every proxied request's critical path and collapses N per-request
+    # round-trips into one per interval. Sub-second flush keeps the 1s SSE
+    # dashboard refresh visually lossless.
+    _FLUSH_INTERVAL = 0.5
+    _MAX_QUEUE = 10_000  # bounded; drop-oldest if Redis stalls so memory can't grow without bound
+
     def __init__(self, client: Redis, settings: Settings):
         self._client = client
         self._log_cap = settings.request_log_cap
@@ -296,73 +325,150 @@ class RedisStatsStore(StatsStore):
         self._stats_ttl = settings.stats_ttl_seconds
         self._series_ttl = settings.stats_series_ttl_seconds
         self._pod = os.environ.get("HOSTNAME", "local")
+        self._queue: deque[RequestSample] = deque()
+        self._dropped = 0
+        self._flush_task: asyncio.Task[None] | None = None
 
     def _k(self, name: str) -> str:
         return f"{STATS_PREFIX}{name}"
 
     async def record(self, sample: RequestSample) -> None:
+        # Off the request critical path: enqueue only, never touch Redis here.
+        # Bounded with drop-oldest so a stalled Redis can't grow this unbounded.
+        if len(self._queue) >= self._MAX_QUEUE:
+            self._queue.popleft()
+            self._dropped += 1
+        self._queue.append(sample)
+
+    async def start(self) -> None:
+        if self._flush_task is None:
+            self._flush_task = asyncio.create_task(self._flush_loop())
+
+    async def aclose(self) -> None:
+        if self._flush_task is not None:
+            self._flush_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._flush_task
+            self._flush_task = None
+        await self.flush()  # drain whatever is still queued before shutdown
+
+    async def _flush_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._FLUSH_INTERVAL)
+            await self.flush()
+
+    async def flush(self) -> None:
+        """Drain the queue into one folded pipeline.
+
+        Best-effort: on a Redis error the batch is dropped (stats never gate or
+        break anything), matching the old per-request guard.
+        """
+        dropped = self._dropped
+        self._dropped = 0
+        if not self._queue:
+            if dropped:
+                logger.warning("STATS_SAMPLES_DROPPED", dropped=dropped)
+            return
+        samples = list(self._queue)
+        self._queue.clear()
         try:
-            entry = orjson.dumps(asdict(sample))
-            minute = str(int(sample.timestamp // 60) * 60)
-            is_err = sample.status >= 400
-            async with self._client.pipeline(transaction=False) as pipe:
-                pipe.lpush(self._k("reqlog"), entry)
-                pipe.ltrim(self._k("reqlog"), 0, self._log_cap - 1)
-                pipe.expire(self._k("reqlog"), self._log_ttl)
-                # Per-request cluster-wide counters — incremented on every pod for
-                # every request, so the dashboard totals are correct regardless of
-                # which pod serves the dashboard view (no per-pod Prometheus sampling).
-                c = self._k("counters")
-                pipe.hincrby(c, "requests", 1)
-                pipe.expire(c, self._stats_ttl)
-                pipe.hincrby(self._k("methods"), sample.method or "?", 1)
-                pipe.expire(self._k("methods"), self._stats_ttl)
-                pipe.hincrby(self._k("ts:requests"), minute, 1)
-                pipe.expire(self._k("ts:requests"), self._series_ttl)
-                # Latency histogram (same bucket bounds as Prometheus) so p50/p95/p99
-                # are cluster-wide, not just the serving pod's.
-                lat = self._k("latency")
-                pipe.hincrby(lat, _latency_bucket_le(sample.duration_ms / 1000.0), 1)
-                pipe.hincrby(lat, "+Inf", 1)
-                pipe.expire(lat, self._stats_ttl)
-                # Bytes moved, bucketed for the throughput charts. PUT bodies are
-                # encrypted on the way in; GET bodies decrypted on the way out.
-                # Combined series feeds the "Data Encrypted" card; per-direction
-                # series feed the throughput chart's two lines.
-                if sample.size > 0 and sample.method in ("PUT", "POST"):
-                    pipe.hincrbyfloat(c, "bytes_encrypted", sample.size)
-                    pipe.hincrbyfloat(self._k("ts:crypto"), minute, sample.size)
-                    pipe.hincrbyfloat(self._k("ts:bytes_put"), minute, sample.size)
-                    pipe.expire(self._k("ts:crypto"), self._series_ttl)
-                    pipe.expire(self._k("ts:bytes_put"), self._series_ttl)
-                elif sample.size > 0 and sample.method == "GET":
-                    pipe.hincrbyfloat(c, "bytes_decrypted", sample.size)
-                    pipe.hincrbyfloat(self._k("ts:crypto"), minute, sample.size)
-                    pipe.hincrbyfloat(self._k("ts:bytes_get"), minute, sample.size)
-                    pipe.expire(self._k("ts:crypto"), self._series_ttl)
-                    pipe.expire(self._k("ts:bytes_get"), self._series_ttl)
-                if is_err:
-                    pipe.hincrby(c, "errors", 1)
-                    pipe.hincrby(self._k("ts:errors"), minute, 1)
-                    pipe.expire(self._k("ts:errors"), self._series_ttl)
-                    eb = self._k("errors")
-                    sc = str(sample.status)
-                    if sc == "503":
-                        pipe.hincrby(eb, "503", 1)
-                        pipe.hincrby(eb, "5xx", 1)
-                    elif sc.startswith("5"):
-                        pipe.hincrby(eb, "5xx", 1)
-                    elif sc.startswith("4"):
-                        pipe.hincrby(eb, "4xx", 1)
-                    pipe.expire(eb, self._stats_ttl)
-                await pipe.execute()
-        except Exception as exc:  # never break the request path on a stats write
-            logger.warning("STATS_RECORD_FAILED", error=str(exc))
+            await self._write_batch(samples)
+        except Exception as exc:  # never break anything on a stats write
+            logger.warning("STATS_FLUSH_FAILED", error=str(exc), samples=len(samples))
+        if dropped:
+            logger.warning("STATS_SAMPLES_DROPPED", dropped=dropped)
+
+    async def _write_batch(self, samples: list[RequestSample]) -> None:
+        # Fold N samples into summed deltas: one round-trip and a handful of
+        # commands instead of ~15*N. Counter increments sum, the request log takes
+        # every entry in one LPUSH; final Redis state is identical to recording
+        # each sample sequentially.
+        n = len(samples)
+        methods: dict[str, int] = defaultdict(int)
+        latency: dict[str, int] = defaultdict(int)
+        req_by_min: dict[str, int] = defaultdict(int)
+        crypto_by_min: dict[str, float] = defaultdict(float)
+        put_by_min: dict[str, float] = defaultdict(float)
+        get_by_min: dict[str, float] = defaultdict(float)
+        err_by_min: dict[str, int] = defaultdict(int)
+        err_class: dict[str, int] = defaultdict(int)
+        bytes_enc = 0.0
+        bytes_dec = 0.0
+        errors = 0
+        entries: list[bytes] = []
+
+        for s in samples:
+            entries.append(orjson.dumps(asdict(s)))
+            minute = str(int(s.timestamp // 60) * 60)
+            methods[s.method or "?"] += 1
+            req_by_min[minute] += 1
+            latency[_latency_bucket_le(s.duration_ms / 1000.0)] += 1
+            if s.size > 0 and s.method in ("PUT", "POST"):
+                bytes_enc += s.size
+                crypto_by_min[minute] += s.size
+                put_by_min[minute] += s.size
+            elif s.size > 0 and s.method == "GET":
+                bytes_dec += s.size
+                crypto_by_min[minute] += s.size
+                get_by_min[minute] += s.size
+            if s.status >= 400:
+                errors += 1
+                err_by_min[minute] += 1
+                for cls in error_buckets(s.status):
+                    err_class[cls] += 1
+
+        c = self._k("counters")
+        async with self._client.pipeline(transaction=False) as pipe:
+            # Entries are arrival-ordered; LPUSH prepends each in turn, leaving the
+            # newest sample at the head — same final order as per-sample LPUSH.
+            pipe.lpush(self._k("reqlog"), *entries)
+            pipe.ltrim(self._k("reqlog"), 0, self._log_cap - 1)
+            pipe.expire(self._k("reqlog"), self._log_ttl)
+            pipe.hincrby(c, "requests", n)
+            pipe.expire(c, self._stats_ttl)
+            for method, cnt in methods.items():
+                pipe.hincrby(self._k("methods"), method, cnt)
+            pipe.expire(self._k("methods"), self._stats_ttl)
+            for minute, cnt in req_by_min.items():
+                pipe.hincrby(self._k("ts:requests"), minute, cnt)
+            pipe.expire(self._k("ts:requests"), self._series_ttl)
+            lat = self._k("latency")
+            for le, cnt in latency.items():
+                pipe.hincrby(lat, le, cnt)
+            pipe.hincrby(lat, "+Inf", n)
+            pipe.expire(lat, self._stats_ttl)
+            if bytes_enc:
+                pipe.hincrbyfloat(c, "bytes_encrypted", bytes_enc)
+            if bytes_dec:
+                pipe.hincrbyfloat(c, "bytes_decrypted", bytes_dec)
+            for minute, v in crypto_by_min.items():
+                pipe.hincrbyfloat(self._k("ts:crypto"), minute, v)
+            if crypto_by_min:
+                pipe.expire(self._k("ts:crypto"), self._series_ttl)
+            for minute, v in put_by_min.items():
+                pipe.hincrbyfloat(self._k("ts:bytes_put"), minute, v)
+            if put_by_min:
+                pipe.expire(self._k("ts:bytes_put"), self._series_ttl)
+            for minute, v in get_by_min.items():
+                pipe.hincrbyfloat(self._k("ts:bytes_get"), minute, v)
+            if get_by_min:
+                pipe.expire(self._k("ts:bytes_get"), self._series_ttl)
+            if errors:
+                pipe.hincrby(c, "errors", errors)
+                for minute, cnt in err_by_min.items():
+                    pipe.hincrby(self._k("ts:errors"), minute, cnt)
+                pipe.expire(self._k("ts:errors"), self._series_ttl)
+                eb = self._k("errors")
+                for cls, cnt in err_class.items():
+                    pipe.hincrby(eb, cls, cnt)
+                pipe.expire(eb, self._stats_ttl)
+            await pipe.execute()
 
     async def sync_local(self, local: LocalCounters) -> None:
-        # No-op: all cluster-wide stats are written per-request in record() on
-        # every pod, so there's no per-pod Prometheus delta to fold in. (Kept on
-        # the interface for the in-memory store, which uses it for live sparklines.)
+        # No-op: every request is recorded (via record() + the background flush) on
+        # every pod into shared cluster-wide counters, so there's no per-pod Prometheus
+        # delta to fold in. (Kept on the interface for the in-memory store, which uses
+        # it for live sparklines.)
         return
 
     async def aggregate(self) -> StatsAggregate | None:

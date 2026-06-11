@@ -15,15 +15,13 @@ from fastapi import Request, Response
 from structlog.stdlib import BoundLogger
 
 from ... import crypto, xml_responses
+from ...client import S3Client, S3Credentials
 from ...errors import S3Error
-from ...s3client import S3Client, S3Credentials
 from ...state import (
-    InternalPartMetadata,
     MultipartMetadata,
     MultipartUploadState,
     PartMetadata,
     delete_upload_state,
-    load_upload_state,
     persist_upload_state,
     save_multipart_metadata,
 )
@@ -144,7 +142,9 @@ class LifecycleMixin(BaseHandler):
 
             state = await self.multipart_manager.complete_upload(bucket, key, upload_id)
             if not state:
-                state = await self._recover_state_for_complete(client, bucket, key, upload_id)
+                state = await self._recover_upload_state(
+                    client, bucket, key, upload_id, context="for complete"
+                )
 
             # Parse client's part list
             body = await request.body()
@@ -218,111 +218,6 @@ class LifecycleMixin(BaseHandler):
                 content=xml_responses.complete_multipart(location, bucket, key, etag),
                 media_type="application/xml",
             )
-
-    async def _recover_state_for_complete(
-        self, client: S3Client, bucket: str, key: str, upload_id: str
-    ) -> MultipartUploadState | None:
-        from collections import defaultdict
-
-        from ... import crypto
-        from ...state import MAX_INTERNAL_PARTS_PER_CLIENT
-
-        def internal_to_client_part(internal_part_number: int) -> int:
-            """Convert internal part number to client part number."""
-            return ((internal_part_number - 1) // MAX_INTERNAL_PARTS_PER_CLIENT) + 1
-
-        state_data = await load_upload_state(client, bucket, key, upload_id)
-        if not state_data:
-            # Check if upload exists in S3 before returning NoSuchUpload
-            try:
-                await client.list_parts(bucket, key, upload_id, max_parts=1)
-                # Upload exists but DEK is missing - internal state corruption
-                logger.error(
-                    "RECOVER_DEK_MISSING",
-                    bucket=bucket,
-                    key=key,
-                    upload_id=upload_id[:20] + "...",
-                    message="Upload exists in S3 but DEK state is missing",
-                )
-            except Exception:
-                # Upload doesn't exist in S3
-                pass
-            raise S3Error.no_such_upload(upload_id)
-
-        wrapped_dek, kid = state_data
-        dek = crypto.unwrap_key(wrapped_dek, self.keyring.key_by_id(kid))
-        state = await self.multipart_manager.create_upload(bucket, key, upload_id, dek, kid)
-
-        try:
-            all_parts = await client.list_all_parts(bucket, key, upload_id)
-
-            # Group S3 internal parts by client part number
-            client_parts: dict[int, list[dict]] = defaultdict(list)
-            for part in all_parts:
-                internal_part_num = part.get("PartNumber", 0)
-                client_part_num = internal_to_client_part(internal_part_num)
-                client_parts[client_part_num].append(part)
-
-            logger.debug(
-                "RECOVER_STATE_GROUPING",
-                bucket=bucket,
-                key=key,
-                upload_id=upload_id[:20] + "...",
-                s3_parts=len(all_parts),
-                client_parts=sorted(client_parts.keys()),
-            )
-
-            # Build PartMetadata for each client part
-            for client_part_num, internal_s3_parts in client_parts.items():
-                internal_s3_parts.sort(key=lambda p: p.get("PartNumber", 0))
-
-                internal_parts_meta = []
-                part_plaintext_size = 0
-                part_ciphertext_size = 0
-
-                for s3_part in internal_s3_parts:
-                    internal_num = s3_part.get("PartNumber", 0)
-                    ciphertext_size = s3_part.get("Size", 0)
-                    plaintext_size = crypto.plaintext_size(ciphertext_size)
-                    etag = s3_part.get("ETag", "").strip('"')
-
-                    internal_parts_meta.append(
-                        InternalPartMetadata(
-                            internal_part_number=internal_num,
-                            plaintext_size=plaintext_size,
-                            ciphertext_size=ciphertext_size,
-                            etag=etag,
-                        )
-                    )
-                    part_plaintext_size += plaintext_size
-                    part_ciphertext_size += ciphertext_size
-
-                first_etag = internal_s3_parts[0].get("ETag", "").strip('"')
-
-                await self.multipart_manager.add_part(
-                    bucket,
-                    key,
-                    upload_id,
-                    PartMetadata(
-                        client_part_num,
-                        part_plaintext_size,
-                        part_ciphertext_size,
-                        first_etag,
-                        "",
-                        internal_parts=internal_parts_meta,
-                    ),
-                )
-
-            state = await self.multipart_manager.get_upload(bucket, key, upload_id)
-        except Exception as e:
-            logger.error(
-                "RECOVER_STATE_FOR_COMPLETE_FAILED",
-                bucket=bucket,
-                key=key,
-                upload_id=upload_id[:20] + "...",
-                error=str(e),
-            )
-        return state
 
     def _parse_client_parts(self, body: bytes) -> list[dict]:
         client_parts = []

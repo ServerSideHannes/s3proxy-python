@@ -15,9 +15,9 @@ from fastapi import Request, Response
 from structlog.stdlib import BoundLogger
 
 from .. import crypto
+from ..client import S3Client, S3Credentials
 from ..config import Settings
 from ..errors import S3Error, raise_for_client_error
-from ..s3client import S3Client, S3Credentials
 from ..state import MultipartStateManager
 from ..utils import etag_matches, parse_http_date
 

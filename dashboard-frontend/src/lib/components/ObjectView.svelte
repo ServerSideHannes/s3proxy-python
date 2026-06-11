@@ -1,47 +1,39 @@
 <script lang="ts">
   import { fetchObject } from '$lib/api';
+  import { createLoader } from '$lib/loader.svelte';
   import { bucketHref } from '$lib/route';
   import type { ObjectDetail } from '$lib/types';
 
   let { bucket, object }: { bucket: string; object: string } = $props();
 
+  const loader = createLoader();
   let rows = $state<[string, string][]>([]);
-  let state_ = $state<'loading' | 'ok' | 'error' | 'neterror'>('loading');
-  let errorStatus = $state(0);
 
   let title = $derived(object.split('/').pop() || object);
 
   async function load() {
-    state_ = 'loading';
-    try {
-      const d: ObjectDetail = await fetchObject(bucket, object);
-      const out: [string, string][] = [
-        ['Bucket', d.bucket],
-        ['Key', d.key],
-        ['Size (stored)', d.size_h],
-        ['Content-Type', d.content_type || '—'],
-        ['ETag', d.etag || '—'],
-        ['Last Modified', d.last_modified || '—'],
-        [
-          'Encrypted',
-          d.encrypted
-            ? 'Yes (AES-256-GCM' + (d.encryption_source === 'sidecar' ? ', multipart sidecar' : '') + ')'
-            : 'No'
-        ]
-      ];
-      for (const [k, v] of Object.entries(d.metadata || {})) {
-        out.push(['x-amz-meta-' + k, v]);
-      }
-      rows = out;
-      state_ = 'ok';
-    } catch (e) {
-      if (e instanceof Error && e.message.startsWith('HTTP ')) {
-        errorStatus = Number(e.message.slice(5));
-        state_ = 'error';
-      } else {
-        state_ = 'neterror';
-      }
+    // run() guards against bucket/object changing mid-flight and surfaces the
+    // loading/error state (errorStatus === -1 means a network/transport error).
+    const d: ObjectDetail | undefined = await loader.run(() => fetchObject(bucket, object));
+    if (!d) return;
+    const out: [string, string][] = [
+      ['Bucket', d.bucket],
+      ['Key', d.key],
+      ['Size (stored)', d.size_h],
+      ['Content-Type', d.content_type || '—'],
+      ['ETag', d.etag || '—'],
+      ['Last Modified', d.last_modified || '—'],
+      [
+        'Encrypted',
+        d.encrypted
+          ? 'Yes (AES-256-GCM' + (d.encryption_source === 'sidecar' ? ', multipart sidecar' : '') + ')'
+          : 'No'
+      ]
+    ];
+    for (const [k, v] of Object.entries(d.metadata || {})) {
+      out.push(['x-amz-meta-' + k, v]);
     }
+    rows = out;
   }
 
   $effect(() => {
@@ -61,12 +53,12 @@
   </div>
   <table>
     <tbody>
-      {#if state_ === 'loading'}
+      {#if loader.loading}
         <tr><td colspan="2" class="empty-state">Loading…</td></tr>
-      {:else if state_ === 'error'}
-        <tr><td colspan="2" class="empty-state">Failed to load: {errorStatus}</td></tr>
-      {:else if state_ === 'neterror'}
+      {:else if loader.errorStatus === -1}
         <tr><td colspan="2" class="empty-state">Network error.</td></tr>
+      {:else if loader.errorStatus != null}
+        <tr><td colspan="2" class="empty-state">Failed to load: {loader.errorStatus}</td></tr>
       {:else}
         {#each rows as [k, v]}
           <tr>

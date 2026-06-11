@@ -43,7 +43,7 @@ export interface KeyRow {
 }
 
 export interface StatusPayload {
-  header: { title: string; status: string; uptime: string };
+  header: { title: string; status: string; uptime: string; cluster_wide: boolean };
   cards: {
     requests: Card;
     data_encrypted: Card;
