@@ -104,6 +104,35 @@ async def test_collect_all_builds_expected_sections(dashboard_settings, mem_stor
     assert data["footer"]["version"] == "9.9.9"
 
 
+async def test_chatty_bucket_does_not_hide_quiet_bucket(dashboard_settings, mem_store) -> None:
+    # A quiet bucket is touched once, then a chatty bucket floods far more than
+    # the activity-feed window. The durable bucket index must still surface both.
+    await record_request(
+        "PUT", "/quiet-bucket/backup.tar", "PutObject", 200, 0.05, 2048, "10.0.0.1"
+    )
+    for i in range(50):
+        await record_request(
+            "PUT", f"/chatty-bucket/wal/{i}.gz", "PutObject", 200, 0.01, 64, "10.0.0.2"
+        )
+
+    data = await collectors.collect_all(mem_store, dashboard_settings, start_time=time.monotonic())
+
+    # The activity feed is still just the latest requests (all chatty)...
+    assert len(data["activity"]) == 10
+    assert {row["bucket"] for row in data["activity"]} == {"chatty-bucket"}
+    # ...but the bucket summary lists every bucket the proxy has served.
+    assert {b["name"] for b in data["buckets"]} == {"quiet-bucket", "chatty-bucket"}
+
+
+async def test_buckets_aggregate_distinct_objects_and_bytes(mem_store) -> None:
+    await record_request("PUT", "/b1/a", "PutObject", 200, 0.01, 100, "")
+    await record_request("PUT", "/b1/a", "PutObject", 200, 0.01, 100, "")  # same key again
+    await record_request("PUT", "/b1/b", "PutObject", 200, 0.01, 50, "")
+    buckets = {b["name"]: b for b in await mem_store.buckets()}
+    assert buckets["b1"]["objects"] == 2  # distinct keys, not request count
+    assert buckets["b1"]["bytes"] == 250
+
+
 async def test_activity_timestamp_is_absolute(dashboard_settings, mem_store) -> None:
     await record_request("GET", "/b/k", "GetObject", 200, 0.01, 1, "10.0.0.1")
     data = await collectors.collect_all(mem_store, dashboard_settings, start_time=time.monotonic())
@@ -125,6 +154,30 @@ async def test_collector_does_not_crash_on_empty_metrics(dashboard_settings, mem
 # ---------------------------------------------------------------------------
 # Redis-backed store (cluster-wide path) on fakeredis
 # ---------------------------------------------------------------------------
+
+
+async def test_redis_store_buckets_are_durable(redis_store) -> None:
+    # Two distinct objects in a quiet bucket, then a flood in a chatty one.
+    await redis_store.record(
+        RequestSample(time.time(), "PUT", "PutObject", "quiet", "a", 200, 1.0, 100, "")
+    )
+    await redis_store.record(
+        RequestSample(time.time(), "PUT", "PutObject", "quiet", "a", 200, 1.0, 100, "")
+    )
+    await redis_store.record(
+        RequestSample(time.time(), "PUT", "PutObject", "quiet", "b", 200, 1.0, 100, "")
+    )
+    for i in range(200):
+        await redis_store.record(
+            RequestSample(time.time(), "PUT", "PutObject", "chatty", f"w{i}", 200, 1.0, 5, "")
+        )
+    await redis_store.flush()
+
+    buckets = {b["name"]: b for b in await redis_store.buckets()}
+    assert set(buckets) == {"quiet", "chatty"}
+    assert buckets["quiet"]["objects"] == 2  # distinct keys (deduped)
+    assert buckets["quiet"]["bytes"] == 300
+    assert buckets["chatty"]["objects"] == 200
 
 
 async def test_redis_store_records_and_paginates(redis_store) -> None:
