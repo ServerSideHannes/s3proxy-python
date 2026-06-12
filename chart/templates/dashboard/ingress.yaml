@@ -2,6 +2,37 @@
 {{- if not .Values.dashboard.ingress.host }}
 {{- fail "dashboard.ingress.enabled is true but dashboard.ingress.host is empty — set a hostname for the dashboard" }}
 {{- end }}
+{{- if eq .Values.dashboard.ingress.kind "IngressRoute" }}
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ .Chart.Name }}-dashboard
+  labels:
+    {{- include "s3proxy.labels" . | nindent 4 }}
+  {{- with .Values.dashboard.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.dashboard.ingress.entryPoints }}
+  entryPoints:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  routes:
+    - match: Host(`{{ .Values.dashboard.ingress.host }}`) && PathPrefix(`{{ .Values.dashboard.path }}`)
+      kind: Rule
+      {{- with .Values.dashboard.ingress.middlewares }}
+      middlewares:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      services:
+        - name: {{ .Chart.Name }}-dashboard
+          port: {{ .Values.dashboard.frontend.service.port }}
+  {{- with .Values.dashboard.ingress.tls }}
+  tls:
+    secretName: {{ (first .).secretName }}
+  {{- end }}
+{{- else }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -39,4 +70,5 @@ spec:
                 name: {{ .Chart.Name }}-dashboard
                 port:
                   number: {{ .Values.dashboard.frontend.service.port }}
+{{- end }}
 {{- end }}

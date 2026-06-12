@@ -54,6 +54,7 @@ helm install s3proxy oci://ghcr.io/serversidehannes/s3proxy-python/charts/s3prox
 | `dashboard.existingSecret.usernameKey` | `S3PROXY_DASHBOARD_USERNAME` | Username key in the existing secret |
 | `dashboard.existingSecret.passwordKey` | `S3PROXY_DASHBOARD_PASSWORD` | Password key in the existing secret |
 | `dashboard.ingress.enabled` | `false` | Dedicated Ingress for the dashboard (keep off unless intentionally exposing it) |
+| `dashboard.ingress.kind` | `Ingress` | `Ingress` (standard) or `IngressRoute` (Traefik CRD) |
 | `dashboard.ingress.className` | `""` | Ingress class for the dashboard Ingress (set to your cluster's controller) |
 | `dashboard.ingress.host` | `""` | Hostname for the dashboard (required when enabled) |
 | `dashboard.ingress.annotations` | `{}` | Annotations (e.g. IP allowlist) for the dashboard Ingress |
@@ -87,10 +88,12 @@ helm install s3proxy oci://ghcr.io/serversidehannes/s3proxy-python/charts/s3prox
 | `frontproxy.podDisruptionBudget.enabled` | `true` | Enable front proxy PDB |
 | `frontproxy.podDisruptionBudget.minAvailable` | `1` | Min available front proxy pods |
 | `ingress.enabled` | `false` | Expose S3 outside the cluster via Ingress (requires `frontproxy.enabled`) |
+| `ingress.kind` | `Ingress` | `Ingress` (standard) or `IngressRoute` (Traefik CRD) |
 | `ingress.className` | `""` | Ingress class (set to your cluster's controller) |
 | `ingress.annotations` | `{}` | Ingress annotations (controller-specific tuning) |
 | `ingress.hosts` | `[]` | Ingress host/path rules |
 | `ingress.tls` | `[]` | Ingress TLS config |
+| `ingress.entryPoints` / `middlewares` | `[]` | Traefik IngressRoute only |
 | `resources.requests.cpu` | `100m` | CPU request |
 | `resources.requests.memory` | `512Mi` | Memory request |
 | `resources.limits.cpu` | `500m` | CPU limit |
@@ -142,9 +145,10 @@ distribution. `ingress.enabled` therefore requires `frontproxy.enabled=true`.
 
 ## Dashboard login (password + OIDC SSO)
 
-The dashboard supports username/password and/or OIDC single sign-on. At least one
-method must be enabled. To make the dashboard **SSO-only**, disable the password
-method:
+The dashboard supports username/password and/or OIDC SSO; at least one must be on.
+For SSO-only, set `dashboard.auth.password.enabled=false`. OIDC is a generic
+authorization-code + PKCE flow, so any provider works (JumpCloud, Okta, Google,
+Entra ID).
 
 ```bash
 helm install s3proxy ... \
@@ -152,44 +156,41 @@ helm install s3proxy ... \
   --set dashboard.auth.password.enabled=false \
   --set dashboard.auth.oidc.enabled=true \
   --set dashboard.auth.oidc.issuer=https://oauth.id.jumpcloud.com/ \
-  --set dashboard.auth.oidc.clientId=<client-id> \
-  --set dashboard.auth.oidc.clientSecret=<client-secret> \
+  --set dashboard.auth.oidc.clientId=<id> \
+  --set dashboard.auth.oidc.clientSecret=<secret> \
   --set dashboard.auth.oidc.allowedDomains=example.com
 ```
 
-OIDC is a generic OpenID Connect authorization-code flow with PKCE — any compliant
-provider works (JumpCloud, Okta, Google, Entra ID, ...). The login page renders an
-SSO button, a password form, or both, based on which methods are enabled.
-
-**JumpCloud setup:** create an OIDC application, set the redirect URI to
-`<dashboard-url>/dashboard/api/oidc/callback` (match `dashboard.path`), and use
-issuer `https://oauth.id.jumpcloud.com/`. Provide the generated client ID/secret
-above. Restrict access with `allowedDomains` (a comma-separated email-domain
-allowlist) or by scoping who is bound to the application in JumpCloud.
-
-Keep the client secret out of values by pointing at your own Secret:
-
-```bash
-  --set dashboard.auth.oidc.existingSecret.name=my-oidc-secret \
-  --set dashboard.auth.oidc.existingSecret.clientSecretKey=S3PROXY_DASHBOARD_OIDC_CLIENT_SECRET
-```
+- **Redirect URI:** `<dashboard-url>/dashboard/api/oidc/callback` (match `dashboard.path`).
+- **Restrict access:** `allowedDomains` (comma-separated) or in the provider.
+- **Keep the secret out of values:** `dashboard.auth.oidc.existingSecret.name` + `.clientSecretKey`.
 
 ## Serving HTTPS
 
-By default the proxy runs HTTP inside the cluster and TLS is terminated at the
-Ingress (`ingress.tls` / `dashboard.ingress.tls` via `secretName`). To have the
-**proxy pod terminate HTTPS itself**, point at an existing `kubernetes.io/tls`
-Secret:
+TLS terminates at the Ingress by default (`*.ingress.tls` `secretName`). To make the
+**proxy pod serve HTTPS itself**, point at an existing `kubernetes.io/tls` Secret:
 
 ```bash
 kubectl create secret tls s3proxy-tls --cert=tls.crt --key=tls.key
-
 helm upgrade s3proxy ... --set server.tls.existingSecret=s3proxy-tls
 ```
 
-When set, `noTls` is forced off, the secret is mounted at `server.certPath` (as
-`s3proxy.crt`/`s3proxy.key`), the probes switch to HTTPS, the dashboard session
-cookie is marked `Secure`, and the dashboard's nginx talks to the proxy over
-HTTPS. For OIDC behind a TLS-terminating proxy/ingress that rewrites the host,
-set `dashboard.auth.oidc.redirectUrl` explicitly so the callback URL keeps the
-correct external scheme/host.
+This forces `noTls` off, mounts the cert at `server.certPath`, switches probes to
+HTTPS, marks the session cookie `Secure`, and points the dashboard's nginx at the
+proxy over HTTPS. Behind a host-rewriting proxy, pin `dashboard.auth.oidc.redirectUrl`.
+
+## Traefik
+
+Both ingresses default to the standard `Ingress` API, which Traefik serves natively —
+set `*.ingress.className: traefik`. To emit Traefik's CRD instead, set
+`*.ingress.kind: IngressRoute`; then `entryPoints` and `middlewares` apply:
+
+```bash
+helm install s3proxy ... \
+  --set dashboard.enabled=true \
+  --set dashboard.ingress.enabled=true \
+  --set dashboard.ingress.kind=IngressRoute \
+  --set dashboard.ingress.host=dash.example.com \
+  --set dashboard.ingress.entryPoints[0]=websecure \
+  --set dashboard.ingress.middlewares[0].name=ipallowlist
+```

@@ -172,10 +172,15 @@ dashboard:
   # your cluster runs.
   ingress:
     enabled: false
+    # "Ingress" (standard) or "IngressRoute" (Traefik CRD).
+    kind: Ingress
     className: ""
-    host: ""
     annotations: {}
+    host: ""
     tls: []  # e.g. [{ secretName: dashboard-tls, hosts: [dashboard.example.com] }]
+    # Traefik IngressRoute only:
+    entryPoints: []   # e.g. [websecure]
+    middlewares: []   # e.g. [{ name: my-mw }]
 
 resources:
   requests:
@@ -232,6 +237,8 @@ frontproxy:
 # controller-specific tuning (buffering, body size, timeouts) via `annotations`.
 ingress:
   enabled: false
+  # "Ingress" (standard) or "IngressRoute" (Traefik CRD).
+  kind: Ingress
   className: ""
   annotations: {}
   hosts: []
@@ -242,6 +249,9 @@ ingress:
   tls: []
   # - secretName: s3-tls
   #   hosts: [s3.example.com]
+  # Traefik IngressRoute only:
+  entryPoints: []   # e.g. [websecure]
+  middlewares: []   # e.g. [{ name: my-mw }]
 
 nodeSelector: {}
 
