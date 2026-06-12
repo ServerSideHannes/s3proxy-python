@@ -41,6 +41,30 @@ pod_name = os.environ.get("HOSTNAME", "unknown")
 logger: BoundLogger = structlog.get_logger(__name__).bind(pod=pod_name)
 
 
+class _HealthProbeAccessFilter(logging.Filter):
+    """Drop uvicorn access-log lines for liveness/readiness probes.
+
+    Probes hit these endpoints every few seconds on every pod; logging each one
+    drowns out real request activity.
+    """
+
+    _PATHS = {"/healthz", "/readyz"}
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # uvicorn.access record args: (client, method, path, http_version, status)
+        args = record.args
+        return not (isinstance(args, tuple) and len(args) >= 3 and args[2] in self._PATHS)
+
+
+_health_probe_filter = _HealthProbeAccessFilter()
+
+
+def _silence_health_probe_access_logs() -> None:
+    access_logger = logging.getLogger("uvicorn.access")
+    if _health_probe_filter not in access_logger.filters:
+        access_logger.addFilter(_health_probe_filter)
+
+
 def create_lifespan(settings: Settings, credentials_store: dict[str, str]) -> AsyncIterator[None]:
     """Create lifespan context manager for FastAPI app.
 
@@ -54,6 +78,7 @@ def create_lifespan(settings: Settings, credentials_store: dict[str, str]) -> As
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        _silence_health_probe_access_logs()
         logger.info("Starting", endpoint=settings.s3_endpoint, port=settings.port)
 
         # Initialize Redis FIRST, then create manager with correct store

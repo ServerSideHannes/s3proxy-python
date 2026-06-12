@@ -17,6 +17,7 @@ from .client import ParsedRequest, SigV4Verifier
 from .dashboard import record_request
 from .errors import S3Error, raise_for_client_error, raise_for_exception
 from .handlers import S3ProxyHandler
+from .keyring import UnknownKidError
 from .metrics import (
     REQUEST_COUNT,
     REQUEST_DURATION,
@@ -230,6 +231,9 @@ async def _handle_proxy_request_impl(
         return await dispatcher.dispatch(request, verified_creds)
     except HTTPException, S3Error:
         raise
+    except UnknownKidError as e:
+        logger.warning("Cannot decrypt object: key not configured", kid=e.kid)
+        raise S3Error.key_not_configured(e.kid) from None
     except ClientError as e:
         logger.error("Request failed with ClientError", error=str(e), exc_info=True)
         raise_for_client_error(e)
