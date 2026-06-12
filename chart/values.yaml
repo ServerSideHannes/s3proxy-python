@@ -43,6 +43,15 @@ redis:
     password: ""
     existingSecret: ""
     passwordKey: "redis-password"
+  # Persistence. Off by default — Redis here holds only transient, TTL'd upload
+  # state, so an emptyDir is the sensible default. Enable to back /data with a
+  # PVC so that state survives pod restarts/rescheduling.
+  persistence:
+    enabled: false
+    size: "1Gi"
+    storageClassName: ""
+    accessModes:
+      - ReadWriteOnce
   resources:
     requests:
       cpu: "100m"

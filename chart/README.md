@@ -51,6 +51,10 @@ helm install s3proxy oci://ghcr.io/serversidehannes/s3proxy-python/charts/s3prox
 | `redis.auth.password` | `""` | Password (when auth enabled and no existingSecret) |
 | `redis.auth.existingSecret` | `""` | Use a pre-created Secret for the Redis password |
 | `redis.auth.passwordKey` | `redis-password` | Key name in the Redis password Secret |
+| `redis.persistence.enabled` | `false` | Back Redis `/data` with a PVC instead of an emptyDir |
+| `redis.persistence.size` | `1Gi` | PVC size (when persistence enabled) |
+| `redis.persistence.storageClassName` | `""` | StorageClass for the PVC (empty = cluster default) |
+| `redis.persistence.accessModes` | `[ReadWriteOnce]` | PVC access modes |
 | `externalRedis.url` | `""` | External Redis URL (used when `redis.enabled=false`) |
 | `externalRedis.uploadTtlHours` | `24` | Upload state TTL |
 | `externalRedis.existingSecret` | `""` | K8s secret with Redis password |
