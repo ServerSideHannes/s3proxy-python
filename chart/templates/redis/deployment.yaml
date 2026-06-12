@@ -77,5 +77,10 @@ spec:
               mountPath: /data
       volumes:
         - name: data
+          {{- if .Values.redis.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Chart.Name }}-redis-data
+          {{- else }}
           emptyDir: {}
+          {{- end }}
 {{- end }}
