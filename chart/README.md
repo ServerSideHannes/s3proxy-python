@@ -20,7 +20,9 @@ helm install s3proxy oci://ghcr.io/serversidehannes/s3proxy-python/charts/s3prox
 | `s3.host` | `s3.amazonaws.com` | S3 endpoint |
 | `s3.region` | `us-east-1` | AWS region |
 | `server.port` | `4433` | Proxy listen port |
-| `server.noTls` | `true` | Disable TLS (in-cluster only) |
+| `server.noTls` | `true` | Disable TLS (in-cluster only; forced off when `server.tls.existingSecret` is set) |
+| `server.tls.existingSecret` | `""` | Existing `kubernetes.io/tls` Secret (`tls.crt`/`tls.key`); when set, the proxy serves HTTPS |
+| `server.certPath` | `/etc/s3proxy/certs` | Where the TLS cert/key are mounted in the pod |
 | `performance.memoryLimitMb` | `64` | Memory budget for streaming |
 | `logLevel` | `DEBUG` | Log level |
 | `secrets.credentials` | `[]` | AWS credentials, each `{accessKey, secretKey, kek}` — the credential's KEK encrypts its objects |
@@ -171,3 +173,23 @@ Keep the client secret out of values by pointing at your own Secret:
   --set dashboard.auth.oidc.existingSecret.name=my-oidc-secret \
   --set dashboard.auth.oidc.existingSecret.clientSecretKey=S3PROXY_DASHBOARD_OIDC_CLIENT_SECRET
 ```
+
+## Serving HTTPS
+
+By default the proxy runs HTTP inside the cluster and TLS is terminated at the
+Ingress (`ingress.tls` / `dashboard.ingress.tls` via `secretName`). To have the
+**proxy pod terminate HTTPS itself**, point at an existing `kubernetes.io/tls`
+Secret:
+
+```bash
+kubectl create secret tls s3proxy-tls --cert=tls.crt --key=tls.key
+
+helm upgrade s3proxy ... --set server.tls.existingSecret=s3proxy-tls
+```
+
+When set, `noTls` is forced off, the secret is mounted at `server.certPath` (as
+`s3proxy.crt`/`s3proxy.key`), the probes switch to HTTPS, the dashboard session
+cookie is marked `Secure`, and the dashboard's nginx talks to the proxy over
+HTTPS. For OIDC behind a TLS-terminating proxy/ingress that rewrites the host,
+set `dashboard.auth.oidc.redirectUrl` explicitly so the callback URL keeps the
+correct external scheme/host.

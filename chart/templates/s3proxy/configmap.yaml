@@ -9,7 +9,12 @@ data:
   S3PROXY_REGION: {{ .Values.s3.region | quote }}
   S3PROXY_IP: "0.0.0.0"
   S3PROXY_PORT: {{ .Values.server.port | quote }}
+  {{- if .Values.server.tls.existingSecret }}
+  S3PROXY_NO_TLS: "false"
+  S3PROXY_CERT_PATH: {{ .Values.server.certPath | quote }}
+  {{- else }}
   S3PROXY_NO_TLS: {{ .Values.server.noTls | quote }}
+  {{- end }}
   S3PROXY_MEMORY_LIMIT_MB: {{ .Values.performance.memoryLimitMb | quote }}
   {{- if .Values.redis.enabled }}
   S3PROXY_REDIS_URL: "redis://{{ .Chart.Name }}-redis:{{ .Values.redis.port }}/0"

@@ -108,6 +108,41 @@ def test_oidc_existing_secret_pulled_via_env():
     assert "S3PROXY_DASHBOARD_OIDC_CLIENT_SECRET" not in secret(docs)
 
 
+def test_no_pod_tls_by_default():
+    docs = render("dashboard.enabled=true")
+    assert config(docs)["S3PROXY_NO_TLS"] == "true"
+    dep = by_kind_name(docs, "Deployment", "s3proxy-python")
+    assert not dep["spec"]["template"]["spec"].get("volumes")
+    cm = by_kind_name(docs, "ConfigMap", "s3proxy-python-dashboard-nginx")["data"]["default.conf"]
+    assert "proxy_pass http://" in cm
+
+
+def test_pod_tls_from_existing_secret():
+    docs = render("dashboard.enabled=true", "server.tls.existingSecret=s3proxy-tls")
+    data = config(docs)
+    assert data["S3PROXY_NO_TLS"] == "false"
+    assert data["S3PROXY_CERT_PATH"] == "/etc/s3proxy/certs"
+
+    dep = by_kind_name(docs, "Deployment", "s3proxy-python")
+    spec = dep["spec"]["template"]["spec"]
+    vol = next(v for v in spec["volumes"] if v["name"] == "tls")
+    assert vol["secret"]["secretName"] == "s3proxy-tls"
+    paths = {i["key"]: i["path"] for i in vol["secret"]["items"]}
+    assert paths == {"tls.crt": "s3proxy.crt", "tls.key": "s3proxy.key"}
+
+    container = spec["containers"][0]
+    assert any(m["mountPath"] == "/etc/s3proxy/certs" for m in container["volumeMounts"])
+    for probe in ("startupProbe", "livenessProbe", "readinessProbe"):
+        assert container[probe]["httpGet"]["scheme"] == "HTTPS"
+
+
+def test_pod_tls_switches_dashboard_nginx_to_https():
+    docs = render("dashboard.enabled=true", "server.tls.existingSecret=s3proxy-tls")
+    cm = by_kind_name(docs, "ConfigMap", "s3proxy-python-dashboard-nginx")["data"]["default.conf"]
+    assert "proxy_pass https://" in cm
+    assert "proxy_ssl_verify off;" in cm
+
+
 def test_app_existing_secret_forces_explicit_oidc_env():
     docs = render(
         *OIDC,

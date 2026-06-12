@@ -14,6 +14,15 @@ s3:
 server:
   port: 4433
   noTls: true
+  # Serve HTTPS directly from the proxy pod (instead of, or in addition to,
+  # terminating TLS at the ingress). Point `tls.existingSecret` at an existing
+  # `kubernetes.io/tls` Secret holding `tls.crt` / `tls.key`; it is mounted into
+  # the pod at `certPath` and the proxy terminates TLS itself. When set, `noTls`
+  # is forced off, probes switch to HTTPS, the dashboard session cookie is marked
+  # Secure, and the dashboard's nginx talks to the proxy over HTTPS.
+  tls:
+    existingSecret: ""
+  certPath: "/etc/s3proxy/certs"
 
 performance:
   memoryLimitMb: 64
