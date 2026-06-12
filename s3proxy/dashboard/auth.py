@@ -39,17 +39,26 @@ class RedisSessionStore:
 
 
 class DashboardCredentials:
-    """Resolved dashboard credentials."""
+    """Resolved dashboard credentials.
+
+    When password login is disabled (SSO-only), credentials need not be set and
+    :meth:`valid` always returns False.
+    """
 
     def __init__(self, settings: Settings, credentials_store: dict[str, str]):
-        if not (settings.dashboard_username and settings.dashboard_password):
+        self.enabled = settings.dashboard_password_enabled
+        if self.enabled and not (settings.dashboard_username and settings.dashboard_password):
             raise RuntimeError(
-                "Dashboard requires S3PROXY_DASHBOARD_USERNAME and S3PROXY_DASHBOARD_PASSWORD"
+                "Dashboard password login requires S3PROXY_DASHBOARD_USERNAME and "
+                "S3PROXY_DASHBOARD_PASSWORD (or disable it via "
+                "S3PROXY_DASHBOARD_PASSWORD_ENABLED=false)"
             )
         self.username = settings.dashboard_username
         self.password = settings.dashboard_password
 
     def valid(self, username: str, password: str) -> bool:
+        if not self.enabled:
+            return False
         return secrets.compare_digest(username.encode(), self.username.encode()) and (
             secrets.compare_digest(password.encode(), self.password.encode())
         )

@@ -31,6 +31,18 @@ helm install s3proxy oci://ghcr.io/serversidehannes/s3proxy-python/charts/s3prox
 | `dashboard.path` | `/dashboard` | URL path prefix for the dashboard |
 | `dashboard.username` | `admin` | Dashboard username (stored in the Secret; override in production) |
 | `dashboard.password` | `admin` | Dashboard password (stored in the Secret; override in production) |
+| `dashboard.auth.password.enabled` | `true` | Enable username/password login. Set `false` for SSO-only |
+| `dashboard.auth.oidc.enabled` | `false` | Enable OIDC single sign-on (JumpCloud, Okta, Google, Entra ID, ...) |
+| `dashboard.auth.oidc.issuer` | `""` | OIDC issuer URL (drives `.well-known/openid-configuration` discovery) |
+| `dashboard.auth.oidc.clientId` | `""` | OIDC client ID |
+| `dashboard.auth.oidc.clientSecret` | `""` | OIDC client secret (stored in the Secret) |
+| `dashboard.auth.oidc.redirectUrl` | `""` | Callback URL; empty = derive from request (`X-Forwarded-Proto`/`Host`) |
+| `dashboard.auth.oidc.scopes` | `openid email profile` | Space-separated OIDC scopes |
+| `dashboard.auth.oidc.usernameClaim` | `email` | ID-token claim used as the session username |
+| `dashboard.auth.oidc.allowedDomains` | `""` | Comma-separated email-domain allowlist (empty = any authenticated user) |
+| `dashboard.auth.oidc.buttonLabel` | `Sign in with SSO` | Label for the SSO button on the login page |
+| `dashboard.auth.oidc.existingSecret.name` | `""` | Pre-created secret holding the OIDC client secret |
+| `dashboard.auth.oidc.existingSecret.clientSecretKey` | `S3PROXY_DASHBOARD_OIDC_CLIENT_SECRET` | Client-secret key in the existing secret |
 | `dashboard.frontend.enabled` | `true` | Run the Svelte UI as its own Deployment (nginx serving the static build + reverse-proxying the API) |
 | `dashboard.frontend.image.repository` | `ghcr.io/serversidehannes/s3proxy-dashboard` | Dashboard UI image |
 | `dashboard.frontend.image.tag` | `latest` | Dashboard UI image tag |
@@ -125,3 +137,37 @@ helm install s3proxy ... \
 
 The Ingress routes to the front proxy, so external clients also get even per-request
 distribution. `ingress.enabled` therefore requires `frontproxy.enabled=true`.
+
+## Dashboard login (password + OIDC SSO)
+
+The dashboard supports username/password and/or OIDC single sign-on. At least one
+method must be enabled. To make the dashboard **SSO-only**, disable the password
+method:
+
+```bash
+helm install s3proxy ... \
+  --set dashboard.enabled=true \
+  --set dashboard.auth.password.enabled=false \
+  --set dashboard.auth.oidc.enabled=true \
+  --set dashboard.auth.oidc.issuer=https://oauth.id.jumpcloud.com/ \
+  --set dashboard.auth.oidc.clientId=<client-id> \
+  --set dashboard.auth.oidc.clientSecret=<client-secret> \
+  --set dashboard.auth.oidc.allowedDomains=example.com
+```
+
+OIDC is a generic OpenID Connect authorization-code flow with PKCE — any compliant
+provider works (JumpCloud, Okta, Google, Entra ID, ...). The login page renders an
+SSO button, a password form, or both, based on which methods are enabled.
+
+**JumpCloud setup:** create an OIDC application, set the redirect URI to
+`<dashboard-url>/dashboard/api/oidc/callback` (match `dashboard.path`), and use
+issuer `https://oauth.id.jumpcloud.com/`. Provide the generated client ID/secret
+above. Restrict access with `allowedDomains` (a comma-separated email-domain
+allowlist) or by scoping who is bound to the application in JumpCloud.
+
+Keep the client secret out of values by pointing at your own Secret:
+
+```bash
+  --set dashboard.auth.oidc.existingSecret.name=my-oidc-secret \
+  --set dashboard.auth.oidc.existingSecret.clientSecretKey=S3PROXY_DASHBOARD_OIDC_CLIENT_SECRET
+```

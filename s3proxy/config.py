@@ -98,6 +98,42 @@ class Settings(BaseSettings):
     dashboard_username: str = Field(default="", description="Dashboard username")
     dashboard_password: str = Field(default="", description="Dashboard password")
 
+    # Auth methods for the dashboard. Username/password is on by default; it can
+    # be disabled so the dashboard is SSO-only. At least one method must be on.
+    dashboard_password_enabled: bool = Field(
+        default=True, description="Enable username/password login for the dashboard"
+    )
+
+    # OIDC SSO (e.g. JumpCloud, Okta, Google, Entra ID). Generic OpenID Connect
+    # authorization-code flow with PKCE; the issuer's discovery document drives
+    # the endpoints, so any compliant provider works.
+    dashboard_oidc_enabled: bool = Field(
+        default=False, description="Enable OIDC single sign-on for the dashboard"
+    )
+    dashboard_oidc_issuer: str = Field(
+        default="",
+        description="OIDC issuer URL (used for .well-known/openid-configuration discovery)",
+    )
+    dashboard_oidc_client_id: str = Field(default="", description="OIDC client ID")
+    dashboard_oidc_client_secret: str = Field(default="", description="OIDC client secret")
+    dashboard_oidc_redirect_url: str = Field(
+        default="",
+        description="OIDC redirect/callback URL. Empty = derive from the incoming request.",
+    )
+    dashboard_oidc_scopes: str = Field(
+        default="openid email profile", description="Space-separated OIDC scopes"
+    )
+    dashboard_oidc_username_claim: str = Field(
+        default="email", description="ID-token claim used as the session username"
+    )
+    dashboard_oidc_allowed_domains: str = Field(
+        default="",
+        description="Comma-separated email-domain allowlist (empty = allow any authenticated user)",
+    )
+    dashboard_oidc_button_label: str = Field(
+        default="Sign in with SSO", description="Label for the SSO button on the login page"
+    )
+
     # Cached KeyRing + credentials store (computed once in model_post_init).
     _keyring: KeyRing = PrivateAttr()
     _credentials_store: dict[str, str] = PrivateAttr()
@@ -121,6 +157,15 @@ class Settings(BaseSettings):
     def credentials_store(self) -> dict[str, str]:
         """Get the access_key -> secret_key map for signature verification."""
         return self._credentials_store
+
+    @property
+    def dashboard_oidc_allowed_domain_set(self) -> set[str]:
+        """Lowercased email-domain allowlist for OIDC (empty = allow any)."""
+        return {
+            d.strip().lower().lstrip("@")
+            for d in self.dashboard_oidc_allowed_domains.split(",")
+            if d.strip()
+        }
 
     @property
     def s3_endpoint(self) -> str:

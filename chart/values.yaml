@@ -102,6 +102,37 @@ dashboard:
     usernameKey: "S3PROXY_DASHBOARD_USERNAME"
     passwordKey: "S3PROXY_DASHBOARD_PASSWORD"
 
+  # Login methods. At least one must be enabled. Disable `password` to make the
+  # dashboard SSO-only (then `username`/`password` above are unused).
+  auth:
+    password:
+      enabled: true
+    # OIDC single sign-on (JumpCloud, Okta, Google, Entra ID, ...). Generic
+    # OpenID Connect authorization-code flow with PKCE — the issuer's discovery
+    # document drives the endpoints, so any compliant provider works. For
+    # JumpCloud: create an OIDC application, set the redirect URI to
+    # `<dashboard-url>/dashboard/api/oidc/callback`, and use issuer
+    # `https://oauth.id.jumpcloud.com/`.
+    oidc:
+      enabled: false
+      issuer: ""
+      clientId: ""
+      clientSecret: ""
+      # Full external callback URL. Leave empty to derive it from the incoming
+      # request (uses X-Forwarded-Proto/Host). Set explicitly when the dashboard
+      # sits behind a proxy that rewrites the host.
+      redirectUrl: ""
+      scopes: "openid email profile"
+      # ID-token claim used as the session username.
+      usernameClaim: "email"
+      # Comma-separated email-domain allowlist (empty = any authenticated user).
+      allowedDomains: ""
+      buttonLabel: "Sign in with SSO"
+      # Provide the client secret via your own Secret instead of `clientSecret`.
+      existingSecret:
+        name: ""
+        clientSecretKey: "S3PROXY_DASHBOARD_OIDC_CLIENT_SECRET"
+
   # Separate Deployment serving the Svelte dashboard (the static build from
   # dashboard-frontend/), with an nginx that also reverse-proxies the API.
   frontend:

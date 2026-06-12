@@ -26,6 +26,7 @@ from .collectors import (
     list_bucket_objects,
     list_logs,
 )
+from .oidc import OIDCError
 from .stats_store import DEFAULT_RANGE, RANGE_SPECS
 
 if TYPE_CHECKING:
@@ -49,22 +50,80 @@ def create_dashboard_router(
     prefix = settings.dashboard_path.rstrip("/")
     verify_api = make_verify_api(dashboard)
     cookie_secure = not settings.no_tls
+    password_enabled = settings.dashboard_password_enabled
+    oidc_enabled = settings.dashboard_oidc_enabled
+
+    if not (password_enabled or oidc_enabled):
+        raise RuntimeError(
+            "Dashboard has no login method enabled — set dashboard_password_enabled "
+            "and/or dashboard_oidc_enabled"
+        )
+
+    def _callback_url(request: Request) -> str:
+        if settings.dashboard_oidc_redirect_url:
+            return settings.dashboard_oidc_redirect_url
+        scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+        host = request.headers.get("host", request.url.netloc)
+        return f"{scheme}://{host}{prefix}/api/oidc/callback"
 
     router = APIRouter()
 
     # ---- Auth (unauthenticated) ----------------------------------------------
 
+    @router.get("/api/authmodes")
+    async def auth_modes() -> JSONResponse:
+        """Which login methods the login page should render."""
+        return JSONResponse(
+            {
+                "password": password_enabled,
+                "oidc": oidc_enabled,
+                "oidc_label": settings.dashboard_oidc_button_label,
+            }
+        )
+
     @router.post("/api/login")
     async def login_submit(
         request: Request, username: str = Form(...), password: str = Form(...)
     ) -> RedirectResponse:
-        if not dashboard.valid(username, password):
+        if not (password_enabled and dashboard.valid(username, password)):
             dest = f"{prefix}/login?error=1"
             return RedirectResponse(dest, status_code=status.HTTP_303_SEE_OTHER)
         token = await request.app.state.session_store.create(username)
         response = RedirectResponse(f"{prefix}/", status_code=status.HTTP_303_SEE_OTHER)
         set_session_cookie(response, token, secure=cookie_secure)
         return response
+
+    if oidc_enabled:
+
+        @router.get("/api/oidc/login")
+        async def oidc_login(request: Request) -> RedirectResponse:
+            client = request.app.state.oidc_client
+            url, login_state, state = await client.authorization_url(_callback_url(request))
+            await request.app.state.oidc_state_store.put(state, login_state)
+            return RedirectResponse(url, status_code=status.HTTP_303_SEE_OTHER)
+
+        @router.get("/api/oidc/callback")
+        async def oidc_callback(
+            request: Request, code: str = "", state: str = "", error: str = ""
+        ) -> RedirectResponse:
+            def _fail() -> RedirectResponse:
+                return RedirectResponse(
+                    f"{prefix}/login?error=sso", status_code=status.HTTP_303_SEE_OTHER
+                )
+
+            if error or not (code and state):
+                return _fail()
+            login_state = await request.app.state.oidc_state_store.take(state)
+            if login_state is None:
+                return _fail()
+            try:
+                username = await request.app.state.oidc_client.complete_login(code, login_state)
+            except OIDCError:
+                return _fail()
+            token = await request.app.state.session_store.create(username)
+            response = RedirectResponse(f"{prefix}/", status_code=status.HTTP_303_SEE_OTHER)
+            set_session_cookie(response, token, secure=cookie_secure)
+            return response
 
     @router.get("/api/logout")
     async def logout(request: Request) -> RedirectResponse:
