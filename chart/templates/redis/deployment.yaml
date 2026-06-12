@@ -20,6 +20,8 @@ spec:
         {{- include "s3proxy.labels" . | nindent 8 }}
         app.kubernetes.io/component: redis
     spec:
+      securityContext:
+        fsGroup: 999
       containers:
         - name: redis
           image: "{{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag }}"
