@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from s3proxy.config import Settings
-from s3proxy.keyring import KeyRing, derive_kek
+from s3proxy.keyring import KeyRing, UnknownKidError, derive_kek
 
 
 def _ring():
@@ -30,12 +30,12 @@ class TestKeyRingResolution:
 
     def test_key_by_id_empty_raises(self):
         ring = _ring()
-        with pytest.raises(KeyError):
+        with pytest.raises(UnknownKidError):
             ring.key_by_id("")
 
     def test_key_by_id_unknown_raises(self):
         ring = _ring()
-        with pytest.raises(KeyError):
+        with pytest.raises(UnknownKidError):
             ring.key_by_id("AKIA-GHOST")
 
 

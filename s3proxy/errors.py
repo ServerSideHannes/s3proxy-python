@@ -146,6 +146,14 @@ class S3Error(HTTPException):
     def precondition_failed(cls, message: str = "Precondition Failed") -> S3Error:
         return cls(412, "PreconditionFailed", message)
 
+    @classmethod
+    def key_not_configured(cls, kid: str) -> S3Error:
+        return cls(
+            400,
+            "KeyNotConfigured",
+            f"Object cannot be decrypted: no encryption key configured for kid {kid or '(empty)'}",
+        )
+
     # 500 Internal Error
     @classmethod
     def internal_error(cls, message: str = "Internal Server Error") -> S3Error:

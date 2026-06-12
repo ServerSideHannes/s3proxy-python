@@ -11,6 +11,19 @@ from __future__ import annotations
 import hashlib
 
 
+class UnknownKidError(Exception):
+    """An object's wrapping key (kid) is not configured.
+
+    Terminal, not transient: the object cannot be decrypted until the key for
+    this kid is configured, so callers surface a non-retryable error rather than
+    a 5xx that backup clients would retry-storm against.
+    """
+
+    def __init__(self, kid: str):
+        self.kid = kid
+        super().__init__(f"No key configured for kid {kid!r}")
+
+
 def derive_kek(secret: str) -> bytes:
     """Derive a 32-byte KEK from a per-credential secret (SHA256)."""
     return hashlib.sha256(secret.encode()).digest()
@@ -48,4 +61,4 @@ class KeyRing:
         try:
             return self._keys[kid]
         except KeyError as e:
-            raise KeyError(f"No key for kid {kid!r}") from e
+            raise UnknownKidError(kid) from e
