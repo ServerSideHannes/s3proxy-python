@@ -20,6 +20,13 @@ from .stats_store import (
 if TYPE_CHECKING:
     from ..config import Settings
 
+# The activity feed shows only the latest few requests, but the bucket summary
+# is derived from request history too. Sampling the same tiny window let a single
+# chatty bucket (e.g. frequent WAL PUTs) crowd quieter buckets out of the list
+# entirely, so the bucket summary samples a much wider slice of recent requests.
+ACTIVITY_FEED_SIZE = 10
+BUCKET_SAMPLE_SIZE = 1000
+
 
 async def record_request(
     method: str,
@@ -334,8 +341,9 @@ async def collect_all(
     num_enc, unit_enc = _format_bytes(bytes_encrypted)
     num_thr, unit_thr = _format_bytes(crypto_rate)
 
-    activity = await store.recent(10)
-    buckets = _derive_buckets(activity)
+    bucket_sample = await store.recent(BUCKET_SAMPLE_SIZE)
+    activity = bucket_sample[:ACTIVITY_FEED_SIZE]
+    buckets = _derive_buckets(bucket_sample)
     last_error_ts = next((e["timestamp"] for e in activity if e["status"] >= 400), None)
 
     return {

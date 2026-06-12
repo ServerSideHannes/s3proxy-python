@@ -104,6 +104,23 @@ async def test_collect_all_builds_expected_sections(dashboard_settings, mem_stor
     assert data["footer"]["version"] == "9.9.9"
 
 
+async def test_chatty_bucket_does_not_hide_quiet_bucket(dashboard_settings, mem_store) -> None:
+    # A quiet bucket is touched once, then a chatty bucket floods far more than
+    # the activity-feed window. The bucket summary must still surface both.
+    await record_request(
+        "PUT", "/quiet-bucket/backup.tar", "PutObject", 200, 0.05, 2048, "10.0.0.1"
+    )
+    for i in range(50):
+        await record_request(
+            "PUT", f"/chatty-bucket/wal/{i}.gz", "PutObject", 200, 0.01, 64, "10.0.0.2"
+        )
+
+    data = await collectors.collect_all(mem_store, dashboard_settings, start_time=time.monotonic())
+
+    assert len(data["activity"]) == collectors.ACTIVITY_FEED_SIZE
+    assert {b["name"] for b in data["buckets"]} == {"quiet-bucket", "chatty-bucket"}
+
+
 async def test_activity_timestamp_is_absolute(dashboard_settings, mem_store) -> None:
     await record_request("GET", "/b/k", "GetObject", 200, 0.01, 1, "10.0.0.1")
     data = await collectors.collect_all(mem_store, dashboard_settings, start_time=time.monotonic())
