@@ -246,6 +246,16 @@ class StatsStore(ABC):
         ...
 
     @abstractmethod
+    async def buckets(self) -> list[dict]:
+        """Return durable per-bucket aggregates for every bucket the proxy served.
+
+        Each dict has ``name``, ``objects`` (distinct keys seen), ``bytes``
+        (cumulative), and ``last_seen`` (epoch seconds). Independent of the
+        request-log window so quiet buckets are never hidden by chatty ones.
+        """
+        ...
+
+    @abstractmethod
     async def page(self, offset: int, limit: int, query: str, operation: str, status: str) -> dict:
         """Return a filtered, paginated slice of the request log."""
         ...
@@ -259,6 +269,7 @@ class MemoryStatsStore(StatsStore):
     def __init__(self, settings: Settings):
         self._rate = RateTracker()
         self._log = RequestLog(maxlen=max(200, settings.request_log_cap))
+        self._buckets: dict[str, dict] = {}
 
     @property
     def rate(self) -> RateTracker:
@@ -266,6 +277,15 @@ class MemoryStatsStore(StatsStore):
 
     async def record(self, sample: RequestSample) -> None:
         self._log.record(sample)
+        if sample.bucket:
+            info = self._buckets.setdefault(
+                sample.bucket, {"objects": set(), "bytes": 0.0, "last_seen": 0.0}
+            )
+            if sample.key:
+                info["objects"].add(sample.key)
+            if sample.size > 0:
+                info["bytes"] += sample.size
+            info["last_seen"] = max(info["last_seen"], sample.timestamp)
 
     async def sync_local(self, local: LocalCounters) -> None:
         # In-memory path reads Prometheus directly in collect_all; just feed the
@@ -297,6 +317,17 @@ class MemoryStatsStore(StatsStore):
         entries = self._log.all()
         entries.reverse()
         return [asdict(e) for e in entries[:limit]]
+
+    async def buckets(self) -> list[dict]:
+        return [
+            {
+                "name": name,
+                "objects": len(info["objects"]),
+                "bytes": info["bytes"],
+                "last_seen": info["last_seen"],
+            }
+            for name, info in self._buckets.items()
+        ]
 
     async def page(self, offset: int, limit: int, query: str, operation: str, status: str) -> dict:
         entries = self._log.all()
@@ -396,6 +427,9 @@ class RedisStatsStore(StatsStore):
         bytes_dec = 0.0
         errors = 0
         entries: list[bytes] = []
+        bucket_bytes: dict[str, float] = defaultdict(float)
+        bucket_seen: dict[str, float] = {}
+        bucket_keys: dict[str, set[str]] = defaultdict(set)
 
         for s in samples:
             entries.append(orjson.dumps(asdict(s)))
@@ -416,6 +450,12 @@ class RedisStatsStore(StatsStore):
                 err_by_min[minute] += 1
                 for cls in error_buckets(s.status):
                     err_class[cls] += 1
+            if s.bucket:
+                bucket_seen[s.bucket] = max(bucket_seen.get(s.bucket, 0.0), s.timestamp)
+                if s.size > 0:
+                    bucket_bytes[s.bucket] += s.size
+                if s.key:
+                    bucket_keys[s.bucket].add(s.key)
 
         c = self._k("counters")
         async with self._client.pipeline(transaction=False) as pipe:
@@ -462,6 +502,23 @@ class RedisStatsStore(StatsStore):
                 for cls, cnt in err_class.items():
                     pipe.hincrby(eb, cls, cnt)
                 pipe.expire(eb, self._stats_ttl)
+            # Durable per-bucket index (every bucket served, not a recent window).
+            # last_seen also enumerates buckets; distinct object counts use a
+            # bounded HyperLogLog per bucket (~12KB) so it can't threaten the
+            # noeviction Redis. Sliding TTL drops buckets idle for the series window.
+            if bucket_seen:
+                bseen = self._k("bucket:lastseen")
+                pipe.hset(bseen, mapping={b: repr(ts) for b, ts in bucket_seen.items()})
+                pipe.expire(bseen, self._series_ttl)
+                bbytes = self._k("bucket:bytes")
+                for b, nb in bucket_bytes.items():
+                    pipe.hincrbyfloat(bbytes, b, nb)
+                if bucket_bytes:
+                    pipe.expire(bbytes, self._series_ttl)
+                for b, keys in bucket_keys.items():
+                    bk = self._k(f"bucket:obj:{b}")
+                    pipe.pfadd(bk, *keys)
+                    pipe.expire(bk, self._series_ttl)
             await pipe.execute()
 
     async def sync_local(self, local: LocalCounters) -> None:
@@ -515,6 +572,36 @@ class RedisStatsStore(StatsStore):
             logger.warning("STATS_RECENT_FAILED", error=str(exc))
             return []
         return [_loads_entry(r) for r in raw if r is not None]
+
+    async def buckets(self) -> list[dict]:
+        try:
+            async with self._client.pipeline(transaction=False) as pipe:
+                pipe.hgetall(self._k("bucket:lastseen"))
+                pipe.hgetall(self._k("bucket:bytes"))
+                seen, byts = await pipe.execute()
+        except Exception as exc:
+            logger.warning("STATS_BUCKETS_FAILED", error=str(exc))
+            return []
+        names = [k.decode() if isinstance(k, bytes) else str(k) for k in seen]
+        if not names:
+            return []
+        try:
+            async with self._client.pipeline(transaction=False) as pipe:
+                for name in names:
+                    pipe.pfcount(self._k(f"bucket:obj:{name}"))
+                counts = await pipe.execute()
+        except Exception as exc:
+            logger.warning("STATS_BUCKETS_FAILED", error=str(exc))
+            counts = [0] * len(names)
+        return [
+            {
+                "name": name,
+                "objects": int(cnt or 0),
+                "bytes": _hfloat(byts, name.encode()),
+                "last_seen": _hfloat(seen, name.encode()),
+            }
+            for name, cnt in zip(names, counts, strict=False)
+        ]
 
     async def page(self, offset: int, limit: int, query: str, operation: str, status: str) -> dict:
         try:

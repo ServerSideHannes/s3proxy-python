@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import os
 import time
-from collections import defaultdict
 from typing import TYPE_CHECKING
 
 from .. import metrics
@@ -19,13 +18,6 @@ from .stats_store import (
 
 if TYPE_CHECKING:
     from ..config import Settings
-
-# The activity feed shows only the latest few requests, but the bucket summary
-# is derived from request history too. Sampling the same tiny window let a single
-# chatty bucket (e.g. frequent WAL PUTs) crowd quieter buckets out of the list
-# entirely, so the bucket summary samples a much wider slice of recent requests.
-ACTIVITY_FEED_SIZE = 10
-BUCKET_SAMPLE_SIZE = 1000
 
 
 async def record_request(
@@ -239,31 +231,22 @@ def _format_size(n: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _derive_buckets(entries: list[dict]) -> list[dict]:
-    by_bucket: dict[str, dict] = defaultdict(
-        lambda: {"objects": set(), "bytes": 0, "last_seen": 0.0}
-    )
-    for e in entries:
-        bucket = e.get("bucket")
-        if not bucket:
-            continue
-        info = by_bucket[bucket]
-        if e.get("key"):
-            info["objects"].add(e["key"])
-        if e.get("size", 0) > 0:
-            info["bytes"] += e["size"]
-        if e.get("timestamp", 0.0) > info["last_seen"]:
-            info["last_seen"] = e["timestamp"]
+def _format_buckets(buckets: list[dict]) -> list[dict]:
+    """Add a human-readable size to the store's raw per-bucket aggregates.
 
+    The store owns the durable per-bucket totals (every bucket the proxy has
+    served, not just a recent window); this only handles presentation.
+    """
     out: list[dict] = []
-    for name, info in by_bucket.items():
-        num, unit = _format_bytes(info["bytes"])
+    for b in buckets:
+        nbytes = b.get("bytes", 0)
+        num, unit = _format_bytes(nbytes)
         out.append(
             {
-                "name": name,
-                "objects": len(info["objects"]),
-                "size": f"{num} {unit}" if info["bytes"] > 0 else "—",
-                "last_seen": info["last_seen"],
+                "name": b["name"],
+                "objects": int(b.get("objects", 0)),
+                "size": f"{num} {unit}" if nbytes > 0 else "\u2014",
+                "last_seen": b.get("last_seen", 0.0),
             }
         )
     out.sort(key=lambda b: b["last_seen"], reverse=True)
@@ -341,9 +324,8 @@ async def collect_all(
     num_enc, unit_enc = _format_bytes(bytes_encrypted)
     num_thr, unit_thr = _format_bytes(crypto_rate)
 
-    bucket_sample = await store.recent(BUCKET_SAMPLE_SIZE)
-    activity = bucket_sample[:ACTIVITY_FEED_SIZE]
-    buckets = _derive_buckets(bucket_sample)
+    activity = await store.recent(10)
+    buckets = _format_buckets(await store.buckets())
     last_error_ts = next((e["timestamp"] for e in activity if e["status"] >= 400), None)
 
     return {
