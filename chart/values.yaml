@@ -59,6 +59,10 @@ redis:
     limits:
       cpu: "500m"
       memory: "256Mi"
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  topologySpreadConstraints: []
 
 # External Redis — used when `redis.enabled: false`. Point at a Redis you run
 # yourself (managed service, shared cluster, your own HA setup).
@@ -124,6 +128,7 @@ dashboard:
     nodeSelector: {}
     affinity: {}
     tolerations: []
+    topologySpreadConstraints: []
 
   # Optional dedicated Ingress for the dashboard. OFF by default — the dashboard
   # should not be internet-facing unless you explicitly expose it (ideally behind
@@ -184,6 +189,11 @@ frontproxy:
   podDisruptionBudget:
     enabled: true
     minAvailable: 1
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  # null (default): spread pods across nodes. Set to [] to disable, or provide custom rules.
+  topologySpreadConstraints:
 
 # Optional Ingress to expose S3 operations OUTSIDE the cluster. Routes to the
 # front proxy, so external clients also get even per-request distribution —
