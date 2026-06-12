@@ -57,6 +57,7 @@ spec:
         - name: config
           configMap:
             name: {{ .Chart.Name }}-frontproxy
+      {{- if eq .Values.frontproxy.topologySpreadConstraints nil }}
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
@@ -65,4 +66,20 @@ spec:
             matchLabels:
               {{- include "s3proxy.selectorLabels" . | nindent 14 }}
               app.kubernetes.io/component: frontproxy
+      {{- else if .Values.frontproxy.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml .Values.frontproxy.topologySpreadConstraints | nindent 8 }}
+      {{- end }}
+      {{- with .Values.frontproxy.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.frontproxy.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.frontproxy.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
 {{- end }}
