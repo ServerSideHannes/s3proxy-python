@@ -14,7 +14,7 @@ from botocore.exceptions import ClientError
 from fastapi import Request, Response
 from structlog.stdlib import BoundLogger
 
-from ... import crypto
+from ... import concurrency, crypto
 from ...client import S3Client, S3Credentials
 from ...errors import S3Error, raise_for_client_error, raise_for_exception
 from ...state import (
@@ -371,7 +371,17 @@ class UploadPartMixin(BaseHandler):
         data_size = len(data)
         upload_start = time.monotonic()
 
+        # Reserve this part's real peak (plaintext + ciphertext held together while
+        # encrypting) from the shared limiter, mirroring the download path's
+        # _fetch_internal_part. The per-request estimate only covers the streaming
+        # buffer, so without this the limiter is blind to the ~2x part_size each
+        # in-flight part holds and cannot throttle concurrent multipart uploads.
+        additional = max(0, data_size * 2 - crypto.MAX_BUFFER_SIZE)
+        extra_reserved = 0
         try:
+            if additional > 0:
+                extra_reserved = await concurrency.try_acquire_memory(additional)
+
             # Encrypt
             nonce = crypto.derive_part_nonce(upload_id, internal_part_num)
             ciphertext = crypto.encrypt(data, state.dek, nonce)
@@ -402,6 +412,8 @@ class UploadPartMixin(BaseHandler):
                 etag=etag,
             )
         finally:
+            if extra_reserved > 0:
+                await concurrency.release_memory(extra_reserved)
             logger.debug(
                 "UPLOAD_SLOT_RELEASED",
                 internal_part=internal_part_num,
