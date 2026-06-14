@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
 import aioboto3
@@ -53,7 +54,11 @@ class S3Client:
         self.credentials = credentials
         self._config = Config(
             signature_version="s3v4",
-            s3={"addressing_style": "path"},
+            # payload_signing_enabled=False sends x-amz-content-sha256: UNSIGNED-PAYLOAD,
+            # which is required to stream a non-seekable body (a framed UploadPart)
+            # without botocore reading it whole to hash it. Integrity is provided by
+            # TLS to the backend.
+            s3={"addressing_style": "path", "payload_signing_enabled": False},
             retries={"max_attempts": 3, "mode": "adaptive"},
             max_pool_connections=100,
             connect_timeout=10,
@@ -183,19 +188,29 @@ class S3Client:
         key: str,
         upload_id: str,
         part_number: int,
-        body: bytes,
+        body: bytes | AsyncIterator[bytes],
+        content_length: int | None = None,
     ) -> dict[str, Any]:
-        """Upload a part."""
+        """Upload a part.
+
+        body may be raw bytes or an async iterator of byte chunks (a streamed,
+        framed part). When streaming, content_length must be supplied so S3 gets a
+        Content-Length header.
+        """
         start = time.monotonic()
-        result = await self._cached_client.upload_part(
-            Bucket=bucket,
-            Key=key,
-            UploadId=upload_id,
-            PartNumber=part_number,
-            Body=body,
-        )
+        kwargs: dict[str, Any] = {
+            "Bucket": bucket,
+            "Key": key,
+            "UploadId": upload_id,
+            "PartNumber": part_number,
+            "Body": body,
+        }
+        if content_length is not None:
+            kwargs["ContentLength"] = content_length
+        result = await self._cached_client.upload_part(**kwargs)
         duration = time.monotonic() - start
-        size_mb = len(body) / 1024 / 1024
+        size = content_length if content_length is not None else len(body)
+        size_mb = size / 1024 / 1024
         logger.debug(
             "S3 upload_part completed",
             bucket=bucket,
