@@ -464,7 +464,9 @@ class GetObjectMixin(BaseHandler):
                     f"expected {expected_size} bytes, got {len(ciphertext)}"
                 )
 
-            return crypto.decrypt(ciphertext, dek)
+            # decrypt_framed transparently handles both legacy single-seal parts
+            # and multi-frame parts (frame count derived from the stored sizes).
+            return crypto.decrypt_framed(ciphertext, dek, internal_part.plaintext_size)
 
         except ClientError as e:
             if e.response["Error"]["Code"] == "InvalidRange":
