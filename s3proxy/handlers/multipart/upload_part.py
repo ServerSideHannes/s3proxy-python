@@ -102,9 +102,7 @@ class UploadPartMixin(BaseHandler):
             estimated_parts = max(1, (content_length + optimal_part_size - 1) // optimal_part_size)
 
             use_framed = (
-                (is_unsigned or is_large_signed)
-                and not needs_chunked_decode
-                and content_length > 0
+                (is_unsigned or is_large_signed) and not needs_chunked_decode and content_length > 0
             )
             logger.info(
                 "UPLOAD_PART_CONFIG",
