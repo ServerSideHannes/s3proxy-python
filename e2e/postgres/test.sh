@@ -20,7 +20,7 @@ fi
 
 NAMESPACE="postgres-test"
 export CLUSTER_NAME="pg-cluster"
-DATA_SIZE_GB=2
+DATA_SIZE_GB=3
 SCALE_FACTOR=$((DATA_SIZE_GB * 70))  # pgbench scale: ~15MB per scale factor
 
 # Colors for output
@@ -216,6 +216,23 @@ kubectl wait --namespace "$NAMESPACE" \
 
 log_info "Backup completed!"
 kubectl get backup -n "$NAMESPACE" ${CLUSTER_NAME}-backup-1 -o yaml | grep -A5 "status:"
+
+# ============================================================================
+# STEP 4b: Assert the s3proxy pods survived (the OOM we are gating against)
+# ============================================================================
+log_info "=== Checking s3proxy pods were not OOM-killed during backup ==="
+oom_found=0
+for p in $(kubectl get pods -n s3proxy -l app.kubernetes.io/name=s3proxy-python,app.kubernetes.io/component=server -o name); do
+    rc=$(kubectl get -n s3proxy "$p" -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0)
+    reason=$(kubectl get -n s3proxy "$p" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}' 2>/dev/null || echo "")
+    log_info "  $p restarts=${rc:-0} lastTerminated=${reason:-none}"
+    if [ "${reason}" = "OOMKilled" ] || [ "${rc:-0}" -gt 0 ]; then oom_found=1; fi
+done
+if [ "$oom_found" -eq 1 ]; then
+    log_error "s3proxy was OOM-killed/restarted during backup"
+    exit 1
+fi
+log_info "✓ s3proxy survived the backup"
 
 # ============================================================================
 # STEP 5: Verify encryption + Delete cluster + Create new cluster (ALL PARALLEL)

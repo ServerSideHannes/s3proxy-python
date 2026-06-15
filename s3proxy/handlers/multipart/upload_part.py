@@ -100,6 +100,11 @@ class UploadPartMixin(BaseHandler):
             optimal_part_size = crypto.calculate_optimal_part_size(content_length)
             estimated_parts = max(1, (content_length + optimal_part_size - 1) // optimal_part_size)
 
+            use_framed = (
+                (is_unsigned or is_large_signed)
+                and not needs_chunked_decode
+                and content_length > 0
+            )
             logger.info(
                 "UPLOAD_PART_CONFIG",
                 bucket=bucket,
@@ -107,6 +112,11 @@ class UploadPartMixin(BaseHandler):
                 part_number=part_num,
                 optimal_part_size_mb=f"{optimal_part_size / 1024 / 1024:.2f}MB",
                 estimated_internal_parts=estimated_parts,
+                is_unsigned=is_unsigned,
+                is_large_signed=is_large_signed,
+                is_streaming_sig=is_streaming_sig,
+                needs_chunked_decode=needs_chunked_decode,
+                upload_path="framed" if use_framed else "buffered",
             )
 
             # Allocate internal part numbers
@@ -119,11 +129,11 @@ class UploadPartMixin(BaseHandler):
             )
 
             try:
-                # Unsigned, known-length streams (e.g. backups) can be uploaded
-                # frame-by-frame with O(frame) memory. Other encodings (aws-chunked,
-                # signed) don't know the part size up front, so they keep the
-                # buffered path.
-                if is_unsigned and not needs_chunked_decode and content_length > 0:
+                # Known-length direct streams (unsigned or large signed, e.g. barman
+                # backups) can be uploaded frame-by-frame with O(frame) memory.
+                # aws-chunked / streaming-sig bodies don't know the size up front and
+                # keep the buffered path.
+                if use_framed:
                     result = await self._stream_and_upload_framed(
                         request,
                         client,
@@ -356,13 +366,14 @@ class UploadPartMixin(BaseHandler):
         optimal_part_size: int,
         internal_part_start: int,
     ) -> dict[str, str | int]:
-        """Memory-bounded UploadPart for unsigned, known-length streams.
+        """Memory-bounded UploadPart for known-length direct streams.
 
+        Used for unsigned and large signed uploads (e.g. barman backups) where
+        Content-Length is known and the body is read directly (not aws-chunked).
         Reads the body once, splitting it into internal S3 parts of
         optimal_part_size, and uploads each part as a stream of 8MB AES-GCM frames
         (see crypto.encrypt_frame). Peak memory is O(FRAME_PLAINTEXT_SIZE)
-        regardless of the client part size, so the limiter's per-request estimate
-        is honest without reserving whole parts.
+        regardless of the client part size.
         """
         md5_hash = hashlib.md5(usedforsecurity=False)
         sha256_hash = hashlib.sha256()
