@@ -192,6 +192,11 @@ def encrypt_frame(
     return encrypt(plaintext, dek, derive_frame_nonce(upload_id, part_number, frame_index))
 
 
+def ciphertext_frame_byte_sizes(plaintext_size: int, ciphertext_size: int) -> list[int]:
+    """Ciphertext byte length of each frame in a (possibly framed) internal part."""
+    return _ciphertext_frame_sizes(plaintext_size, ciphertext_size - plaintext_size)
+
+
 def _ciphertext_frame_sizes(plaintext_size: int, stored_overhead: int) -> list[int]:
     """Ciphertext byte length of each frame, derived from the stored sizes.
 

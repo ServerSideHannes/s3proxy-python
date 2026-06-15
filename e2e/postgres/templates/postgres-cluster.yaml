@@ -40,7 +40,6 @@ spec:
         # gzip would shrink the backup below one 512MB chunk and we'd never get
         # concurrent large uploads. Uncompressed, the dataset spans several 512MB
         # chunks which (with jobs=4) reproduces the multipart-upload OOM.
-        # 4 parallel upload jobs pushing 512MB chunks mirrors production.
         jobs: 4
         additionalCommandArgs:
           - "--min-chunk-size=512MB"

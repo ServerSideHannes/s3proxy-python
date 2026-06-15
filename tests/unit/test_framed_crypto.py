@@ -47,6 +47,14 @@ def test_legacy_single_seal_decrypts_via_framed():
     assert crypto.decrypt_framed(legacy, dek, len(plaintext)) == plaintext
 
 
+def test_ciphertext_frame_byte_sizes_matches_framed():
+    for size in [1, crypto.FRAME_PLAINTEXT_SIZE, crypto.FRAME_PLAINTEXT_SIZE + 1, 3 * crypto.FRAME_PLAINTEXT_SIZE]:
+        ct = crypto.framed_ciphertext_size(size)
+        sizes = crypto.ciphertext_frame_byte_sizes(size, ct)
+        assert sum(sizes) == ct
+        assert all(s >= crypto.ENCRYPTION_OVERHEAD for s in sizes)
+
+
 def test_frame_nonces_unique():
     nonces = {crypto.derive_frame_nonce(UPLOAD_ID, PART, i) for i in range(1000)}
     assert len(nonces) == 1000

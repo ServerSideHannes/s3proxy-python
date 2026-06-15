@@ -336,7 +336,9 @@ class GetObjectMixin(BaseHandler):
         # absolute ciphertext bounds and the plaintext slice to emit. The prefetch
         # below only ever looks ahead within this filtered list, so it never
         # fetches a part the range would skip.
-        needed: list[tuple[Any, int, int, int, int]] = []
+        # Frame-level fetches keep memory O(frame) so 64MB internal parts stay
+        # within a 64MB pod budget (whole-part decrypt would reserve ~2× part).
+        needed: list[tuple[int, int, int, int, int, int]] = []
         ct_offset = ct_start
         pt_offset = 0
         for ip in sorted(part_meta.internal_parts, key=lambda p: p.internal_part_number):
@@ -347,26 +349,49 @@ class GetObjectMixin(BaseHandler):
                 continue
             if pt_offset > off_end:  # entirely after the range
                 break
-            ct_end = ct_offset + ip.ciphertext_size - 1
-            self._validate_ciphertext_range(
-                bucket, key, part_num, ip.internal_part_number, ct_end, actual_size
-            )
-            slice_start = max(0, off_start - pt_offset)
-            slice_end = min(ip.plaintext_size, off_end - pt_offset + 1)
-            needed.append((ip, ct_offset, ct_end, slice_start, slice_end))
+
+            frame_sizes = crypto.ciphertext_frame_byte_sizes(ip.plaintext_size, ip.ciphertext_size)
+            frame_pt_offset = 0
+            frame_ct_offset = 0
+            for fsize in frame_sizes:
+                fpt_size = fsize - crypto.ENCRYPTION_OVERHEAD
+                frame_global_start = pt_offset + frame_pt_offset
+                frame_global_end = frame_global_start + fpt_size - 1
+                if frame_global_end < off_start:
+                    frame_pt_offset += fpt_size
+                    frame_ct_offset += fsize
+                    continue
+                if frame_global_start > off_end:
+                    break
+
+                abs_ct_start = ct_offset + frame_ct_offset
+                abs_ct_end = abs_ct_start + fsize - 1
+                self._validate_ciphertext_range(
+                    bucket, key, part_num, ip.internal_part_number, abs_ct_end, actual_size
+                )
+                slice_start = max(0, off_start - frame_global_start)
+                slice_end = min(fpt_size, off_end - frame_global_start + 1)
+                needed.append(
+                    (ip.internal_part_number, abs_ct_start, abs_ct_end, fsize, slice_start, slice_end)
+                )
+                frame_pt_offset += fpt_size
+                frame_ct_offset += fsize
+
             ct_offset += ip.ciphertext_size
             pt_offset += ip.plaintext_size
 
-        def fetch(item: tuple[Any, int, int, int, int]) -> Awaitable[bytes]:
-            ip, c_start, c_end, _, _ = item
-            return self._fetch_internal_part(client, bucket, key, part_num, ip, c_start, c_end, dek)
+        def fetch(item: tuple[int, int, int, int, int, int]) -> Awaitable[bytes]:
+            ipn, c_start, c_end, fsize, _, _ = item
+            return self._fetch_and_decrypt_frame(
+                client, bucket, key, part_num, ipn, c_start, c_end, fsize, dek
+            )
 
         # aclosing() guarantees the prefetch generator's finally (which cancels an
         # in-flight lookahead and releases its memory reservation) runs when this
         # stream is torn down — e.g. on client disconnect.
         async with contextlib.aclosing(self._stream_parts_with_prefetch(needed, fetch)) as stream:
             async for item, chunk in stream:
-                _, _, _, slice_start, slice_end = item
+                *_, slice_start, slice_end = item
                 yield chunk[slice_start:slice_end]
 
     async def _stream_parts_with_prefetch(
@@ -426,18 +451,19 @@ class GetObjectMixin(BaseHandler):
                 f"expects byte {ct_end} but object size is {actual_size}"
             )
 
-    async def _fetch_internal_part(
+    async def _fetch_and_decrypt_frame(
         self,
         client: S3Client,
         bucket: str,
         key: str,
         part_num: int,
-        internal_part,
+        internal_part_num: int,
         ct_start: int,
         ct_end: int,
+        frame_ciphertext_size: int,
         dek: bytes,
     ) -> bytes:
-        expected_size = ct_end - ct_start + 1
+        expected_size = frame_ciphertext_size
         additional = max(0, expected_size * 2 - MAX_BUFFER_SIZE)
         extra_reserved = 0
         try:
@@ -454,19 +480,17 @@ class GetObjectMixin(BaseHandler):
                     bucket=bucket,
                     key=key,
                     part_number=part_num,
-                    internal_part_number=internal_part.internal_part_number,
+                    internal_part_number=internal_part_num,
                     expected_size=expected_size,
                     actual_size=len(ciphertext),
                 )
                 raise S3Error.internal_error(
                     f"Metadata corruption: part {part_num} "
-                    f"internal part {internal_part.internal_part_number} "
+                    f"internal part {internal_part_num} "
                     f"expected {expected_size} bytes, got {len(ciphertext)}"
                 )
 
-            # decrypt_framed transparently handles both legacy single-seal parts
-            # and multi-frame parts (frame count derived from the stored sizes).
-            return crypto.decrypt_framed(ciphertext, dek, internal_part.plaintext_size)
+            return crypto.decrypt(ciphertext, dek)
 
         except ClientError as e:
             if e.response["Error"]["Code"] == "InvalidRange":
@@ -475,12 +499,12 @@ class GetObjectMixin(BaseHandler):
                     bucket=bucket,
                     key=key,
                     part_number=part_num,
-                    internal_part_number=internal_part.internal_part_number,
+                    internal_part_number=internal_part_num,
                     requested_range=f"{ct_start}-{ct_end}",
                 )
                 raise S3Error.internal_error(
                     f"Metadata corruption: part {part_num} "
-                    f"internal part {internal_part.internal_part_number} "
+                    f"internal part {internal_part_num} "
                     f"range {ct_start}-{ct_end} invalid"
                 ) from e
             raise
