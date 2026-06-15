@@ -48,7 +48,13 @@ def test_legacy_single_seal_decrypts_via_framed():
 
 
 def test_ciphertext_frame_byte_sizes_matches_framed():
-    for size in [1, crypto.FRAME_PLAINTEXT_SIZE, crypto.FRAME_PLAINTEXT_SIZE + 1, 3 * crypto.FRAME_PLAINTEXT_SIZE]:
+    sizes = [
+        1,
+        crypto.FRAME_PLAINTEXT_SIZE,
+        crypto.FRAME_PLAINTEXT_SIZE + 1,
+        3 * crypto.FRAME_PLAINTEXT_SIZE,
+    ]
+    for size in sizes:
         ct = crypto.framed_ciphertext_size(size)
         sizes = crypto.ciphertext_frame_byte_sizes(size, ct)
         assert sum(sizes) == ct

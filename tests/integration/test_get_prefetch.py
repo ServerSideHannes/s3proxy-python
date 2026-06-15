@@ -245,7 +245,8 @@ async def _make_framed_encrypted_multipart(mock_s3, kek, upload_id, part_sizes):
         ct = bytearray()
         for frame_idx in range(0, max(1, sz), crypto.FRAME_PLAINTEXT_SIZE):
             frame_pt = chunk[frame_idx : frame_idx + crypto.FRAME_PLAINTEXT_SIZE]
-            ct += crypto.encrypt_frame(frame_pt, dek, upload_id, n, frame_idx // crypto.FRAME_PLAINTEXT_SIZE)
+            frame_num = frame_idx // crypto.FRAME_PLAINTEXT_SIZE
+            ct += crypto.encrypt_frame(frame_pt, dek, upload_id, n, frame_num)
         ct = bytes(ct)
         ct_parts.append(ct)
         internal_parts.append(

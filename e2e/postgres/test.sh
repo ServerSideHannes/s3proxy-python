@@ -33,6 +33,44 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+S3_ENDPOINT="http://s3proxy-python-frontproxy.s3proxy:80"
+S3_WAL_CHECK_POD="s3-wal-check"
+
+ensure_s3_wal_checker() {
+    if kubectl get pod -n "$NAMESPACE" "$S3_WAL_CHECK_POD" >/dev/null 2>&1; then
+        kubectl wait -n "$NAMESPACE" --for=condition=Ready "pod/${S3_WAL_CHECK_POD}" --timeout=120s
+        return
+    fi
+    kubectl run "$S3_WAL_CHECK_POD" --restart=Never -n "$NAMESPACE" \
+        --image=amazon/aws-cli:2.15.0 \
+        --overrides='{"spec":{"containers":[{"name":"'"$S3_WAL_CHECK_POD"'","image":"amazon/aws-cli:2.15.0","command":["sleep","3600"],"envFrom":[{"secretRef":{"name":"s3-credentials"}}]}]}}'
+    kubectl wait -n "$NAMESPACE" --for=condition=Ready "pod/${S3_WAL_CHECK_POD}" --timeout=120s
+}
+
+wait_for_end_wal_in_s3() {
+    local end_wal="$1"
+    local timeline_prefix="${end_wal:0:16}"
+    local wal_object="pg-cluster/wals/${timeline_prefix}/${end_wal}.gz"
+
+    log_info "Waiting for backup end WAL in S3: ${wal_object}"
+    ensure_s3_wal_checker
+
+    local deadline=$((SECONDS + 600))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if kubectl exec -n "$NAMESPACE" "$S3_WAL_CHECK_POD" -- sh -c "
+            export AWS_ACCESS_KEY_ID=\$ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY=\$ACCESS_SECRET_KEY
+            aws --endpoint-url ${S3_ENDPOINT} s3 ls s3://postgres-backups/${wal_object} >/dev/null 2>&1
+        "; then
+            log_info "✓ End WAL archived: ${end_wal}.gz"
+            return 0
+        fi
+        sleep 5
+    done
+
+    log_error "Timeout waiting for end WAL ${end_wal}.gz in S3"
+    return 1
+}
+
 cleanup() {
     log_info "Cleaning up..."
     kubectl delete namespace "$NAMESPACE" --ignore-not-found --wait=false || true
@@ -235,33 +273,31 @@ fi
 log_info "✓ s3proxy survived the backup"
 
 # ============================================================================
-# STEP 5: Verify encryption + Delete cluster + Create new cluster (ALL PARALLEL)
+# STEP 4c: Wait for backup end WAL to reach S3 (restore needs it)
+# CNPG may mark backup completed before the archiver uploads the final segment.
 # ============================================================================
-log_info "=== Step 5: Parallel - verify encryption, delete old, create new ==="
+END_WAL=$(kubectl get backup -n "$NAMESPACE" "${CLUSTER_NAME}-backup-1" -o jsonpath='{.status.endWal}')
+if [ -z "$END_WAL" ]; then
+    log_error "Backup status.endWal is empty"
+    exit 1
+fi
+log_info "=== Step 4c: Waiting for end WAL ${END_WAL} in S3 ==="
+wait_for_end_wal_in_s3 "$END_WAL"
 
-# 1. Start encryption verification in background
+# ============================================================================
+# STEP 5: Verify encryption, restore, then delete source cluster
+# Keep the source cluster alive until end WAL is archived and restore succeeds.
+# ============================================================================
+log_info "=== Step 5: Verify encryption and restore from backup ==="
+
 verify_encryption "postgres-backups" "" "$NAMESPACE" ".gz|.tar|.backup|.data" &
 VERIFY_PID=$!
 
-# 2. Delete old cluster in background
-(
-    kubectl delete cluster -n "$NAMESPACE" ${CLUSTER_NAME} --wait
-    kubectl wait --namespace "$NAMESPACE" \
-        --for=delete pod -l cnpg.io/cluster=${CLUSTER_NAME} \
-        --timeout=300s || true
-    log_info "✓ Old cluster deleted"
-) &
-DELETE_PID=$!
-
-# 3. Create new cluster immediately (different name, can coexist)
-log_info "Creating restored cluster (parallel with deletion)..."
+log_info "Creating restored cluster..."
 envsubst < "${SCRIPT_DIR}/templates/postgres-cluster-restore.yaml" | kubectl apply -n "$NAMESPACE" -f -
 
-# Wait for all parallel operations
 wait $VERIFY_PID || { log_error "Encryption verification failed"; exit 1; }
 log_info "✓ Encryption verified"
-
-wait $DELETE_PID || { log_error "Old cluster deletion failed"; exit 1; }
 
 log_info "Waiting for restored cluster to be ready..."
 kubectl wait --namespace "$NAMESPACE" \
@@ -269,6 +305,13 @@ kubectl wait --namespace "$NAMESPACE" \
     --timeout=1800s
 
 log_info "Restored cluster is ready!"
+
+log_info "Deleting source cluster (no longer needed)..."
+kubectl delete cluster -n "$NAMESPACE" "${CLUSTER_NAME}" --wait
+kubectl wait --namespace "$NAMESPACE" \
+    --for=delete pod -l "cnpg.io/cluster=${CLUSTER_NAME}" \
+    --timeout=300s || true
+log_info "✓ Old cluster deleted"
 
 # ============================================================================
 # STEP 6: Validate restored data

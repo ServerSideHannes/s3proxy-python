@@ -372,7 +372,14 @@ class GetObjectMixin(BaseHandler):
                 slice_start = max(0, off_start - frame_global_start)
                 slice_end = min(fpt_size, off_end - frame_global_start + 1)
                 needed.append(
-                    (ip.internal_part_number, abs_ct_start, abs_ct_end, fsize, slice_start, slice_end)
+                    (
+                        ip.internal_part_number,
+                        abs_ct_start,
+                        abs_ct_end,
+                        fsize,
+                        slice_start,
+                        slice_end,
+                    )
                 )
                 frame_pt_offset += fpt_size
                 frame_ct_offset += fsize
