@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import hashlib
 import time
 from collections import deque
@@ -30,6 +31,32 @@ logger: BoundLogger = structlog.get_logger(__name__)
 
 # Limit concurrent internal part uploads to bound memory usage
 MAX_PARALLEL_INTERNAL_UPLOADS = 2
+
+
+class _PlaintextReader:
+    """Pulls exactly-sized plaintext slices from a chunked byte stream.
+
+    Buffers at most one frame plus one inbound chunk, so reading a large part in
+    frames never accumulates the whole part.
+    """
+
+    def __init__(self, source: AsyncIterator[bytes]) -> None:
+        self._it = aiter(source)
+        self._buf = bytearray()
+        self._eof = False
+
+    async def read(self, n: int) -> bytes:
+        while len(self._buf) < n and not self._eof:
+            try:
+                chunk = await self._it.__anext__()
+            except StopAsyncIteration:
+                self._eof = True
+                break
+            if chunk:
+                self._buf.extend(chunk)
+        out = bytes(memoryview(self._buf)[:n])
+        del self._buf[:n]
+        return out
 
 
 class UploadPartMixin(BaseHandler):
@@ -74,6 +101,9 @@ class UploadPartMixin(BaseHandler):
             optimal_part_size = crypto.calculate_optimal_part_size(content_length)
             estimated_parts = max(1, (content_length + optimal_part_size - 1) // optimal_part_size)
 
+            use_framed = (
+                (is_unsigned or is_large_signed) and not needs_chunked_decode and content_length > 0
+            )
             logger.info(
                 "UPLOAD_PART_CONFIG",
                 bucket=bucket,
@@ -81,6 +111,11 @@ class UploadPartMixin(BaseHandler):
                 part_number=part_num,
                 optimal_part_size_mb=f"{optimal_part_size / 1024 / 1024:.2f}MB",
                 estimated_internal_parts=estimated_parts,
+                is_unsigned=is_unsigned,
+                is_large_signed=is_large_signed,
+                is_streaming_sig=is_streaming_sig,
+                needs_chunked_decode=needs_chunked_decode,
+                upload_path="framed" if use_framed else "buffered",
             )
 
             # Allocate internal part numbers
@@ -93,23 +128,41 @@ class UploadPartMixin(BaseHandler):
             )
 
             try:
-                result = await self._stream_and_upload(
-                    request,
-                    client,
-                    bucket,
-                    key,
-                    upload_id,
-                    part_num,
-                    state,
-                    content_sha,
-                    content_length,
-                    is_unsigned,
-                    is_streaming_sig,
-                    is_large_signed,
-                    needs_chunked_decode,
-                    optimal_part_size,
-                    internal_part_start,
-                )
+                # Known-length direct streams (unsigned or large signed, e.g. barman
+                # backups) can be uploaded frame-by-frame with O(frame) memory.
+                # aws-chunked / streaming-sig bodies don't know the size up front and
+                # keep the buffered path.
+                if use_framed:
+                    result = await self._stream_and_upload_framed(
+                        request,
+                        client,
+                        bucket,
+                        key,
+                        upload_id,
+                        part_num,
+                        state,
+                        content_length,
+                        optimal_part_size,
+                        internal_part_start,
+                    )
+                else:
+                    result = await self._stream_and_upload(
+                        request,
+                        client,
+                        bucket,
+                        key,
+                        upload_id,
+                        part_num,
+                        state,
+                        content_sha,
+                        content_length,
+                        is_unsigned,
+                        is_streaming_sig,
+                        is_large_signed,
+                        needs_chunked_decode,
+                        optimal_part_size,
+                        internal_part_start,
+                    )
 
                 # Late signature verification for large signed uploads
                 if is_large_signed and content_sha and result["computed_sha256"] != content_sha:
@@ -299,6 +352,111 @@ class UploadPartMixin(BaseHandler):
             "computed_sha256": sha256_hash.hexdigest(),
         }
 
+    async def _stream_and_upload_framed(
+        self,
+        request: Request,
+        client: S3Client,
+        bucket: str,
+        key: str,
+        upload_id: str,
+        part_num: int,
+        state: MultipartUploadState,
+        content_length: int,
+        optimal_part_size: int,
+        internal_part_start: int,
+    ) -> dict[str, str | int]:
+        """Memory-bounded UploadPart for known-length direct streams.
+
+        Used for unsigned and large signed uploads (e.g. barman backups) where
+        Content-Length is known and the body is read directly (not aws-chunked).
+        Reads the body once, splitting it into internal S3 parts of
+        optimal_part_size. Each internal part is encrypted frame-by-frame
+        (see crypto.encrypt_frame) into a ciphertext buffer, then uploaded as
+        bytes. Peak memory is O(part ciphertext + FRAME_PLAINTEXT_SIZE) — one
+        frame of plaintext at a time, not plaintext + ciphertext together.
+        """
+        md5_hash = hashlib.md5(usedforsecurity=False)
+        sha256_hash = hashlib.sha256()
+        reader = _PlaintextReader(request.stream())
+        internal_parts: list[InternalPartMetadata] = []
+        total_ciphertext_size = 0
+        internal_part_num = internal_part_start
+        remaining_total = content_length
+
+        while remaining_total > 0:
+            part_pt_size = min(optimal_part_size, remaining_total)
+            ct_size = crypto.framed_ciphertext_size(part_pt_size)
+            ipn = internal_part_num
+
+            ciphertext = bytearray()
+            remaining = part_pt_size
+            frame_idx = 0
+            while remaining > 0:
+                frame_pt = await reader.read(min(crypto.FRAME_PLAINTEXT_SIZE, remaining))
+                if not frame_pt:
+                    break
+                md5_hash.update(frame_pt)
+                sha256_hash.update(frame_pt)
+                remaining -= len(frame_pt)
+                ciphertext.extend(
+                    crypto.encrypt_frame(frame_pt, state.dek, upload_id, ipn, frame_idx)
+                )
+                frame_idx += 1
+
+            part_ciphertext = bytes(ciphertext)
+            del ciphertext
+            gc.collect()
+
+            upload_start = time.monotonic()
+            resp = await client.upload_part(bucket, key, upload_id, ipn, part_ciphertext)
+            etag = resp["ETag"].strip('"')
+            logger.info(
+                "INTERNAL_PART_UPLOADED",
+                bucket=bucket,
+                key=key,
+                client_part=part_num,
+                internal_part=ipn,
+                plaintext_mb=f"{part_pt_size / 1024 / 1024:.2f}MB",
+                elapsed_sec=f"{time.monotonic() - upload_start:.2f}s",
+            )
+
+            internal_parts.append(
+                InternalPartMetadata(
+                    internal_part_number=ipn,
+                    plaintext_size=part_pt_size,
+                    ciphertext_size=ct_size,
+                    etag=etag,
+                )
+            )
+            total_ciphertext_size += ct_size
+            internal_part_num += 1
+            remaining_total -= part_pt_size
+
+        client_etag = md5_hash.hexdigest()
+        part_meta = PartMetadata(
+            part_number=part_num,
+            plaintext_size=content_length,
+            ciphertext_size=total_ciphertext_size,
+            etag=client_etag,
+            md5=client_etag,
+            internal_parts=internal_parts,
+        )
+        try:
+            await self.multipart_manager.add_part(bucket, key, upload_id, part_meta)
+        except StateMissingError:
+            await self._recover_upload_state(
+                client, bucket, key, upload_id, context="after part upload"
+            )
+            await self.multipart_manager.add_part(bucket, key, upload_id, part_meta)
+
+        return {
+            "client_etag": client_etag,
+            "total_plaintext_size": content_length,
+            "total_ciphertext_size": total_ciphertext_size,
+            "internal_parts_count": len(internal_parts),
+            "computed_sha256": sha256_hash.hexdigest(),
+        }
+
     async def _get_stream_source(
         self,
         request: Request,
@@ -447,5 +605,12 @@ class UploadPartMixin(BaseHandler):
     def _handle_generic_error(
         self, e: Exception, bucket: str, key: str, part_num: int, upload_id: str
     ) -> NoReturn:
-        logger.error("UPLOAD_PART_ERROR", bucket=bucket, key=key, part_num=part_num)
+        logger.error(
+            "UPLOAD_PART_ERROR",
+            bucket=bucket,
+            key=key,
+            part_num=part_num,
+            error=str(e),
+            error_type=type(e).__name__,
+        )
         raise_for_exception(e)

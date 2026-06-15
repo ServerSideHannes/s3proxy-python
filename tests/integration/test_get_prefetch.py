@@ -231,3 +231,71 @@ async def test_multipart_get_no_leak_on_client_disconnect(settings, mock_s3, kek
     await it.aclose()  # client goes away mid-stream
 
     assert concurrency.get_active_memory() == 0  # lookahead reservation released
+
+
+async def _make_framed_encrypted_multipart(mock_s3, kek, upload_id, part_sizes):
+    """Like _make_encrypted_multipart but with multi-frame internal parts (barman path)."""
+    dek = crypto.generate_dek()
+    wrapped = crypto.wrap_key(dek, kek)
+    internal_parts, ct_parts, total_ct = [], [], 0
+    plaintext = bytearray()
+    for n, sz in enumerate(part_sizes, start=1):
+        chunk = bytes([n % 256]) * sz
+        plaintext.extend(chunk)
+        ct = bytearray()
+        for frame_idx in range(0, max(1, sz), crypto.FRAME_PLAINTEXT_SIZE):
+            frame_pt = chunk[frame_idx : frame_idx + crypto.FRAME_PLAINTEXT_SIZE]
+            frame_num = frame_idx // crypto.FRAME_PLAINTEXT_SIZE
+            ct += crypto.encrypt_frame(frame_pt, dek, upload_id, n, frame_num)
+        ct = bytes(ct)
+        ct_parts.append(ct)
+        internal_parts.append(
+            InternalPartMetadata(
+                internal_part_number=n,
+                plaintext_size=sz,
+                ciphertext_size=len(ct),
+                etag=f"e{n}",
+            )
+        )
+        total_ct += len(ct)
+    part_meta = PartMetadata(
+        part_number=1,
+        plaintext_size=len(plaintext),
+        ciphertext_size=total_ct,
+        etag="synthetic",
+        md5="md5",
+        internal_parts=internal_parts,
+    )
+    meta = MultipartMetadata(
+        version=2,
+        part_count=1,
+        total_plaintext_size=len(plaintext),
+        parts=[part_meta],
+        wrapped_dek=wrapped,
+        kid="AKIAIOSFODNN7EXAMPLE",
+    )
+    await mock_s3.create_bucket("b")
+    await mock_s3.put_object("b", "k", b"".join(ct_parts))
+    await save_multipart_metadata(mock_s3, "b", "k", meta)
+    return bytes(plaintext)
+
+
+FRAMED_PART = crypto.PART_SIZE  # 64MB — would OOM on whole-part decrypt at 64MB budget
+
+
+async def test_framed_64mb_internal_parts_get_under_memory_limit(settings, mock_s3, kek):
+    """Restore path: framed 64MB internal parts must GET at O(frame) memory."""
+    concurrency.set_memory_limit(64)
+    concurrency.reset_state()
+    handler = _handler(settings)
+    handler._client = MagicMock(return_value=mock_s3)
+    upload_id = "framed-restore-upload"
+    expected = await _make_framed_encrypted_multipart(
+        mock_s3, kek, upload_id, [FRAMED_PART, FRAMED_PART // 2]
+    )
+
+    resp = await handler.handle_get_object(_get_request(), MagicMock())
+    chunks = [c async for c in resp.body_iterator]
+
+    assert b"".join(chunks) == expected
+    assert concurrency.get_active_memory() == 0

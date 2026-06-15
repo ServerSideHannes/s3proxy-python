@@ -195,7 +195,8 @@ class S3Client:
             Body=body,
         )
         duration = time.monotonic() - start
-        size_mb = len(body) / 1024 / 1024
+        size = len(body)
+        size_mb = size / 1024 / 1024
         logger.debug(
             "S3 upload_part completed",
             bucket=bucket,

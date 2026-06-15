@@ -37,6 +37,28 @@ STREAMING_THRESHOLD = 32 * 1024 * 1024  # 32 MB
 # Sweet spot: 8MB balances part count vs per-part overhead
 MAX_BUFFER_SIZE = 8 * 1024 * 1024  # 8 MB per internal part
 
+# Framed internal-part format.
+# S3's 10,000-part limit forces large internal parts for big objects, but we do
+# not want to hold a whole part (plaintext + ciphertext) in memory. So a part is
+# encrypted as a sequence of independent AES-GCM *frames*, each sealing up to
+# FRAME_PLAINTEXT_SIZE bytes:
+#
+#   part        = frame[0] || frame[1] || ...
+#   frame[i]    = nonce(12) || ciphertext || tag(16)
+#
+# Both writer and reader stream one frame at a time, so peak memory is O(frame),
+# independent of part size. The reader recovers the frame count purely from the
+# stored sizes:
+#
+#   num_frames = (ciphertext_size - plaintext_size) / ENCRYPTION_OVERHEAD
+#
+# A legacy single-seal part is exactly the num_frames == 1 case, so it is read by
+# the same code path with no migration of stored data.
+#
+# FROZEN: never change FRAME_PLAINTEXT_SIZE. Parts already written were framed at
+# this boundary and the reader splits ciphertext on (FRAME_PLAINTEXT_SIZE + overhead).
+FRAME_PLAINTEXT_SIZE = 8 * 1024 * 1024  # 8 MB plaintext per frame
+
 
 def calculate_optimal_part_size(content_length: int) -> int:
     """Calculate optimal part size to avoid creating parts < 5MB that aren't the final part."""
@@ -138,6 +160,78 @@ def derive_part_nonce(upload_id: str, part_number: int) -> bytes:
     """
     data = f"{upload_id}{part_number}".encode()
     return hashlib.sha256(data).digest()[:NONCE_SIZE]
+
+
+def derive_frame_nonce(upload_id: str, part_number: int, frame_index: int) -> bytes:
+    """Deterministic, unique nonce for one frame of an internal part.
+
+    Within an upload the DEK is fixed, so the (part_number, frame_index) pair must
+    be globally unique to never reuse an AES-GCM nonce. Internal part numbers are
+    unique per upload and frame indexes are unique within a part, so this holds.
+    """
+    data = f"{upload_id}:{part_number}:{frame_index}".encode()
+    return hashlib.sha256(data).digest()[:NONCE_SIZE]
+
+
+def frame_count(plaintext_size: int) -> int:
+    """Number of frames a plaintext of this size is encrypted into."""
+    if plaintext_size <= FRAME_PLAINTEXT_SIZE:
+        return 1
+    return (plaintext_size + FRAME_PLAINTEXT_SIZE - 1) // FRAME_PLAINTEXT_SIZE
+
+
+def framed_ciphertext_size(plaintext_size: int) -> int:
+    """Total stored size of a framed part: plaintext + per-frame GCM overhead."""
+    return plaintext_size + frame_count(plaintext_size) * ENCRYPTION_OVERHEAD
+
+
+def encrypt_frame(
+    plaintext: bytes, dek: bytes, upload_id: str, part_number: int, frame_index: int
+) -> bytes:
+    """Encrypt a single frame (nonce || ciphertext || tag) with its derived nonce."""
+    return encrypt(plaintext, dek, derive_frame_nonce(upload_id, part_number, frame_index))
+
+
+def ciphertext_frame_byte_sizes(plaintext_size: int, ciphertext_size: int) -> list[int]:
+    """Ciphertext byte length of each frame in a (possibly framed) internal part."""
+    return _ciphertext_frame_sizes(plaintext_size, ciphertext_size - plaintext_size)
+
+
+def _ciphertext_frame_sizes(plaintext_size: int, stored_overhead: int) -> list[int]:
+    """Ciphertext byte length of each frame, derived from the stored sizes.
+
+    `stored_overhead = ciphertext_size - plaintext_size` tells us the real frame
+    count for the part as it was written, which is authoritative even if
+    FRAME_PLAINTEXT_SIZE were ever reinterpreted: a legacy single-seal part has
+    overhead == ENCRYPTION_OVERHEAD (one frame) regardless of its plaintext size.
+    """
+    num_frames = stored_overhead // ENCRYPTION_OVERHEAD
+    if num_frames <= 1:
+        return [plaintext_size + ENCRYPTION_OVERHEAD]
+    sizes = []
+    remaining = plaintext_size
+    for _ in range(num_frames):
+        pt = min(FRAME_PLAINTEXT_SIZE, remaining)
+        sizes.append(pt + ENCRYPTION_OVERHEAD)
+        remaining -= pt
+    return sizes
+
+
+def decrypt_framed(ciphertext: bytes, dek: bytes, plaintext_size: int) -> bytes:
+    """Decrypt a (possibly framed) internal part held whole in memory.
+
+    Backward compatible: a legacy single-seal part has only one frame's worth of
+    overhead, so it is decrypted in a single call via decrypt().
+    """
+    sizes = _ciphertext_frame_sizes(plaintext_size, len(ciphertext) - plaintext_size)
+    if len(sizes) == 1:
+        return decrypt(ciphertext, dek)
+    out = bytearray()
+    offset = 0
+    for fsize in sizes:
+        out += decrypt(ciphertext[offset : offset + fsize], dek)
+        offset += fsize
+    return bytes(out)
 
 
 def wrap_key(dek: bytes, kek: bytes) -> bytes:

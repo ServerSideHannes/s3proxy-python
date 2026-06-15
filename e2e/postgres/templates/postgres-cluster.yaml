@@ -36,5 +36,11 @@ spec:
       wal:
         compression: gzip
       data:
-        compression: gzip
+        # Compression intentionally OFF: pgbench data is highly compressible, so
+        # gzip would shrink the backup below one 512MB chunk and we'd never get
+        # concurrent large uploads. Uncompressed, the dataset spans several 512MB
+        # chunks which (with jobs=4) reproduces the multipart-upload OOM.
+        jobs: 4
+        additionalCommandArgs:
+          - "--min-chunk-size=512MB"
     retentionPolicy: "7d"
