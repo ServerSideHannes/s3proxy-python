@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import hashlib
 import time
 from collections import deque
@@ -371,9 +372,10 @@ class UploadPartMixin(BaseHandler):
         Used for unsigned and large signed uploads (e.g. barman backups) where
         Content-Length is known and the body is read directly (not aws-chunked).
         Reads the body once, splitting it into internal S3 parts of
-        optimal_part_size, and uploads each part as a stream of 8MB AES-GCM frames
-        (see crypto.encrypt_frame). Peak memory is O(FRAME_PLAINTEXT_SIZE)
-        regardless of the client part size.
+        optimal_part_size. Each internal part is encrypted frame-by-frame
+        (see crypto.encrypt_frame) into a ciphertext buffer, then uploaded as
+        bytes. Peak memory is O(part ciphertext + FRAME_PLAINTEXT_SIZE) — one
+        frame of plaintext at a time, not plaintext + ciphertext together.
         """
         md5_hash = hashlib.md5(usedforsecurity=False)
         sha256_hash = hashlib.sha256()
@@ -388,23 +390,27 @@ class UploadPartMixin(BaseHandler):
             ct_size = crypto.framed_ciphertext_size(part_pt_size)
             ipn = internal_part_num
 
-            async def part_body(pt_size: int, ipn: int) -> AsyncIterator[bytes]:
-                remaining = pt_size
-                frame_idx = 0
-                while remaining > 0:
-                    frame_pt = await reader.read(min(crypto.FRAME_PLAINTEXT_SIZE, remaining))
-                    if not frame_pt:
-                        break
-                    md5_hash.update(frame_pt)
-                    sha256_hash.update(frame_pt)
-                    remaining -= len(frame_pt)
-                    yield crypto.encrypt_frame(frame_pt, state.dek, upload_id, ipn, frame_idx)
-                    frame_idx += 1
+            ciphertext = bytearray()
+            remaining = part_pt_size
+            frame_idx = 0
+            while remaining > 0:
+                frame_pt = await reader.read(min(crypto.FRAME_PLAINTEXT_SIZE, remaining))
+                if not frame_pt:
+                    break
+                md5_hash.update(frame_pt)
+                sha256_hash.update(frame_pt)
+                remaining -= len(frame_pt)
+                ciphertext.extend(
+                    crypto.encrypt_frame(frame_pt, state.dek, upload_id, ipn, frame_idx)
+                )
+                frame_idx += 1
+
+            part_ciphertext = bytes(ciphertext)
+            del ciphertext
+            gc.collect()
 
             upload_start = time.monotonic()
-            resp = await client.upload_part(
-                bucket, key, upload_id, ipn, part_body(part_pt_size, ipn), content_length=ct_size
-            )
+            resp = await client.upload_part(bucket, key, upload_id, ipn, part_ciphertext)
             etag = resp["ETag"].strip('"')
             logger.info(
                 "INTERNAL_PART_UPLOADED",
@@ -601,5 +607,12 @@ class UploadPartMixin(BaseHandler):
     def _handle_generic_error(
         self, e: Exception, bucket: str, key: str, part_num: int, upload_id: str
     ) -> NoReturn:
-        logger.error("UPLOAD_PART_ERROR", bucket=bucket, key=key, part_num=part_num)
+        logger.error(
+            "UPLOAD_PART_ERROR",
+            bucket=bucket,
+            key=key,
+            part_num=part_num,
+            error=str(e),
+            error_type=type(e).__name__,
+        )
         raise_for_exception(e)

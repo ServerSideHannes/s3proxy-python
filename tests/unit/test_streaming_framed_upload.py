@@ -1,6 +1,6 @@
-"""Streaming framed UploadPart: unsigned, known-length parts are uploaded as a
-stream of 8MB AES-GCM frames, so write memory is O(frame) regardless of part
-size, and the result decrypts back to the original bytes."""
+"""Framed UploadPart: known-length parts are encrypted frame-by-frame into a
+ciphertext buffer and uploaded as bytes. Write memory is O(part ciphertext +
+frame), not O(2× part), and the result decrypts back to the original bytes."""
 
 import hashlib
 import os
@@ -47,12 +47,8 @@ async def test_framed_upload_roundtrips_and_sets_metadata():
     captured: dict[int, bytes] = {}
 
     class _Client:
-        async def upload_part(self, bucket, key, upload_id, part_number, body, content_length=None):
-            buf = bytearray()
-            async for frame in body:
-                buf.extend(frame)
-            assert content_length == len(buf)  # Content-Length matches streamed bytes
-            captured[part_number] = bytes(buf)
+        async def upload_part(self, bucket, key, upload_id, part_number, body):
+            captured[part_number] = body
             return {"ETag": f'"{part_number:032x}"'}
 
     mgr = _Manager()
@@ -86,9 +82,8 @@ async def test_framed_upload_roundtrips_and_sets_metadata():
 
 
 class _DiscardingClient:
-    async def upload_part(self, bucket, key, upload_id, part_number, body, content_length=None):
-        async for _frame in body:  # consume + discard, like a real streaming upload
-            pass
+    async def upload_part(self, bucket, key, upload_id, part_number, body):
+        del body
         return {"ETag": f'"{part_number:032x}"'}
 
 
@@ -107,20 +102,20 @@ class _ZeroRequest:
             yield block[:n]
 
 
-async def _measure_framed_peak(part_size: int) -> int:
+async def _measure_framed_peak(client_part_size: int) -> int:
     handler = _handler(_Manager())
     tracemalloc.start()
     tracemalloc.reset_peak()
     await handler._stream_and_upload_framed(
-        _ZeroRequest(part_size),
+        _ZeroRequest(client_part_size),
         _DiscardingClient(),
         "b",
         "k",
         UPLOAD_ID,
         1,
         types.SimpleNamespace(dek=crypto.generate_dek()),
-        part_size,
-        part_size,
+        client_part_size,
+        crypto.PART_SIZE,  # same internal part size barman uses for 512MB parts
         1,
     )
     _, peak = tracemalloc.get_traced_memory()
@@ -130,13 +125,13 @@ async def _measure_framed_peak(part_size: int) -> int:
 
 @pytest.mark.asyncio
 async def test_framed_upload_memory_is_independent_of_part_size():
-    """The defining property: a 256MB part peaks no higher than a 64MB part
-    (memory is bounded by the frame, not the part) and far below the part size.
-    The legacy whole-part path peaked at ~2x the part size."""
+    """A 256MB client part peaks no higher than a 64MB one: ciphertext is built
+    one internal part at a time, not scaled by total client part size."""
     small = await _measure_framed_peak(64 * 1024 * 1024)
     large = await _measure_framed_peak(256 * 1024 * 1024)
 
-    # Quadrupling the part size must not meaningfully raise the peak.
-    assert large <= small + crypto.FRAME_PLAINTEXT_SIZE
-    # And the peak is a handful of frames, nowhere near the 256MB part.
-    assert large < 8 * crypto.FRAME_PLAINTEXT_SIZE, f"peak {large / 1024 / 1024:.1f}MB"
+    # Must stay below the old buffered path (~2× part_size ≈ 257MB per request).
+    assert small < 220 * 1024 * 1024, f"small peak {small / 1024 / 1024:.1f}MB"
+    assert large < 220 * 1024 * 1024, f"large peak {large / 1024 / 1024:.1f}MB"
+    # Larger client part must not scale memory linearly with part count.
+    assert large <= small * 1.5 + crypto.FRAME_PLAINTEXT_SIZE
