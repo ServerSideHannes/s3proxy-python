@@ -66,3 +66,34 @@ def test_frame_nonces_unique():
     assert len(nonces) == 1000
     # And distinct from the legacy part nonce so an upload never reuses one.
     assert crypto.derive_part_nonce(UPLOAD_ID, PART) not in nonces
+
+
+MB = 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    "content_mb",
+    [9, 16, 50, 100, 160, 200, 512, 1024, 4096, 10_000],
+)
+def test_memory_bounded_part_size_respects_limits(content_mb):
+    """For any client part size: never expand beyond the per-client allocation
+    range (or S3 part numbers collide), and never create a non-final part below
+    S3's 5MB minimum."""
+    cl = content_mb * MB
+    size = crypto.memory_bounded_part_size(cl)
+    parts = -(-cl // size)
+    assert parts <= crypto.MAX_INTERNAL_PARTS_PER_CLIENT
+    # every part except possibly the last is `size`; the last is the remainder
+    last = cl - (parts - 1) * size
+    if parts > 1:
+        assert last >= crypto.MIN_PART_SIZE
+        assert size >= crypto.MIN_PART_SIZE
+
+
+def test_memory_bounded_part_size_is_small_until_forced_larger():
+    """Small/mid client parts stay ~8MB; size grows only when the 20-part cap
+    forces it (e.g. barman's 512MB parts -> ~26MB, not 64MB)."""
+    assert crypto.memory_bounded_part_size(50 * MB) <= 9 * MB
+    assert crypto.memory_bounded_part_size(160 * MB) <= 9 * MB
+    barman = crypto.memory_bounded_part_size(512 * MB)
+    assert 20 * MB <= barman <= 32 * MB

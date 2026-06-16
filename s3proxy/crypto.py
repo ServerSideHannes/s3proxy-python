@@ -37,6 +37,11 @@ STREAMING_THRESHOLD = 32 * 1024 * 1024  # 32 MB
 # Sweet spot: 8MB balances part count vs per-part overhead
 MAX_BUFFER_SIZE = 8 * 1024 * 1024  # 8 MB per internal part
 
+# Internal part numbers are allocated in fixed ranges of this size per client
+# part (see state.manager), so a single client part may not expand into more
+# than this many internal parts without colliding into the next part's range.
+MAX_INTERNAL_PARTS_PER_CLIENT = 20
+
 # Framed internal-part format.
 # S3's 10,000-part limit forces large internal parts for big objects, but we do
 # not want to hold a whole part (plaintext + ciphertext) in memory. So a part is
@@ -133,6 +138,32 @@ def calculate_optimal_part_size(content_length: int) -> int:
         decision="use_default",
     )
     return PART_SIZE
+
+
+def memory_bounded_part_size(
+    content_length: int, max_parts: int = MAX_INTERNAL_PARTS_PER_CLIENT
+) -> int:
+    """Smallest internal part size that bounds memory while respecting limits.
+
+    The framed upload path buffers exactly one internal part at a time, so peak
+    memory tracks the part size. We therefore want parts as small as possible —
+    but two limits stop us going arbitrarily small:
+
+      * each internal part must be >= ~MAX_BUFFER_SIZE (avoids tiny <5MB S3 parts
+        and per-part overhead), and
+      * a client part may expand into at most ``max_parts`` internal parts
+        (the per-client part-number allocation range).
+
+    So we use as many parts as those limits allow and split evenly. For barman's
+    512MB client parts this yields ~26MB parts (20 of them) instead of 64MB,
+    roughly halving per-request memory, and it adapts up only for client parts
+    large enough to need it.
+    """
+    if content_length <= MAX_BUFFER_SIZE:
+        return content_length or 1
+    parts = min(max_parts, content_length // MAX_BUFFER_SIZE)
+    parts = max(parts, 1)
+    return -(-content_length // parts)  # ceil: even split, never exceeds `parts`
 
 
 @dataclass(slots=True)

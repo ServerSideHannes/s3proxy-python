@@ -3,6 +3,7 @@
 import structlog
 from structlog.stdlib import BoundLogger
 
+from ..crypto import MAX_INTERNAL_PARTS_PER_CLIENT
 from .models import (
     MultipartUploadState,
     PartMetadata,
@@ -13,8 +14,9 @@ from .storage import StateStore
 
 logger: BoundLogger = structlog.get_logger(__name__)
 
-# Maximum internal parts per client part (for range allocation)
-MAX_INTERNAL_PARTS_PER_CLIENT = 20
+# Re-exported from crypto so part sizing and part-number allocation share one
+# source of truth.
+__all__ = ["MultipartStateManager", "MAX_INTERNAL_PARTS_PER_CLIENT"]
 
 
 class MultipartStateManager:
