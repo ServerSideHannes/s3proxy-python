@@ -331,12 +331,40 @@ class TestMemoryConcurrencyModule:
         assert footprint == 2 * 1024 * 1024
 
     def test_estimate_memory_footprint_put_large(self):
-        """PUT with large file should use 2x buffer size (buffer + ciphertext)."""
+        """Large PUT reserves the real internal-part buffer the upload holds."""
         import s3proxy.concurrency as concurrency_module
+        from s3proxy import crypto
 
-        # 100MB file → 16MB footprint (8MB buffer + 8MB ciphertext simultaneously)
-        footprint = concurrency_module.estimate_memory_footprint("PUT", 100 * 1024 * 1024)
-        assert footprint == concurrency_module.MAX_BUFFER_SIZE * 2
+        for mb in (50, 100, 512, 1024):
+            cl = mb * 1024 * 1024
+            footprint = concurrency_module.estimate_memory_footprint("PUT", cl)
+            assert footprint == crypto.memory_bounded_part_size(cl)
+
+    def test_large_uploads_bounded_below_pod_memory(self):
+        """Regression for the barman OOM. Two linked invariants:
+        1. an internal part never expands beyond the per-client allocation range
+           (or part numbers collide) -- for ANY client part size, and
+        2. the reservation tracks the real buffer, so admitted x footprint never
+           exceeds the budget (limiter guarantee), and barman-scale parts admit
+           only ~2 concurrent (the old flat-16MB estimate admitted ~4 -> OOM).
+        """
+        import s3proxy.concurrency as concurrency_module
+        from s3proxy import crypto
+        from s3proxy.state import MAX_INTERNAL_PARTS_PER_CLIENT
+
+        budget = concurrency_module.get_memory_limit()
+        for mb in (50, 128, 320, 512, 1024, 4096):
+            cl = mb * 1024 * 1024
+            part = crypto.memory_bounded_part_size(cl)
+            internal_parts = -(-cl // part)
+            assert internal_parts <= MAX_INTERNAL_PARTS_PER_CLIENT, "would collide part numbers"
+            footprint = concurrency_module.estimate_memory_footprint("PUT", cl)
+            # limiter guarantee: total admitted memory never exceeds the budget
+            assert (budget // footprint) * footprint <= budget
+
+        # barman-scale parts: bounded to ~2 concurrent on the default 64MB budget
+        footprint_512 = concurrency_module.estimate_memory_footprint("PUT", 512 * 1024 * 1024)
+        assert budget // footprint_512 <= 2
 
     def test_estimate_memory_footprint_get(self):
         """GET should always use fixed buffer size."""

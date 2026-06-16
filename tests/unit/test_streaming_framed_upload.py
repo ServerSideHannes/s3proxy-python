@@ -115,7 +115,7 @@ async def _measure_framed_peak(client_part_size: int) -> int:
         1,
         types.SimpleNamespace(dek=crypto.generate_dek()),
         client_part_size,
-        crypto.PART_SIZE,  # same internal part size barman uses for 512MB parts
+        crypto.memory_bounded_part_size(client_part_size),  # size the handler picks
         1,
     )
     _, peak = tracemalloc.get_traced_memory()
@@ -125,13 +125,18 @@ async def _measure_framed_peak(client_part_size: int) -> int:
 
 @pytest.mark.asyncio
 async def test_framed_upload_memory_is_independent_of_part_size():
-    """A 256MB client part peaks no higher than a 64MB one: ciphertext is built
-    one internal part at a time, not scaled by total client part size."""
+    """Peak memory tracks one internal part, not the client part size. With the
+    adaptive sizing a 512MB barman part uses ~26MB internal parts and peaks well
+    under what a single 64MB-part request used to (~80MB+), and a 1GB client
+    part does not peak meaningfully higher."""
     small = await _measure_framed_peak(64 * 1024 * 1024)
-    large = await _measure_framed_peak(256 * 1024 * 1024)
+    barman = await _measure_framed_peak(512 * 1024 * 1024)
+    huge = await _measure_framed_peak(1024 * 1024 * 1024)
 
-    # Must stay below the old buffered path (~2× part_size ≈ 257MB per request).
-    assert small < 220 * 1024 * 1024, f"small peak {small / 1024 / 1024:.1f}MB"
-    assert large < 220 * 1024 * 1024, f"large peak {large / 1024 / 1024:.1f}MB"
-    # Larger client part must not scale memory linearly with part count.
-    assert large <= small * 1.5 + crypto.FRAME_PLAINTEXT_SIZE
+    # One internal part + frame overhead. Generous ceiling that still catches a
+    # regression to buffering a whole 64MB part (~80MB) or the client part.
+    ceiling = 70 * 1024 * 1024
+    assert barman < ceiling, f"barman peak {barman / 1024 / 1024:.1f}MB"
+    assert small < ceiling, f"small peak {small / 1024 / 1024:.1f}MB"
+    # Memory must not scale with client part size.
+    assert huge <= barman * 1.5 + crypto.FRAME_PLAINTEXT_SIZE

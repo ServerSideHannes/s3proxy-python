@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import gc
 import hashlib
 import time
 from collections import deque
@@ -97,9 +96,11 @@ class UploadPartMixin(BaseHandler):
                 and content_length > crypto.STREAMING_THRESHOLD
             )
 
-            # Calculate optimal part size
-            optimal_part_size = crypto.calculate_optimal_part_size(content_length)
-            estimated_parts = max(1, (content_length + optimal_part_size - 1) // optimal_part_size)
+            # Smallest internal part that bounds memory while staying within the
+            # per-client part-number allocation range (so we never collide and
+            # never buffer more than necessary).
+            internal_part_size = crypto.memory_bounded_part_size(content_length)
+            estimated_parts = max(1, -(-content_length // internal_part_size))
 
             use_framed = (
                 (is_unsigned or is_large_signed) and not needs_chunked_decode and content_length > 0
@@ -109,7 +110,7 @@ class UploadPartMixin(BaseHandler):
                 bucket=bucket,
                 key=key,
                 part_number=part_num,
-                optimal_part_size_mb=f"{optimal_part_size / 1024 / 1024:.2f}MB",
+                internal_part_size_mb=f"{internal_part_size / 1024 / 1024:.2f}MB",
                 estimated_internal_parts=estimated_parts,
                 is_unsigned=is_unsigned,
                 is_large_signed=is_large_signed,
@@ -142,7 +143,7 @@ class UploadPartMixin(BaseHandler):
                         part_num,
                         state,
                         content_length,
-                        optimal_part_size,
+                        internal_part_size,
                         internal_part_start,
                     )
                 else:
@@ -160,7 +161,7 @@ class UploadPartMixin(BaseHandler):
                         is_streaming_sig,
                         is_large_signed,
                         needs_chunked_decode,
-                        optimal_part_size,
+                        internal_part_size,
                         internal_part_start,
                     )
 
@@ -403,12 +404,9 @@ class UploadPartMixin(BaseHandler):
                 )
                 frame_idx += 1
 
-            part_ciphertext = bytes(ciphertext)
-            del ciphertext
-            gc.collect()
-
             upload_start = time.monotonic()
-            resp = await client.upload_part(bucket, key, upload_id, ipn, part_ciphertext)
+            resp = await client.upload_part(bucket, key, upload_id, ipn, ciphertext)
+            del ciphertext
             etag = resp["ETag"].strip('"')
             logger.info(
                 "INTERNAL_PART_UPLOADED",

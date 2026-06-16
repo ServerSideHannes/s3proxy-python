@@ -6,7 +6,8 @@ at 733 bytes) should not be treated the same as large uploads (100MB+).
 
 Memory estimation logic:
 - PUT ≤8MB: content_length * 2 (body + ciphertext buffer)
-- PUT >8MB: MAX_BUFFER_SIZE * 2 (16MB, streaming buffer + ciphertext)
+- PUT >8MB: memory_bounded_part_size(content_length) (the one internal part the
+  streaming/framed upload path actually buffers at a time)
 - GET: MAX_BUFFER_SIZE (8MB baseline, handler acquires more for encrypted decrypts)
 - POST: MIN_RESERVATION (64KB, metadata only)
 - HEAD/DELETE: 0 (no buffering, bypass limit)
@@ -46,12 +47,17 @@ class TestMemoryFootprintEstimation:
         footprint = concurrency_module.estimate_memory_footprint("PUT", 100 * 1024)
         assert footprint == 200 * 1024
 
-    def test_large_file_uses_double_buffer(self):
-        """PUT with 100MB file should reserve 16MB (buffer + ciphertext)."""
+    def test_large_file_reserves_real_internal_part(self):
+        """Large PUTs must reserve the actual internal-part buffer the upload
+        path holds (memory_bounded_part_size), not a flat guess -- otherwise the
+        limiter under-counts and admits too many concurrent uploads (the OOM)."""
         import s3proxy.concurrency as concurrency_module
+        from s3proxy import crypto
 
-        footprint = concurrency_module.estimate_memory_footprint("PUT", 100 * 1024 * 1024)
-        assert footprint == concurrency_module.MAX_BUFFER_SIZE * 2  # 16MB
+        for mb in (50, 100, 512, 1024):
+            cl = mb * 1024 * 1024
+            footprint = concurrency_module.estimate_memory_footprint("PUT", cl)
+            assert footprint == crypto.memory_bounded_part_size(cl)
 
     def test_minimum_reservation_enforced(self):
         """0-byte file should still reserve MIN_RESERVATION (64KB)."""
@@ -263,10 +269,10 @@ class TestRealWorldScenarios:
 
         reservations = []
 
-        # 2 large streaming uploads (16MB each = 32MB)
+        # 2 large streaming uploads (320MB -> 16MB internal part each = 32MB)
         for _ in range(2):
-            footprint = concurrency_module.estimate_memory_footprint("PUT", 100 * 1024 * 1024)
-            assert footprint == 16 * 1024 * 1024  # buffer + ciphertext
+            footprint = concurrency_module.estimate_memory_footprint("PUT", 320 * 1024 * 1024)
+            assert footprint == 16 * 1024 * 1024  # one 16MB internal part
             reserved = await concurrency_module.try_acquire_memory(footprint)
             reservations.append(reserved)
 
