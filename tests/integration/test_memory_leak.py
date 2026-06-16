@@ -13,6 +13,7 @@ per-part (~16MB peak per part). The limiter gates concurrent part decrypts.
 
 import concurrent.futures
 import contextlib
+import http.client
 import io
 import json
 import random
@@ -27,31 +28,86 @@ CONTAINER_NAME = "s3proxy-test-server"
 ENDPOINT_URL = "http://localhost:4433"
 
 
-def container_is_running() -> bool:
+def _container_state() -> dict | None:
+    """Return the container's State dict, or None if docker/container is absent."""
     result = subprocess.run(
         ["docker", "inspect", "--format", "{{json .State}}", CONTAINER_NAME],
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
+        return None
+    return json.loads(result.stdout.strip())
+
+
+def container_exists() -> bool:
+    return _container_state() is not None
+
+
+def container_is_running() -> bool:
+    state = _container_state()
+    if state is None:
         return False
-    state = json.loads(result.stdout.strip())
     return state.get("Running", False) and state.get("OOMKilled", False) is False
 
 
 def container_oom_killed() -> bool:
+    state = _container_state()
+    return bool(state and state.get("OOMKilled"))
+
+
+def container_logs() -> str:
     result = subprocess.run(
-        ["docker", "inspect", "--format", "{{.State.OOMKilled}}", CONTAINER_NAME],
+        ["docker", "logs", "--tail", "50", CONTAINER_NAME],
         capture_output=True,
         text=True,
     )
-    return result.stdout.strip() == "true"
+    return (result.stdout + result.stderr).strip()
+
+
+def proxy_healthy() -> bool:
+    """True only if the proxy actually answers /healthz (i.e. it really booted)."""
+    conn = http.client.HTTPConnection("localhost", 4433, timeout=2)
+    try:
+        conn.request("GET", "/healthz")
+        resp = conn.getresponse()
+        resp.read()
+        return resp.status == 200
+    except Exception:
+        return False
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()
 
 
 def assert_alive(msg: str = ""):
     __tracebackhide__ = True
     assert not container_oom_killed(), f"OOM-KILLED! {msg}"
     assert container_is_running(), f"Container died! {msg}"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def require_serving_proxy():
+    """Gate the whole OOM suite on a proxy that actually boots and serves.
+
+    A proxy that can't start (import/config error) or gets OOM-killed must FAIL
+    the suite -- never silently skip. A skipped suite reports green, so an OOM
+    regression (or a proxy that won't even boot) would ship unnoticed. The only
+    legitimate skip is "container not present" (env not set up; run make test-oom).
+    """
+    if not container_exists():
+        pytest.skip("s3proxy OOM container not present (run `make test-oom`)")
+
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        if container_oom_killed():
+            pytest.fail(f"s3proxy container OOM-killed during startup\n{container_logs()}")
+        if proxy_healthy():
+            return
+        if not container_is_running():
+            pytest.fail(f"s3proxy container crashed on startup\n{container_logs()}")
+        time.sleep(1)
+    pytest.fail(f"s3proxy never became healthy within 60s\n{container_logs()}")
 
 
 def make_client():
@@ -104,8 +160,11 @@ class TestMemoryLeak:
 
     @pytest.fixture(autouse=True)
     def check_container(self):
-        if not container_is_running():
-            pytest.skip("s3proxy container not running (previous test may have killed it)")
+        if not container_exists():
+            pytest.skip("s3proxy container not present (run `make test-oom`)")
+        # A dead/OOM-killed proxy is the failure we exist to catch -- fail, never skip.
+        assert not container_oom_killed(), f"OOM-KILLED before test\n{container_logs()}"
+        assert container_is_running(), f"Container not running before test\n{container_logs()}"
         yield
 
     @pytest.fixture
