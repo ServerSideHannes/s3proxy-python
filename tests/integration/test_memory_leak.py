@@ -148,6 +148,9 @@ def retry_on_503(fn, max_attempts=60):
             last_err = e
             err = str(e).lower()
             if any(s in err for s in RETRYABLE):
+                # A connection error plus an OOM-killed container is the failure
+                # we exist to catch -- surface it now instead of burning retries.
+                assert not container_oom_killed(), f"OOM-KILLED!\n{container_logs()}"
                 time.sleep(0.3 + random.uniform(0, 0.5))
                 continue
             raise
@@ -215,6 +218,58 @@ class TestMemoryLeak:
                 done += 1
 
         assert_alive("after 20x256MB PUTs")
+        assert done == num
+
+    def test_concurrent_large_part_uploads(self, client, bucket):
+        """Concurrent multipart UploadParts with client parts > the 64MB internal
+        PART_SIZE. This is the path that OOM-killed prod (e.g. barman's 512MB
+        parts), and the one the 64MB-part test below cannot reach.
+
+        A client part larger than PART_SIZE forces the streaming upload to hold a
+        large internal part (plaintext + ciphertext) in memory. If the limiter
+        reserves a fixed buffer instead of the real internal-part size, it admits
+        far more concurrent UploadParts than fit the 48MB budget -> OOM. A correct
+        limiter reserves the real size and backpressures instead.
+        """
+        num = 10
+        part_size = 256 * 1024 * 1024  # 256MB > 64MB internal PART_SIZE
+
+        def upload_one(i):
+            key = f"largepart-{i}.bin"
+
+            def do_upload():
+                resp = client.create_multipart_upload(Bucket=bucket, Key=key)
+                uid = resp["UploadId"]
+                try:
+                    pr = client.upload_part(
+                        Bucket=bucket,
+                        Key=key,
+                        UploadId=uid,
+                        PartNumber=1,
+                        Body=io.BytesIO(bytes([i % 256]) * part_size),
+                    )
+                    client.complete_multipart_upload(
+                        Bucket=bucket,
+                        Key=key,
+                        UploadId=uid,
+                        MultipartUpload={"Parts": [{"PartNumber": 1, "ETag": pr["ETag"]}]},
+                    )
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=uid)
+                    raise
+
+            retry_on_503(do_upload)
+            return i
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num) as ex:
+            futures = [ex.submit(upload_one, i) for i in range(num)]
+            done = 0
+            for f in concurrent.futures.as_completed(futures, timeout=600):
+                f.result()
+                done += 1
+
+        assert_alive("after concurrent 256MB-part uploads")
         assert done == num
 
     def test_concurrent_multipart_256mb(self, client, bucket):
