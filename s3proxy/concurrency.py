@@ -36,9 +36,7 @@ def _create_malloc_release() -> Callable[[], int] | None:
         libc.malloc_trim.argtypes = [ctypes.c_size_t]
         libc.malloc_trim.restype = ctypes.c_int
         return lambda: libc.malloc_trim(0)
-    except OSError:
-        return None
-    except AttributeError:
+    except OSError, AttributeError:
         return None
 
 
