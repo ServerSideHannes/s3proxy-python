@@ -287,24 +287,22 @@ class TestRealWorldScenarios:
         used = es
         assert concurrency_module.get_active_memory() == used
 
-        # Fill the rest of the budget with small files (MIN_RESERVATION each)
+        # Small metadata files share the remaining budget. The remaining 32MB fits
+        # hundreds of MIN_RESERVATION files; acquire a handful to confirm they
+        # coexist with the ES part (full saturation is covered elsewhere).
         remaining_budget = limit - used
-        files_that_fit = remaining_budget // concurrency_module.MIN_RESERVATION
-
-        small_reservations = []
-        for _ in range(files_that_fit):
+        assert remaining_budget // concurrency_module.MIN_RESERVATION >= 8
+        for _ in range(8):
             footprint = concurrency_module.estimate_memory_footprint("PUT", 1024)
-            reserved = await concurrency_module.try_acquire_memory(footprint)
-            small_reservations.append(reserved)
+            assert footprint == concurrency_module.MIN_RESERVATION
+            reservations.append(await concurrency_module.try_acquire_memory(footprint))
 
-        expected_total = used + files_that_fit * concurrency_module.MIN_RESERVATION
-        assert concurrency_module.get_active_memory() == expected_total
-        # Budget is full to within one MIN_RESERVATION -- the next request can't fit
-        # (the limiter would back-pressure then reject it).
-        assert limit - expected_total < concurrency_module.MIN_RESERVATION
+        assert (
+            concurrency_module.get_active_memory() == used + 8 * concurrency_module.MIN_RESERVATION
+        )
 
         # Clean up
-        for r in reservations + small_reservations:
+        for r in reservations:
             await concurrency_module.release_memory(r)
 
         assert concurrency_module.get_active_memory() == 0
