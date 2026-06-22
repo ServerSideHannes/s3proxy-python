@@ -87,19 +87,21 @@ class ConcurrencyLimiter:
 
         to_reserve = max(MIN_RESERVATION, bytes_needed)
 
-        # Single request exceeds entire budget — can never fit, reject immediately
+        # A single request's honest peak can exceed the whole budget: the framed
+        # upload path needs ~2-3x the internal part, more than a deliberately tight
+        # governor budget (which sits well below pod RAM to bound *concurrency*).
+        # Clamp to the budget so such a request runs exclusively (concurrency 1)
+        # rather than being refused outright -- the proxy streams it fine, it just
+        # can't share the budget. ponytail: a request whose true peak exceeds the
+        # pod's RAM (not just this budget) could still OOM when run alone; all
+        # realistic parts (<=~56MB) stay far under that.
         if to_reserve > self._limit_bytes:
-            request_mb = to_reserve / 1024 / 1024
-            limit_mb = self._limit_bytes / 1024 / 1024
-            logger.warning(
-                "MEMORY_TOO_LARGE",
-                requested_mb=round(request_mb, 2),
-                limit_mb=round(limit_mb, 2),
+            logger.info(
+                "MEMORY_CLAMPED_TO_BUDGET",
+                requested_mb=round(to_reserve / 1024 / 1024, 2),
+                limit_mb=round(self._limit_bytes / 1024 / 1024, 2),
             )
-            MEMORY_REJECTIONS.inc()
-            raise S3Error.slow_down(
-                f"Request needs {request_mb:.0f}MB but budget is {limit_mb:.0f}MB"
-            )
+            to_reserve = self._limit_bytes
 
         async with self._condition:
             deadline = asyncio.get_event_loop().time() + BACKPRESSURE_TIMEOUT

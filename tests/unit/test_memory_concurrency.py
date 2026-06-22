@@ -155,16 +155,20 @@ class TestMemoryBudgetManagement:
         assert concurrency_module.get_active_memory() == 0
 
     @pytest.mark.asyncio
-    async def test_single_request_cannot_exceed_budget(self):
-        """A single 100MB request should be rejected when it exceeds the 64MB budget."""
+    async def test_single_request_larger_than_budget_runs_exclusively(self):
+        """A request whose footprint exceeds the whole budget is NOT rejected -- it
+        is clamped to the budget and runs exclusively (concurrency 1). The proxy
+        streams it fine; the budget bounds concurrency, not one request's peak.
+        (Rejecting it would refuse large uploads under a tight budget -- the
+        integration OOM test uploads 30MB at a 16MB budget and must succeed.)
+        """
         import s3proxy.concurrency as concurrency_module
-        from s3proxy.errors import S3Error
 
-        # Request 100MB — exceeds 64MB limit, should be rejected immediately
-        with pytest.raises(S3Error, match="503"):
-            await concurrency_module.try_acquire_memory(100 * 1024 * 1024)
-
-        # No memory should be reserved after rejection
+        limit = concurrency_module.get_memory_limit()
+        reserved = await concurrency_module.try_acquire_memory(100 * 1024 * 1024)
+        assert reserved == limit  # clamped to the whole budget
+        assert concurrency_module.get_active_memory() == limit
+        await concurrency_module.release_memory(reserved)
         assert concurrency_module.get_active_memory() == 0
 
     @pytest.mark.asyncio
