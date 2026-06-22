@@ -29,8 +29,6 @@ from .routing import RequestDispatcher
 pod_name = os.environ.get("HOSTNAME", "unknown")
 logger: BoundLogger = structlog.get_logger(__name__).bind(pod=pod_name)
 
-# Signature verification constants
-
 
 def _is_dashboard_path(request: Request, path: str) -> bool:
     """True if the path targets the dashboard (so it's excluded from stats).
@@ -50,13 +48,11 @@ def _is_dashboard_path(request: Request, path: str) -> bool:
 
 
 def _needs_body_for_signature(headers: dict[str, str]) -> bool:
-    """Body is needed only when the client omits x-amz-content-sha256.
+    """Body is needed only when x-amz-content-sha256 is absent.
 
-    SigV4 carries the payload hash in x-amz-content-sha256 and signs that header
-    value; the verifier uses it directly and never rehashes the body. UNSIGNED
-    and STREAMING payloads put sentinel values there too. So the body is only
-    required to compute the fallback hash when the header is absent -- buffering
-    it otherwise just pins the whole part in memory (the ES-snapshot OOM).
+    The verifier uses that header as the payload hash verbatim and only rehashes
+    the body as a fallback when it is missing. Buffering it otherwise just pins
+    the whole part in memory.
     """
     return headers.get("x-amz-content-sha256", "") == ""
 

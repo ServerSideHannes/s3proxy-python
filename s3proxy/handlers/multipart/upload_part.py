@@ -43,14 +43,10 @@ class _UploadClass(NamedTuple):
 def classify_upload(content_sha: str, content_encoding: str, content_length: int) -> _UploadClass:
     """Decide how an UploadPart body is read and encrypted.
 
-    Any signed, known-length, non-chunked body takes the framed O(frame)-memory
-    path: the verifier already authed it via the x-amz-content-sha256 header, so
-    we stream it frame-by-frame instead of buffering the whole part. Only
-    aws-chunked / streaming-signature bodies (length unknown up front) keep the
-    buffered path. Elasticsearch snapshots send 16MB *signed* parts that used to
-    buffer the full part -> OOM; they now stream. ``is_large_signed`` keeps its
-    name but now means "signed and known-length" (it gates late SHA256
-    verification and the direct stream source).
+    Any signed, known-length, non-chunked body streams frame-by-frame (framed
+    path, O(frame) memory). Only aws-chunked / streaming-signature bodies, whose
+    length is unknown up front, keep the buffered path. ``is_large_signed`` means
+    "signed and known-length"; it gates late SHA256 verification.
     """
     is_unsigned = content_sha == "UNSIGNED-PAYLOAD"
     is_streaming_sig = content_sha.startswith("STREAMING-")

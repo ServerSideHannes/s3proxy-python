@@ -45,24 +45,17 @@ class TestNeedsBodyForSignature:
     """Body is buffered for signature only when x-amz-content-sha256 is absent."""
 
     def test_unsigned_payload(self):
-        """UNSIGNED-PAYLOAD carries the hash in the header -> no body."""
         assert _needs_body_for_signature({"x-amz-content-sha256": "UNSIGNED-PAYLOAD"}) is False
 
     def test_streaming_payload(self):
-        """Streaming signature carries a sentinel in the header -> no body."""
         headers = {"x-amz-content-sha256": "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"}
         assert _needs_body_for_signature(headers) is False
 
     def test_signed_payload_skips_body_regardless_of_size(self):
-        """A real SHA256 in the header is used directly; body is never buffered.
-
-        This is the Elasticsearch case: 16MB *signed* parts must NOT be buffered.
-        """
         headers = {"x-amz-content-sha256": "abc123def456", "content-length": str(16 * 1024 * 1024)}
         assert _needs_body_for_signature(headers) is False
 
     def test_missing_header_needs_body(self):
-        """Only an absent header forces hashing the body for the fallback."""
         assert _needs_body_for_signature({}) is True
         assert _needs_body_for_signature({"x-amz-content-sha256": ""}) is True
 
