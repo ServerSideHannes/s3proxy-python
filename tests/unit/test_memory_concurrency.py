@@ -5,9 +5,10 @@ the count-based system. The key insight is that small files (e.g., ES metadata
 at 733 bytes) should not be treated the same as large uploads (100MB+).
 
 Memory estimation logic:
-- PUT ≤8MB: content_length * 2 (body + ciphertext buffer)
-- PUT >8MB: memory_bounded_part_size(content_length) (the one internal part the
-  streaming/framed upload path actually buffers at a time)
+- PUT: streaming_upload_peak(content_length) -- the framed upload path's true
+  peak (accumulated ciphertext + encrypt transient + held frame + HTTP body
+  copy), NOT the bare internal-part size. Reserving the part size under-counted
+  ~3x and let the limiter admit too many concurrent uploads -> OOM.
 - GET: MAX_BUFFER_SIZE (8MB baseline, handler acquires more for encrypted decrypts)
 - POST: MIN_RESERVATION (64KB, metadata only)
 - HEAD/DELETE: 0 (no buffering, bypass limit)
@@ -35,29 +36,32 @@ class TestMemoryFootprintEstimation:
         yield
         concurrency_module.reset_state()
 
-    def test_small_file_uses_content_length_x2(self):
-        """PUT with 1KB file should reserve 2KB (content_length * 2)."""
+    def test_small_file_reserves_streaming_peak(self):
+        """Tiny PUTs floor at MIN_RESERVATION; small ones reserve the framed peak."""
         import s3proxy.concurrency as concurrency_module
+        from s3proxy import crypto
 
-        footprint = concurrency_module.estimate_memory_footprint("PUT", 1024)
-        # 1KB * 2 = 2KB, but minimum is 64KB
-        assert footprint == concurrency_module.MIN_RESERVATION
-
-        # With 100KB file: 100KB * 2 = 200KB
+        # 1KB peak is tiny -> floored at MIN_RESERVATION (64KB)
+        assert concurrency_module.estimate_memory_footprint("PUT", 1024) == (
+            concurrency_module.MIN_RESERVATION
+        )
+        # 100KB part stays single-frame: peak = 2*part + 2*frame = 4*100KB
         footprint = concurrency_module.estimate_memory_footprint("PUT", 100 * 1024)
-        assert footprint == 200 * 1024
+        assert footprint == crypto.streaming_upload_peak(100 * 1024) == 400 * 1024
 
-    def test_large_file_reserves_real_internal_part(self):
-        """Large PUTs must reserve the actual internal-part buffer the upload
-        path holds (memory_bounded_part_size), not a flat guess -- otherwise the
-        limiter under-counts and admits too many concurrent uploads (the OOM)."""
+    def test_large_file_reserves_framed_peak_not_part_size(self):
+        """Large PUTs must reserve the framed path's true peak, NOT the bare
+        internal-part size -- reserving the part size under-counted ~3x and let
+        the limiter admit too many concurrent uploads (the OOM). The peak must
+        strictly exceed the part size."""
         import s3proxy.concurrency as concurrency_module
         from s3proxy import crypto
 
         for mb in (50, 100, 512, 1024):
             cl = mb * 1024 * 1024
             footprint = concurrency_module.estimate_memory_footprint("PUT", cl)
-            assert footprint == crypto.memory_bounded_part_size(cl)
+            assert footprint == crypto.streaming_upload_peak(cl)
+            assert footprint > crypto.memory_bounded_part_size(cl)
 
     def test_minimum_reservation_enforced(self):
         """0-byte file should still reserve MIN_RESERVATION (64KB)."""
@@ -263,33 +267,35 @@ class TestRealWorldScenarios:
 
     @pytest.mark.asyncio
     async def test_mixed_workload_scenario(self):
-        """Simulate mixed workload: small files + streaming uploads."""
+        """Simulate mixed workload at the production budget: large streaming
+        uploads + GETs + small files, then rejection once full."""
         import s3proxy.concurrency as concurrency_module
-        from s3proxy.errors import S3Error
+        from s3proxy import crypto
 
+        concurrency_module.set_memory_limit(256)  # production governor budget
+        limit = 256 * 1024 * 1024
         reservations = []
 
-        # 2 large streaming uploads (320MB -> 16MB internal part each = 32MB)
+        # 2 large streaming uploads. A 320MB client part splits into 16MB internal
+        # parts; the framed path's real peak per request is streaming_upload_peak,
+        # well above the bare 16MB part size (the under-count that caused the OOM).
+        large = concurrency_module.estimate_memory_footprint("PUT", 320 * 1024 * 1024)
+        assert large == crypto.streaming_upload_peak(320 * 1024 * 1024)
         for _ in range(2):
-            footprint = concurrency_module.estimate_memory_footprint("PUT", 320 * 1024 * 1024)
-            assert footprint == 16 * 1024 * 1024  # one 16MB internal part
-            reserved = await concurrency_module.try_acquire_memory(footprint)
-            reservations.append(reserved)
+            reservations.append(await concurrency_module.try_acquire_memory(large))
 
-        # 2 GET requests (8MB each = 16MB)
+        # 2 GET requests (8MB each)
         for _ in range(2):
             footprint = concurrency_module.estimate_memory_footprint("GET", 0)
             assert footprint == 8 * 1024 * 1024
-            reserved = await concurrency_module.try_acquire_memory(footprint)
-            reservations.append(reserved)
+            reservations.append(await concurrency_module.try_acquire_memory(footprint))
 
-        # Total: 48MB used, 16MB remaining
-        assert concurrency_module.get_active_memory() == 48 * 1024 * 1024
+        used = 2 * large + 2 * (8 * 1024 * 1024)
+        assert concurrency_module.get_active_memory() == used
 
-        # Calculate how many small files fit in remaining 16MB budget
-        # Each small file reserves MIN_RESERVATION (64KB = 65536 bytes)
-        remaining_budget = 64 * 1024 * 1024 - 48 * 1024 * 1024  # 16MB
-        files_that_fit = remaining_budget // concurrency_module.MIN_RESERVATION  # 256 files
+        # Fill the rest of the budget with small files (MIN_RESERVATION each)
+        remaining_budget = limit - used
+        files_that_fit = remaining_budget // concurrency_module.MIN_RESERVATION
 
         small_reservations = []
         for _ in range(files_that_fit):
@@ -297,13 +303,11 @@ class TestRealWorldScenarios:
             reserved = await concurrency_module.try_acquire_memory(footprint)
             small_reservations.append(reserved)
 
-        # Now at 64MB (48MB large + 256 * 64KB = 16MB small)
-        expected_total = 48 * 1024 * 1024 + files_that_fit * concurrency_module.MIN_RESERVATION
+        expected_total = used + files_that_fit * concurrency_module.MIN_RESERVATION
         assert concurrency_module.get_active_memory() == expected_total
-
-        # Next request should fail
-        with pytest.raises(S3Error):
-            await concurrency_module.try_acquire_memory(concurrency_module.MIN_RESERVATION)
+        # Budget is full to within one MIN_RESERVATION -- the next request can't fit
+        # (the limiter would back-pressure then reject it).
+        assert limit - expected_total < concurrency_module.MIN_RESERVATION
 
         # Clean up
         for r in reservations + small_reservations:

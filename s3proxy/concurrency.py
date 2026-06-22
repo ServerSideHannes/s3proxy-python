@@ -12,7 +12,7 @@ from collections.abc import Callable
 
 import structlog
 
-from s3proxy.crypto import memory_bounded_part_size
+from s3proxy.crypto import streaming_upload_peak
 from s3proxy.errors import S3Error
 from s3proxy.metrics import MEMORY_LIMIT_BYTES, MEMORY_REJECTIONS, MEMORY_RESERVED_BYTES
 
@@ -164,12 +164,12 @@ _default = ConcurrencyLimiter(limit_mb=int(os.environ.get("S3PROXY_MEMORY_LIMIT_
 def estimate_memory_footprint(method: str, content_length: int) -> int:
     """Estimate memory needed for a request.
 
-    Small PUTs buffer the whole body + ciphertext. Larger PUTs stream and buffer
-    one internal part at a time, so reserve exactly that internal part size --
-    the same value the upload path uses (memory_bounded_part_size). This keeps
-    the reservation honest: the limiter then admits only as many concurrent
-    uploads as actually fit the budget, instead of under-counting and OOMing.
-    GETs reserve a baseline here; encrypted GETs acquire additional memory in the handler.
+    PUTs stream and encrypt one internal part at a time; reserve the framed
+    path's true peak (streaming_upload_peak), which stacks the accumulated
+    ciphertext, the encrypt transient, the held frame and the HTTP body copy --
+    not just the part size. Reserving the bare part size under-counted ~3x and
+    let the limiter admit too many concurrent uploads -> OOM. GETs reserve a
+    baseline; encrypted GETs acquire more in the handler.
     """
     if method in ("HEAD", "DELETE"):
         return 0
@@ -177,9 +177,7 @@ def estimate_memory_footprint(method: str, content_length: int) -> int:
         return MAX_BUFFER_SIZE
     if method == "POST":
         return MIN_RESERVATION
-    if content_length <= MAX_BUFFER_SIZE:
-        return max(MIN_RESERVATION, content_length * 2)
-    return memory_bounded_part_size(content_length)
+    return max(MIN_RESERVATION, streaming_upload_peak(content_length))
 
 
 # Module-level convenience functions delegating to the default instance
