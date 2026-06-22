@@ -12,9 +12,6 @@ import pytest
 
 # Set environment variables before importing s3proxy modules
 os.environ.setdefault("S3PROXY_HOST", "http://localhost:9000")
-# Rejection tests fill the budget then wait out the backpressure timeout before
-# asserting SlowDown -- keep it short so the unit suite doesn't burn 30s each.
-os.environ.setdefault("S3PROXY_BACKPRESSURE_TIMEOUT", "1")
 
 from s3proxy.client import S3Client, S3Credentials
 from s3proxy.config import Settings
