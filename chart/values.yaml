@@ -15,13 +15,8 @@ server:
   port: 4433
   noTls: true
 
-# Governor budget for in-flight request memory. Reservations are the framed
-# upload path's true peak (~2x internal part + 2 frames), so this must leave
-# headroom under the pod memory limit for base RSS (~120Mi) + allocator slack:
-# 120 + 256*1.2 ~= 427Mi < the 512Mi limit below. Raising it without raising
-# `resources.limits.memory` risks OOMKill.
 performance:
-  memoryLimitMb: 256
+  memoryLimitMb: 64
 
 # Redis holds only transient multipart-upload state (TTL'd, deleted on
 # completion). It is NOT a durable store — losing it only forces in-flight

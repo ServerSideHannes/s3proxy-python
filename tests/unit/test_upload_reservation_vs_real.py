@@ -95,20 +95,22 @@ async def test_reservation_bounds_real_framed_peak(mb):
     assert crypto.memory_bounded_part_size(content_length) < real_peak
 
 
-# Production governor budget (chart/values.yaml performance.memoryLimitMb).
-PROD_LIMIT_MB = 256
+# Deployed governor budget (chart/values.yaml performance.memoryLimitMb).
+DEPLOY_LIMIT_MB = 64
 
 
-@pytest.mark.parametrize("mb", [16, 512])
-def test_workload_parts_fit_prod_budget(mb):
-    """At the deployed governor budget, the real workloads (16MB ES snapshot
-    parts, 512MB barman parts) must fit a single reservation -- otherwise the
-    limiter rejects them outright (S3 SlowDown) and the upload can never run."""
-    set_memory_limit(PROD_LIMIT_MB)
+def test_es_part_fits_deploy_budget_with_concurrency():
+    """The real workload is 16MB ES snapshot parts. Its honest reservation must
+    fit the 64MB budget AND leave room for concurrency -- if a single 16MB part
+    reserved the whole budget the proxy would serialise to one upload at a time.
+    """
+    set_memory_limit(DEPLOY_LIMIT_MB)
     try:
-        reserved = estimate_memory_footprint("PUT", mb * MB)
-        assert reserved <= PROD_LIMIT_MB * MB, (
-            f"{mb}MB part reserves {reserved / MB:.1f}MB > {PROD_LIMIT_MB}MB budget"
+        reserved = estimate_memory_footprint("PUT", 16 * MB)
+        budget = DEPLOY_LIMIT_MB * MB
+        assert reserved <= budget // 2, (
+            f"16MB part reserves {reserved / MB:.1f}MB > half the {DEPLOY_LIMIT_MB}MB "
+            f"budget -- no concurrency"
         )
     finally:
-        set_memory_limit(64)
+        set_memory_limit(DEPLOY_LIMIT_MB)

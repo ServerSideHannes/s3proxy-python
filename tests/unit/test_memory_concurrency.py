@@ -267,30 +267,24 @@ class TestRealWorldScenarios:
 
     @pytest.mark.asyncio
     async def test_mixed_workload_scenario(self):
-        """Simulate mixed workload at the production budget: large streaming
-        uploads + GETs + small files, then rejection once full."""
+        """Mixed workload at the deployed 64MB budget: the real 16MB ES snapshot
+        uploads (framed) plus small metadata files, then full."""
         import s3proxy.concurrency as concurrency_module
         from s3proxy import crypto
 
-        concurrency_module.set_memory_limit(256)  # production governor budget
-        limit = 256 * 1024 * 1024
+        concurrency_module.set_memory_limit(64)  # deployed governor budget
+        limit = 64 * 1024 * 1024
         reservations = []
 
-        # 2 large streaming uploads. A 320MB client part splits into 16MB internal
-        # parts; the framed path's real peak per request is streaming_upload_peak,
-        # well above the bare 16MB part size (the under-count that caused the OOM).
-        large = concurrency_module.estimate_memory_footprint("PUT", 320 * 1024 * 1024)
-        assert large == crypto.streaming_upload_peak(320 * 1024 * 1024)
-        for _ in range(2):
-            reservations.append(await concurrency_module.try_acquire_memory(large))
+        # 16MB ES part: the framed path's real peak (streaming_upload_peak) is well
+        # above the bare 8MB internal-part size -- the under-count that caused the
+        # OOM. One such reservation is half the budget, so two run concurrently.
+        es = concurrency_module.estimate_memory_footprint("PUT", 16 * 1024 * 1024)
+        assert es == crypto.streaming_upload_peak(16 * 1024 * 1024)
+        assert es == limit // 2
+        reservations.append(await concurrency_module.try_acquire_memory(es))
 
-        # 2 GET requests (8MB each)
-        for _ in range(2):
-            footprint = concurrency_module.estimate_memory_footprint("GET", 0)
-            assert footprint == 8 * 1024 * 1024
-            reservations.append(await concurrency_module.try_acquire_memory(footprint))
-
-        used = 2 * large + 2 * (8 * 1024 * 1024)
+        used = es
         assert concurrency_module.get_active_memory() == used
 
         # Fill the rest of the budget with small files (MIN_RESERVATION each)

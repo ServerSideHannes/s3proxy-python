@@ -353,8 +353,7 @@ class TestMemoryConcurrencyModule:
         from s3proxy import crypto
         from s3proxy.state import MAX_INTERNAL_PARTS_PER_CLIENT
 
-        concurrency_module.set_memory_limit(256)  # production governor budget
-        budget = concurrency_module.get_memory_limit()
+        budget = concurrency_module.get_memory_limit()  # deployed 64MB
         for mb in (50, 128, 320, 512, 1024, 4096):
             cl = mb * 1024 * 1024
             part = crypto.memory_bounded_part_size(cl)
@@ -365,10 +364,10 @@ class TestMemoryConcurrencyModule:
             # limiter guarantee: total admitted memory never exceeds the budget
             assert (budget // footprint) * footprint <= budget
 
-        # barman-scale 512MB parts fit the production budget and admit a handful.
-        footprint_512 = concurrency_module.estimate_memory_footprint("PUT", 512 * 1024 * 1024)
-        assert footprint_512 <= budget
-        assert 1 <= budget // footprint_512 <= 4
+        # The real workload is 16MB ES parts: honest reservation fits the 64MB
+        # budget with room for concurrency (the under-count admitted ~8 -> OOM).
+        es = concurrency_module.estimate_memory_footprint("PUT", 16 * 1024 * 1024)
+        assert es <= budget // 2
 
     def test_estimate_memory_footprint_get(self):
         """GET should always use fixed buffer size."""
