@@ -12,7 +12,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from structlog.stdlib import BoundLogger
 
-from . import concurrency, crypto
+from . import concurrency
 from .client import ParsedRequest, SigV4Verifier
 from .dashboard import record_request
 from .errors import S3Error, raise_for_client_error, raise_for_exception
@@ -30,8 +30,6 @@ pod_name = os.environ.get("HOSTNAME", "unknown")
 logger: BoundLogger = structlog.get_logger(__name__).bind(pod=pod_name)
 
 # Signature verification constants
-UNSIGNED_PAYLOAD = "UNSIGNED-PAYLOAD"
-STREAMING_PAYLOAD_PREFIX = "STREAMING-"
 
 
 def _is_dashboard_path(request: Request, path: str) -> bool:
@@ -51,23 +49,16 @@ def _is_dashboard_path(request: Request, path: str) -> bool:
     return path == prefix or path.startswith(prefix + "/")
 
 
-def _needs_body_for_signature(headers: dict[str, str], max_size: int) -> bool:
-    """Check if body is needed for signature verification.
+def _needs_body_for_signature(headers: dict[str, str]) -> bool:
+    """Body is needed only when the client omits x-amz-content-sha256.
 
-    Returns False for unsigned payloads, streaming signatures, or large bodies.
+    SigV4 carries the payload hash in x-amz-content-sha256 and signs that header
+    value; the verifier uses it directly and never rehashes the body. UNSIGNED
+    and STREAMING payloads put sentinel values there too. So the body is only
+    required to compute the fallback hash when the header is absent -- buffering
+    it otherwise just pins the whole part in memory (the ES-snapshot OOM).
     """
-    content_sha = headers.get("x-amz-content-sha256", "")
-    if content_sha == UNSIGNED_PAYLOAD or content_sha.startswith(STREAMING_PAYLOAD_PREFIX):
-        return False
-
-    content_length = headers.get("content-length", "0")
-    try:
-        if int(content_length) > max_size:
-            return False
-    except ValueError:
-        pass
-
-    return True
+    return headers.get("x-amz-content-sha256", "") == ""
 
 
 async def handle_proxy_request(
@@ -190,9 +181,7 @@ async def _handle_proxy_request_impl(
     headers = {k.lower(): v for k, v in request.headers.items()}
     query = parse_qs(str(request.url.query), keep_blank_values=True)
 
-    needs_body = request.method in ("PUT", "POST") and _needs_body_for_signature(
-        headers, crypto.STREAMING_THRESHOLD
-    )
+    needs_body = request.method in ("PUT", "POST") and _needs_body_for_signature(headers)
     content_length = headers.get("content-length", "0")
     body = await request.body() if needs_body else b""
     if needs_body and len(body) > 0:

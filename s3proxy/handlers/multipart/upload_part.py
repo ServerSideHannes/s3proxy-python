@@ -7,7 +7,7 @@ import hashlib
 import time
 from collections import deque
 from collections.abc import AsyncIterator
-from typing import NoReturn
+from typing import NamedTuple, NoReturn
 
 import structlog
 from botocore.exceptions import ClientError
@@ -30,6 +30,38 @@ logger: BoundLogger = structlog.get_logger(__name__)
 
 # Limit concurrent internal part uploads to bound memory usage
 MAX_PARALLEL_INTERNAL_UPLOADS = 2
+
+
+class _UploadClass(NamedTuple):
+    is_unsigned: bool
+    is_streaming_sig: bool
+    needs_chunked_decode: bool
+    is_large_signed: bool
+    use_framed: bool
+
+
+def classify_upload(content_sha: str, content_encoding: str, content_length: int) -> _UploadClass:
+    """Decide how an UploadPart body is read and encrypted.
+
+    Any signed, known-length, non-chunked body takes the framed O(frame)-memory
+    path: the verifier already authed it via the x-amz-content-sha256 header, so
+    we stream it frame-by-frame instead of buffering the whole part. Only
+    aws-chunked / streaming-signature bodies (length unknown up front) keep the
+    buffered path. Elasticsearch snapshots send 16MB *signed* parts that used to
+    buffer the full part -> OOM; they now stream. ``is_large_signed`` keeps its
+    name but now means "signed and known-length" (it gates late SHA256
+    verification and the direct stream source).
+    """
+    is_unsigned = content_sha == "UNSIGNED-PAYLOAD"
+    is_streaming_sig = content_sha.startswith("STREAMING-")
+    needs_chunked_decode = "aws-chunked" in content_encoding or is_streaming_sig
+    is_large_signed = not is_unsigned and not is_streaming_sig and content_length > 0
+    use_framed = (
+        (is_unsigned or is_large_signed) and not needs_chunked_decode and content_length > 0
+    )
+    return _UploadClass(
+        is_unsigned, is_streaming_sig, needs_chunked_decode, is_large_signed, use_framed
+    )
 
 
 class _PlaintextReader:
@@ -86,25 +118,19 @@ class UploadPartMixin(BaseHandler):
                 content_length_mb=f"{content_length / 1024 / 1024:.2f}MB",
             )
 
-            # Determine encoding type
-            is_unsigned = content_sha == "UNSIGNED-PAYLOAD"
-            is_streaming_sig = content_sha.startswith("STREAMING-")
-            needs_chunked_decode = "aws-chunked" in content_encoding or is_streaming_sig
-            is_large_signed = (
-                not is_unsigned
-                and not is_streaming_sig
-                and content_length > crypto.STREAMING_THRESHOLD
-            )
+            # Determine encoding type and upload path.
+            cls = classify_upload(content_sha, content_encoding, content_length)
+            is_unsigned = cls.is_unsigned
+            is_streaming_sig = cls.is_streaming_sig
+            needs_chunked_decode = cls.needs_chunked_decode
+            is_large_signed = cls.is_large_signed
+            use_framed = cls.use_framed
 
             # Smallest internal part that bounds memory while staying within the
             # per-client part-number allocation range (so we never collide and
             # never buffer more than necessary).
             internal_part_size = crypto.memory_bounded_part_size(content_length)
             estimated_parts = max(1, -(-content_length // internal_part_size))
-
-            use_framed = (
-                (is_unsigned or is_large_signed) and not needs_chunked_decode and content_length > 0
-            )
             logger.info(
                 "UPLOAD_PART_CONFIG",
                 bucket=bucket,
