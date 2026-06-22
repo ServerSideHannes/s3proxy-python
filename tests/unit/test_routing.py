@@ -42,45 +42,22 @@ class TestBucketOnlyPath:
 
 
 class TestNeedsBodyForSignature:
-    """Test body requirement for signature verification."""
-
-    MAX_SIZE = 16 * 1024 * 1024  # 16MB default
+    """Body is buffered for signature only when x-amz-content-sha256 is absent."""
 
     def test_unsigned_payload(self):
-        """Test UNSIGNED-PAYLOAD doesn't need body."""
-        headers = {"x-amz-content-sha256": "UNSIGNED-PAYLOAD"}
-        assert _needs_body_for_signature(headers, self.MAX_SIZE) is False
+        assert _needs_body_for_signature({"x-amz-content-sha256": "UNSIGNED-PAYLOAD"}) is False
 
     def test_streaming_payload(self):
-        """Test streaming payload doesn't need body."""
         headers = {"x-amz-content-sha256": "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"}
-        assert _needs_body_for_signature(headers, self.MAX_SIZE) is False
+        assert _needs_body_for_signature(headers) is False
 
-    def test_regular_payload(self):
-        """Test regular payload needs body."""
-        headers = {"x-amz-content-sha256": "abc123def456"}
-        assert _needs_body_for_signature(headers, self.MAX_SIZE) is True
+    def test_signed_payload_skips_body_regardless_of_size(self):
+        headers = {"x-amz-content-sha256": "abc123def456", "content-length": str(16 * 1024 * 1024)}
+        assert _needs_body_for_signature(headers) is False
 
-    def test_missing_header(self):
-        """Test missing header needs body."""
-        headers = {}
-        assert _needs_body_for_signature(headers, self.MAX_SIZE) is True
-
-    def test_large_content_length_skips_body(self):
-        """Test large content-length skips body buffering to avoid OOM."""
-        headers = {
-            "x-amz-content-sha256": "abc123def456",
-            "content-length": str(self.MAX_SIZE + 1),
-        }
-        assert _needs_body_for_signature(headers, self.MAX_SIZE) is False
-
-    def test_small_content_length_needs_body(self):
-        """Test small content-length still needs body."""
-        headers = {
-            "x-amz-content-sha256": "abc123def456",
-            "content-length": str(self.MAX_SIZE - 1),
-        }
-        assert _needs_body_for_signature(headers, self.MAX_SIZE) is True
+    def test_missing_header_needs_body(self):
+        assert _needs_body_for_signature({}) is True
+        assert _needs_body_for_signature({"x-amz-content-sha256": ""}) is True
 
 
 class TestQueryConstants:
