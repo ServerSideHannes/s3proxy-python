@@ -166,6 +166,28 @@ def memory_bounded_part_size(
     return -(-content_length // parts)  # ceil: even split, never exceeds `parts`
 
 
+def streaming_upload_peak(content_length: int) -> int:
+    """Peak memory the framed UploadPart path holds for one in-flight request.
+
+    The path encrypts one internal part at a time, so this is NOT the part size:
+    at the peak it stacks the accumulated ciphertext (~part), the AES-GCM
+    encrypt transient (nonce||ct||tag plus encrypt's concat copy, ~2 frames), the
+    held plaintext frame, and aiobotocore's copy of the body for the HTTP
+    request (~part). ``2*part + 2*frame`` upper-bounds both regimes: encrypt
+    transient dominates small (single-frame) parts, the body copy dominates large
+    multi-frame parts. Measured peaks (tracemalloc): 16MB part -> 24.5MB (bound
+    32MB), 512MB client part / 25.6MB internal -> 56.1MB (bound 67MB). Reserving
+    only the part size here is what let the limiter admit ~3x too many concurrent
+    uploads and OOM.
+    """
+    # ponytail: bound, not exact. Ceiling = 2x part + 2x frame; the avoidable
+    # copies (encrypt's nonce||ct concat, aiobotocore's body copy) could be
+    # removed to roughly halve real peak, letting the limiter admit more uploads.
+    part = memory_bounded_part_size(content_length)
+    frame = min(part, FRAME_PLAINTEXT_SIZE)
+    return 2 * part + 2 * frame
+
+
 @dataclass(slots=True)
 class EncryptedData:
     """Container for encrypted data and metadata."""

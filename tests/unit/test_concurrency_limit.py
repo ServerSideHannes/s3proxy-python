@@ -323,48 +323,51 @@ class TestMemoryConcurrencyModule:
         assert concurrency_module.get_active_memory() == 0
 
     def test_estimate_memory_footprint_put_small(self):
-        """PUT with small file should use content_length * 2."""
+        """Small PUT reserves the framed path's peak (streaming_upload_peak)."""
         import s3proxy.concurrency as concurrency_module
+        from s3proxy import crypto
 
-        # 1MB file → 2MB footprint
         footprint = concurrency_module.estimate_memory_footprint("PUT", 1 * 1024 * 1024)
-        assert footprint == 2 * 1024 * 1024
+        assert footprint == crypto.streaming_upload_peak(1 * 1024 * 1024)
 
     def test_estimate_memory_footprint_put_large(self):
-        """Large PUT reserves the real internal-part buffer the upload holds."""
+        """Large PUT reserves the framed path's real peak, above the part size."""
         import s3proxy.concurrency as concurrency_module
         from s3proxy import crypto
 
         for mb in (50, 100, 512, 1024):
             cl = mb * 1024 * 1024
             footprint = concurrency_module.estimate_memory_footprint("PUT", cl)
-            assert footprint == crypto.memory_bounded_part_size(cl)
+            assert footprint == crypto.streaming_upload_peak(cl)
+            assert footprint > crypto.memory_bounded_part_size(cl)
 
     def test_large_uploads_bounded_below_pod_memory(self):
-        """Regression for the barman OOM. Two linked invariants:
+        """Regression for the barman/ES OOM. Linked invariants:
         1. an internal part never expands beyond the per-client allocation range
-           (or part numbers collide) -- for ANY client part size, and
-        2. the reservation tracks the real buffer, so admitted x footprint never
-           exceeds the budget (limiter guarantee), and barman-scale parts admit
-           only ~2 concurrent (the old flat-16MB estimate admitted ~4 -> OOM).
+           (or part numbers collide) -- for ANY client part size,
+        2. the reservation is the framed path's real peak (> part size), so the
+           limiter can't under-count and admit too many uploads, and
+        3. total admitted memory never exceeds the budget (limiter guarantee).
         """
         import s3proxy.concurrency as concurrency_module
         from s3proxy import crypto
         from s3proxy.state import MAX_INTERNAL_PARTS_PER_CLIENT
 
-        budget = concurrency_module.get_memory_limit()
+        budget = concurrency_module.get_memory_limit()  # deployed 64MB
         for mb in (50, 128, 320, 512, 1024, 4096):
             cl = mb * 1024 * 1024
             part = crypto.memory_bounded_part_size(cl)
             internal_parts = -(-cl // part)
             assert internal_parts <= MAX_INTERNAL_PARTS_PER_CLIENT, "would collide part numbers"
             footprint = concurrency_module.estimate_memory_footprint("PUT", cl)
+            assert footprint > part, "reservation must exceed the bare part size"
             # limiter guarantee: total admitted memory never exceeds the budget
             assert (budget // footprint) * footprint <= budget
 
-        # barman-scale parts: bounded to ~2 concurrent on the default 64MB budget
-        footprint_512 = concurrency_module.estimate_memory_footprint("PUT", 512 * 1024 * 1024)
-        assert budget // footprint_512 <= 2
+        # The real workload is 16MB ES parts: honest reservation fits the 64MB
+        # budget with room for concurrency (the under-count admitted ~8 -> OOM).
+        es = concurrency_module.estimate_memory_footprint("PUT", 16 * 1024 * 1024)
+        assert es <= budget // 2
 
     def test_estimate_memory_footprint_get(self):
         """GET should always use fixed buffer size."""
