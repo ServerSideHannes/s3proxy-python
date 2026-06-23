@@ -9,7 +9,12 @@ data:
   S3PROXY_REGION: {{ .Values.s3.region | quote }}
   S3PROXY_IP: "0.0.0.0"
   S3PROXY_PORT: {{ .Values.server.port | quote }}
+  {{- if .Values.server.tls.existingSecret }}
+  S3PROXY_NO_TLS: "false"
+  S3PROXY_CERT_PATH: {{ .Values.server.certPath | quote }}
+  {{- else }}
   S3PROXY_NO_TLS: {{ .Values.server.noTls | quote }}
+  {{- end }}
   S3PROXY_MEMORY_LIMIT_MB: {{ .Values.performance.memoryLimitMb | quote }}
   {{- if .Values.redis.enabled }}
   S3PROXY_REDIS_URL: "redis://{{ .Chart.Name }}-redis:{{ .Values.redis.port }}/0"
@@ -21,4 +26,15 @@ data:
   {{- if .Values.dashboard.enabled }}
   S3PROXY_DASHBOARD_UI: "true"
   S3PROXY_DASHBOARD_PATH: {{ .Values.dashboard.path | quote }}
+  S3PROXY_DASHBOARD_PASSWORD_ENABLED: {{ .Values.dashboard.auth.password.enabled | quote }}
+  {{- if .Values.dashboard.auth.oidc.enabled }}
+  S3PROXY_DASHBOARD_OIDC_ENABLED: "true"
+  S3PROXY_DASHBOARD_OIDC_ISSUER: {{ .Values.dashboard.auth.oidc.issuer | quote }}
+  S3PROXY_DASHBOARD_OIDC_CLIENT_ID: {{ .Values.dashboard.auth.oidc.clientId | quote }}
+  S3PROXY_DASHBOARD_OIDC_REDIRECT_URL: {{ .Values.dashboard.auth.oidc.redirectUrl | quote }}
+  S3PROXY_DASHBOARD_OIDC_SCOPES: {{ .Values.dashboard.auth.oidc.scopes | quote }}
+  S3PROXY_DASHBOARD_OIDC_USERNAME_CLAIM: {{ .Values.dashboard.auth.oidc.usernameClaim | quote }}
+  S3PROXY_DASHBOARD_OIDC_ALLOWED_DOMAINS: {{ .Values.dashboard.auth.oidc.allowedDomains | quote }}
+  S3PROXY_DASHBOARD_OIDC_BUTTON_LABEL: {{ .Values.dashboard.auth.oidc.buttonLabel | quote }}
+  {{- end }}
   {{- end }}

@@ -127,9 +127,12 @@ A request signed by an access key with no configured KEK is rejected. Via Helm: 
 | `replicaCount` | `3` | Pod replicas |
 | `s3.host` | `s3.amazonaws.com` | S3 endpoint (AWS, MinIO, R2, etc.) |
 | `s3.region` | `us-east-1` | AWS region |
+| `server.tls.existingSecret` | `""` | Serve HTTPS from the pod using an existing `kubernetes.io/tls` Secret |
 | `secrets.credentials` | `[]` | AWS credentials, each `{accessKey, secretKey, kek}` |
 | `secrets.existingSecrets.enabled` | `false` | Use existing K8s secret |
 | `dashboard.enabled` | `false` | Enable the dashboard API + its separate UI deployment |
+| `dashboard.auth.password.enabled` | `true` | Username/password login (set `false` for SSO-only) |
+| `dashboard.auth.oidc.enabled` | `false` | OIDC single sign-on (JumpCloud, Okta, Google, Entra ID, ...) |
 | `redis.enabled` | `true` | Deploy the bundled single Redis pod (transient upload state) |
 | `frontproxy.enabled` | `false` | Bundled HAProxy for even load distribution (no external dependency) |
 | `ingress.enabled` | `false` | Expose S3 outside the cluster via Ingress (requires `frontproxy.enabled`) |

@@ -97,11 +97,19 @@ def create_lifespan(settings: Settings, credentials_store: dict[str, str]) -> As
         set_store(stats_store)  # used by the synchronous record_request path
         await stats_store.start()  # background flush loop (Redis store only; no-op for memory)
 
+        oidc_client = None
         if settings.dashboard_ui:
             from .dashboard.auth import RedisSessionStore
             from .state.redis import get_redis
 
             app.state.session_store = RedisSessionStore(get_redis())
+
+            if settings.dashboard_oidc_enabled:
+                from .dashboard.oidc import OIDCClient, OIDCStateStore
+
+                oidc_client = OIDCClient(settings)
+                app.state.oidc_client = oidc_client
+                app.state.oidc_state_store = OIDCStateStore(get_redis())
 
         # Create handler and verifier with properly initialized manager
         verifier = SigV4Verifier(credentials_store)
@@ -116,6 +124,8 @@ def create_lifespan(settings: Settings, credentials_store: dict[str, str]) -> As
 
         yield
 
+        if oidc_client is not None:
+            await oidc_client.aclose()
         await stats_store.aclose()  # flush buffered samples before Redis closes
         await close_redis()
         await close_http_client()

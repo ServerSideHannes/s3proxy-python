@@ -19,6 +19,20 @@ export const LOGIN_URL = `${base}/login`;
 export const LOGIN_ACTION = `${API}/login`;
 export const LOGOUT_URL = `${API}/logout`;
 export const STREAM_URL = `${API}/stream`;
+// SSO start endpoint (proxy redirects the browser to the IdP).
+export const OIDC_LOGIN_URL = `${API}/oidc/login`;
+
+export interface AuthModes {
+  password: boolean;
+  oidc: boolean;
+  oidc_label: string;
+}
+
+export async function fetchAuthModes(): Promise<AuthModes> {
+  const r = await fetch(`${API}/authmodes`, { credentials: 'same-origin' });
+  if (!r.ok) return { password: true, oidc: false, oidc_label: 'Sign in with SSO' };
+  return (await r.json()) as AuthModes;
+}
 
 class Unauthorized extends Error {}
 

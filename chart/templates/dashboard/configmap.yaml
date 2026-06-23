@@ -1,6 +1,7 @@
 {{- if and .Values.dashboard.enabled .Values.dashboard.frontend.enabled -}}
 {{- $base := .Values.dashboard.path | trimSuffix "/" -}}
-{{- $proxy := printf "http://%s.%s.svc.cluster.local:%v" .Chart.Name .Release.Namespace .Values.service.port -}}
+{{- $scheme := ternary "https" "http" (ne (.Values.server.tls.existingSecret | toString) "") -}}
+{{- $proxy := printf "%s://%s.%s.svc.cluster.local:%v" $scheme .Chart.Name .Release.Namespace .Values.service.port -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -25,6 +26,11 @@ data:
         location {{ $base }}/api/ {
             proxy_pass {{ $proxy }};
             proxy_http_version 1.1;
+            {{- if .Values.server.tls.existingSecret }}
+            # The proxy serves HTTPS with a cert for its external hostname, not
+            # the internal Service DNS name, so don't verify the upstream cert.
+            proxy_ssl_verify off;
+            {{- end }}
             proxy_set_header Host $host;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;

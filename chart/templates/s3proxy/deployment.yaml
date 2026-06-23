@@ -1,3 +1,4 @@
+{{- $podTls := .Values.server.tls.existingSecret -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -30,17 +31,21 @@ spec:
             - secretRef:
                 name: {{ printf "%s-secrets" .Chart.Name }}
           {{- end }}
-          {{- /* Dashboard creds need an explicit env block only when they are NOT already
-                 pulled in via the chart-secret envFrom above (i.e. an dashboard existingSecret
-                 is set, or the app uses an existing secret so envFrom never fires). */ -}}
-          {{- $dashboardFromChartSecret := and .Values.dashboard.enabled (not .Values.dashboard.existingSecret.name) (not .Values.secrets.existingSecrets.enabled) }}
-          {{- $dashboardNeedsEnv := and .Values.dashboard.enabled (not $dashboardFromChartSecret) }}
+          {{- /* The chart secret ({Chart.Name}-secrets) is auto-loaded via the envFrom
+                 secretRef above only when the app does NOT use an existing secret. Anything
+                 stored there (dashboard creds, OIDC client secret) needs an explicit env entry
+                 only when it is NOT pulled in that way. */ -}}
+          {{- $chartSecretMounted := not .Values.secrets.existingSecrets.enabled }}
+          {{- $dashboardNeedsEnv := and .Values.dashboard.enabled (or .Values.dashboard.existingSecret.name (not $chartSecretMounted)) }}
+          {{- $pwExplicit := and $dashboardNeedsEnv .Values.dashboard.auth.password.enabled }}
+          {{- $oidc := .Values.dashboard.auth.oidc }}
+          {{- $oidcExplicit := and .Values.dashboard.enabled $oidc.enabled (or $oidc.existingSecret.name (not $chartSecretMounted)) }}
           {{- /* Redis password is needed when the bundled Redis has auth on, or
                  external Redis is used with an existing secret. */ -}}
           {{- $redisAuth := and .Values.redis.enabled .Values.redis.auth.enabled }}
           {{- $extRedisAuth := and (not .Values.redis.enabled) .Values.externalRedis.existingSecret }}
           {{- /* Determine if we need env section */ -}}
-          {{- $needsEnv := or .Values.secrets.existingSecrets.enabled $dashboardNeedsEnv $redisAuth $extRedisAuth }}
+          {{- $needsEnv := or .Values.secrets.existingSecrets.enabled $pwExplicit $oidcExplicit $redisAuth $extRedisAuth }}
           {{- if $needsEnv }}
           env:
             {{- /* App secrets from existing secret */ -}}
@@ -52,7 +57,7 @@ spec:
                   key: {{ .Values.secrets.existingSecrets.keys.credentials }}
             {{- end }}
             {{- /* Dashboard credentials (when not pulled via the chart-secret envFrom) */ -}}
-            {{- if $dashboardNeedsEnv }}
+            {{- if $pwExplicit }}
             {{- $dashboardSecret := .Values.dashboard.existingSecret.name | default (printf "%s-secrets" .Chart.Name) }}
             - name: S3PROXY_DASHBOARD_USERNAME
               valueFrom:
@@ -64,6 +69,14 @@ spec:
                 secretKeyRef:
                   name: {{ $dashboardSecret }}
                   key: {{ .Values.dashboard.existingSecret.passwordKey }}
+            {{- end }}
+            {{- /* OIDC client secret (when not pulled via the chart-secret envFrom) */ -}}
+            {{- if $oidcExplicit }}
+            - name: S3PROXY_DASHBOARD_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $oidc.existingSecret.name | default (printf "%s-secrets" .Chart.Name) }}
+                  key: {{ if $oidc.existingSecret.name }}{{ $oidc.existingSecret.clientSecretKey }}{{ else }}S3PROXY_DASHBOARD_OIDC_CLIENT_SECRET{{ end }}
             {{- end }}
             {{- /* Redis password from the bundled Redis secret */ -}}
             {{- if $redisAuth }}
@@ -81,12 +94,21 @@ spec:
                   key: {{ .Values.externalRedis.passwordKey | default "redis-password" }}
             {{- end }}
           {{- end }}
+          {{- if $podTls }}
+          volumeMounts:
+            - name: tls
+              mountPath: {{ .Values.server.certPath }}
+              readOnly: true
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           startupProbe:
             httpGet:
               path: /readyz
               port: http
+              {{- if $podTls }}
+              scheme: HTTPS
+              {{- end }}
             initialDelaySeconds: 2
             periodSeconds: 2
             timeoutSeconds: 3
@@ -95,6 +117,9 @@ spec:
             httpGet:
               path: /healthz
               port: http
+              {{- if $podTls }}
+              scheme: HTTPS
+              {{- end }}
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 5
@@ -103,6 +128,9 @@ spec:
             httpGet:
               path: /readyz
               port: http
+              {{- if $podTls }}
+              scheme: HTTPS
+              {{- end }}
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
@@ -112,6 +140,17 @@ spec:
             runAsUser: 1000
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
+      {{- if $podTls }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ $podTls }}
+            items:
+              - key: tls.crt
+                path: s3proxy.crt
+              - key: tls.key
+                path: s3proxy.key
+      {{- end }}
       securityContext:
         fsGroup: 1000
       terminationGracePeriodSeconds: 30
