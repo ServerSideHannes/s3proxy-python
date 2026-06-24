@@ -20,6 +20,9 @@ from .base import BaseHandler
 
 logger: BoundLogger = structlog.get_logger()
 
+# Max concurrent HEAD requests when resolving plaintext sizes for a list page.
+LIST_HEAD_CONCURRENCY = 50
+
 
 def _strip_minio_cache_suffix(value: str | None) -> str | None:
     """Strip MinIO cache metadata suffix from marker/token values.
@@ -170,28 +173,32 @@ class BucketHandlerMixin(BaseHandler):
         )
 
     async def _process_list_objects(self, client, bucket: str, contents: list[dict]) -> list[dict]:
-        objects = []
-        for obj in contents:
-            if self._is_internal_key(obj["Key"]):
-                continue
-            try:
-                head = await client.head_object(bucket, obj["Key"])
-                meta = head.get("Metadata", {})
-                size = self._get_plaintext_size(meta, obj.get("Size", 0))
-                etag = self._get_effective_etag(meta, obj.get("ETag", ""))
-            except Exception:
-                size, etag = obj.get("Size", 0), obj.get("ETag", "").strip('"')
+        # One HEAD per object is needed to recover the SSE plaintext size/etag.
+        # Run them concurrently (bounded) — sequential HEADs on a recursive list
+        # of up to max-keys objects stack into a multi-second stall that trips
+        # client timeouts. ponytail: fixed fan-out cap; raise LIST_HEAD_CONCURRENCY
+        # if backend HEAD latency dominates large pages.
+        listable = [obj for obj in contents if not self._is_internal_key(obj["Key"])]
+        sem = asyncio.Semaphore(LIST_HEAD_CONCURRENCY)
 
-            objects.append(
-                {
-                    "key": obj["Key"],
-                    "last_modified": obj["LastModified"].isoformat(),
-                    "etag": etag,
-                    "size": size,
-                    "storage_class": obj.get("StorageClass", "STANDARD"),
-                }
-            )
-        return objects
+        async def resolve(obj: dict) -> dict:
+            async with sem:
+                try:
+                    head = await client.head_object(bucket, obj["Key"])
+                    meta = head.get("Metadata", {})
+                    size = self._get_plaintext_size(meta, obj.get("Size", 0))
+                    etag = self._get_effective_etag(meta, obj.get("ETag", ""))
+                except Exception:
+                    size, etag = obj.get("Size", 0), obj.get("ETag", "").strip('"')
+            return {
+                "key": obj["Key"],
+                "last_modified": obj["LastModified"].isoformat(),
+                "etag": etag,
+                "size": size,
+                "storage_class": obj.get("StorageClass", "STANDARD"),
+            }
+
+        return await asyncio.gather(*[resolve(obj) for obj in listable])
 
     async def handle_create_bucket(self, request: Request, creds: S3Credentials) -> Response:
         bucket = self._parse_bucket(request.url.path)
