@@ -3,59 +3,18 @@
 Sequential HEADs on a recursive list stack into a client-timeout-tripping stall.
 This proves: HEADs run concurrently, output order matches input order, internal
 keys are skipped, and a failing HEAD falls back to the listed size/etag.
-
-The repo's package __init__ chain currently pulls in modules with pre-existing
-Py2 `except A, B:` syntax (utils.py, dashboard/*) that won't import under Py3,
-so we load buckets.py directly with stubbed siblings to exercise the real code.
 """
 
 import asyncio
 import datetime as dt
-import importlib.util
-import sys
-import types
-from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[2]
+from s3proxy.handlers.buckets import LIST_HEAD_CONCURRENCY, BucketHandlerMixin
 
-
-def _load_buckets():
-    def stub(name, **attrs):
-        m = types.ModuleType(name)
-        for k, v in attrs.items():
-            setattr(m, k, v)
-        sys.modules[name] = m
-        return m
-
-    stub("s3proxy")
-    stub("s3proxy.handlers")
-    stub("s3proxy.xml_responses")
-    stub("s3proxy.client", S3Credentials=object)
-    stub("s3proxy.errors", S3Error=type("S3Error", (Exception,), {}))
-    stub(
-        "s3proxy.state",
-        INTERNAL_PREFIX="s3proxy-internal/",
-        META_SUFFIX_LEGACY=".s3proxy-meta",
-        delete_multipart_metadata=lambda *a, **k: None,
-    )
-    stub("s3proxy.xml_utils", find_element=lambda *a, **k: None, find_elements=lambda *a, **k: [])
-    stub("s3proxy.handlers.base", BaseHandler=object)
-
-    spec = importlib.util.spec_from_file_location(
-        "s3proxy.handlers.buckets", REPO / "s3proxy" / "handlers" / "buckets.py"
-    )
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["s3proxy.handlers.buckets"] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-buckets = _load_buckets()
 INTERNAL_PREFIX = "s3proxy-internal/"
 
 
 class FakeHandler:
-    _process_list_objects = buckets.BucketHandlerMixin._process_list_objects
+    _process_list_objects = BucketHandlerMixin._process_list_objects
 
     def __init__(self):
         self.inflight = 0
@@ -120,7 +79,7 @@ def test_parallel_order_and_fallback():
     assert result[1]["etag"] == "raw-etag"
     # HEADs actually ran concurrently (would be 1 if sequential), and stayed bounded.
     assert handler.max_inflight > 1
-    assert handler.max_inflight <= buckets.LIST_HEAD_CONCURRENCY
+    assert handler.max_inflight <= LIST_HEAD_CONCURRENCY
 
 
 if __name__ == "__main__":
