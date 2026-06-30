@@ -10,7 +10,7 @@ import structlog
 from fastapi import Request, Response
 from structlog.stdlib import BoundLogger
 
-from ... import crypto, xml_responses
+from ... import concurrency, crypto, xml_responses
 from ...client import S3Client, S3Credentials
 from ...errors import S3Error
 from ...state import (
@@ -214,6 +214,45 @@ class CopyPartMixin(BaseHandler):
         src_metadata: dict,
         plaintext_size: int,
     ) -> Response:
+        # UploadPartCopy carries no request body, so the request-level limiter
+        # reserved ~nothing -- but this streams the source through decrypt +
+        # re-encrypt. Reserve the pipeline peak so concurrent copies are bounded
+        # (a dedup flood otherwise runs unbounded and OOMs the pod).
+        async with concurrency.reserve_memory(crypto.copy_pipeline_peak(plaintext_size)):
+            return await self._streaming_copy_part_inner(
+                client,
+                bucket,
+                key,
+                upload_id,
+                part_num,
+                state,
+                src_bucket,
+                src_key,
+                copy_source_range,
+                src_wrapped_dek,
+                src_multipart_meta,
+                head_resp,
+                src_metadata,
+                plaintext_size,
+            )
+
+    async def _streaming_copy_part_inner(
+        self,
+        client: S3Client,
+        bucket: str,
+        key: str,
+        upload_id: str,
+        part_num: int,
+        state: MultipartUploadState,
+        src_bucket: str,
+        src_key: str,
+        copy_source_range: str | None,
+        src_wrapped_dek: str | None,
+        src_multipart_meta,
+        head_resp: dict,
+        src_metadata: dict,
+        plaintext_size: int,
+    ) -> Response:
         """Stream-decrypt the source and encrypt+upload each chunk as an internal S3 part."""
         chunk_size = crypto.calculate_optimal_part_size(plaintext_size)
         estimated_parts = max(1, math.ceil(plaintext_size / chunk_size))
@@ -321,8 +360,11 @@ class CopyPartMixin(BaseHandler):
         else:
             resp = await client.get_object(src_bucket, src_key, range_header=copy_source_range)
             async with resp["Body"] as body:
+                # resp["Body"] enters as an aiohttp ClientResponse, whose read()
+                # takes no size arg; stream via its StreamReader in bounded chunks
+                # (body.read(n) raised TypeError and 500'd every passthrough copy).
                 while True:
-                    chunk = await body.read(crypto.MAX_BUFFER_SIZE)
+                    chunk = await body.content.read(crypto.MAX_BUFFER_SIZE)
                     if not chunk:
                         break
                     yield chunk

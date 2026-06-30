@@ -197,6 +197,22 @@ async def try_acquire_memory(bytes_needed: int) -> int:
     return await _default.try_acquire(bytes_needed)
 
 
+@contextlib.asynccontextmanager
+async def reserve_memory(bytes_needed: int):
+    """Reserve memory for the duration of a block, releasing on exit.
+
+    For operations whose real peak isn't reflected by the request body size
+    (e.g. server-side copies, which decrypt+re-encrypt the source), so they get
+    gated by the limiter like uploads instead of running unbounded.
+    """
+    reserved = await _default.try_acquire(bytes_needed)
+    try:
+        yield
+    finally:
+        if reserved > 0:
+            await _default.release(reserved)
+
+
 async def release_memory(bytes_reserved: int) -> None:
     await _default.release(bytes_reserved)
 

@@ -110,6 +110,13 @@ class MockS3Response:
     def __init__(self, data: bytes):
         self._buf = bytearray(data)
 
+    @property
+    def content(self):
+        # Real aiohttp exposes the StreamReader as resp.content; the streaming
+        # copy path reads it in bounded chunks via content.read(n). The buffer
+        # is shared, so chunked reads consume the same bytes as read().
+        return self
+
     async def read(self, n: int = -1) -> bytes:
         """Read response body, optionally limited to n bytes."""
         if n == -1:

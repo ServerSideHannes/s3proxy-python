@@ -11,7 +11,7 @@ from botocore.exceptions import ClientError
 from fastapi import Request, Response
 from structlog.stdlib import BoundLogger
 
-from ... import crypto, xml_responses
+from ... import concurrency, crypto, xml_responses
 from ...client import S3Client, S3Credentials
 from ...errors import S3Error
 from ...state import (
@@ -263,6 +263,44 @@ class MiscObjectMixin(BaseHandler):
         )
 
     async def _copy_encrypted(
+        self,
+        client: S3Client,
+        bucket: str,
+        key: str,
+        content_type: str | None,
+        src_bucket: str,
+        src_key: str,
+        head_resp: dict,
+        src_wrapped_dek: str | None,
+        src_multipart_meta,
+        metadata_directive: str,
+        new_metadata: dict[str, str] | None,
+    ) -> Response:
+        # Copies decrypt+re-encrypt the source in memory but carry no request
+        # body, so the request-level limiter reserved ~nothing. Reserve the copy
+        # pipeline peak here so concurrent copies are bounded (a dedup flood would
+        # otherwise run unbounded and OOM the pod).
+        if src_multipart_meta:
+            pt_size = src_multipart_meta.total_plaintext_size
+        else:
+            _s = head_resp.get("Metadata", {}).get("plaintext-size")
+            pt_size = int(_s) if _s else crypto.plaintext_size(head_resp.get("ContentLength", 0))
+        async with concurrency.reserve_memory(crypto.copy_pipeline_peak(pt_size)):
+            return await self._copy_encrypted_inner(
+                client,
+                bucket,
+                key,
+                content_type,
+                src_bucket,
+                src_key,
+                head_resp,
+                src_wrapped_dek,
+                src_multipart_meta,
+                metadata_directive,
+                new_metadata,
+            )
+
+    async def _copy_encrypted_inner(
         self,
         client: S3Client,
         bucket: str,
