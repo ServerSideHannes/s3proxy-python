@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import os
+import signal
 import sys
 import time
+import tracemalloc
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -65,6 +69,52 @@ def _silence_health_probe_access_logs() -> None:
         access_logger.addFilter(_health_probe_filter)
 
 
+def _dump_tracemalloc(limit: int = 20) -> None:
+    """Log the top live Python allocations by size, with location.
+
+    Diagnostic only (gated by S3PROXY_TRACEMALLOC). Lets us see, under real
+    backup load, exactly which call sites hold the resident memory that drives
+    the OOM -- instead of guessing.
+    """
+    if not tracemalloc.is_tracing():
+        return
+    snap = tracemalloc.take_snapshot()
+    stats = snap.statistics("lineno")
+    total_mb = sum(s.size for s in stats) / 1024 / 1024
+    logger.warning("TRACEMALLOC_SNAPSHOT", total_tracked_mb=round(total_mb, 1), shown=limit)
+    for i, st in enumerate(stats[:limit], 1):
+        fr = st.traceback[0]
+        logger.warning(
+            "TRACEMALLOC_TOP",
+            rank=i,
+            size_mb=round(st.size / 1024 / 1024, 2),
+            count=st.count,
+            loc=f"{fr.filename}:{fr.lineno}",
+        )
+
+
+async def _periodic_tracemalloc(interval: int) -> None:
+    while True:
+        await asyncio.sleep(interval)
+        _dump_tracemalloc()
+
+
+def _maybe_start_tracemalloc() -> asyncio.Task | None:
+    """Enable tracemalloc + periodic/SIGUSR1 heap dumps when S3PROXY_TRACEMALLOC is set.
+
+    No-op (zero overhead) when unset. Used for one-pod, time-boxed profiling.
+    """
+    if not os.environ.get("S3PROXY_TRACEMALLOC"):
+        return None
+    frames = int(os.environ.get("S3PROXY_TRACEMALLOC_FRAMES", "4"))
+    interval = int(os.environ.get("S3PROXY_TRACEMALLOC_INTERVAL", "15"))
+    tracemalloc.start(frames)
+    logger.warning("TRACEMALLOC_ENABLED", frames=frames, interval_sec=interval)
+    with contextlib.suppress(NotImplementedError, RuntimeError):
+        asyncio.get_running_loop().add_signal_handler(signal.SIGUSR1, _dump_tracemalloc)
+    return asyncio.create_task(_periodic_tracemalloc(interval))
+
+
 def create_lifespan(settings: Settings, credentials_store: dict[str, str]) -> AsyncIterator[None]:
     """Create lifespan context manager for FastAPI app.
 
@@ -114,8 +164,12 @@ def create_lifespan(settings: Settings, credentials_store: dict[str, str]) -> As
         app.state.stats_store = stats_store
         app.state.start_time = time.monotonic()
 
+        tracemalloc_task = _maybe_start_tracemalloc()
+
         yield
 
+        if tracemalloc_task is not None:
+            tracemalloc_task.cancel()
         await stats_store.aclose()  # flush buffered samples before Redis closes
         await close_redis()
         await close_http_client()

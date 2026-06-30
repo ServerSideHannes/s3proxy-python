@@ -256,3 +256,6 @@ podDisruptionBudget:
   enabled: true
   minAvailable: 1
   # maxUnavailable: 1  # Alternative to minAvailable
+# Arbitrary extra S3PROXY_* env, injected via the config ConfigMap (envFrom).
+# Used for time-boxed diagnostics, e.g. extraConfig: { S3PROXY_TRACEMALLOC: "1" }.
+extraConfig: {}
