@@ -561,7 +561,7 @@ class RedisStatsStore(StatsStore):
         for k, v in raw.items():
             try:
                 points.append((int(k), float(v)))
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 continue
         return bucket_series(points, window, bucket)
 
@@ -642,7 +642,7 @@ def _hfloat(h: dict, field: bytes) -> float:
         return 0.0
     try:
         return float(v)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return 0.0
 
 
@@ -652,7 +652,7 @@ def _decode_float_map(h: dict) -> dict[str, float]:
         key = k.decode() if isinstance(k, bytes) else str(k)
         try:
             out[key] = float(v)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             continue
     return out
 
@@ -665,7 +665,7 @@ def _loads_sample(raw: bytes) -> RequestSample | None:
     try:
         d = orjson.loads(raw)
         return RequestSample(**d)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
 
 

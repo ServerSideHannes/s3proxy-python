@@ -63,7 +63,7 @@ def test_parallel_order_and_fallback():
     contents = [
         _obj("a"),
         _obj(f"{INTERNAL_PREFIX}skip-me"),  # internal -> dropped
-        _obj("b", size=42),                  # HEAD fails -> fallback to listed size/etag
+        _obj("b", size=42),  # HEAD fails -> fallback to listed size/etag
         _obj("c"),
     ]
 
