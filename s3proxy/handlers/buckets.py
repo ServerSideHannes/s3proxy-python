@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import uuid
 import xml.etree.ElementTree as ET
+from datetime import UTC, datetime
 from urllib.parse import parse_qs
 
 import structlog
@@ -22,6 +23,19 @@ logger: BoundLogger = structlog.get_logger()
 
 # Max concurrent HEAD requests when resolving plaintext sizes for a list page.
 LIST_HEAD_CONCURRENCY = 50
+
+
+def _s3_timestamp(value: object) -> str:
+    """Format a listing timestamp as S3 does: RFC3339 in UTC with a 'Z' suffix.
+
+    datetime.isoformat() emits a '+00:00' offset, which strict S3 clients reject
+    — scylla-manager's rclone 1.51.0 fails the whole listing with "cannot parse
+    '+00:00' as 'Z'". Emit millisecond precision + 'Z' to match real S3.
+    """
+    if not isinstance(value, datetime):
+        return str(value)
+    d = value.astimezone(UTC)
+    return f"{d:%Y-%m-%dT%H:%M:%S}.{d.microsecond // 1000:03d}Z"
 
 
 def _strip_minio_cache_suffix(value: str | None) -> str | None:
@@ -207,7 +221,7 @@ class BucketHandlerMixin(BaseHandler):
                     size, etag = obj.get("Size", 0), obj.get("ETag", "").strip('"')
             return {
                 "key": obj["Key"],
-                "last_modified": obj["LastModified"].isoformat(),
+                "last_modified": _s3_timestamp(obj["LastModified"]),
                 "etag": etag,
                 "size": size,
                 "storage_class": obj.get("StorageClass", "STANDARD"),
@@ -297,9 +311,7 @@ class BucketHandlerMixin(BaseHandler):
                     {
                         "Key": key,
                         "UploadId": upload.get("UploadId", ""),
-                        "Initiated": upload.get("Initiated", "").isoformat()
-                        if hasattr(upload.get("Initiated"), "isoformat")
-                        else str(upload.get("Initiated", "")),
+                        "Initiated": _s3_timestamp(upload.get("Initiated", "")),
                         "StorageClass": upload.get("StorageClass", "STANDARD"),
                     }
                 )
