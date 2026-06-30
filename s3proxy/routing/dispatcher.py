@@ -19,6 +19,23 @@ QUERY_LOCATION = "location"
 QUERY_DELETE = "delete"
 QUERY_TAGGING = "tagging"
 
+# Query keys that identify a ListObjects request (V1 or V2) rather than a bucket
+# sub-resource (acl, cors, versioning, ...). A GET whose query is only these is a
+# listing and must go through the list handler, not raw forward_request.
+LIST_QUERY_KEYS = frozenset(
+    {
+        "list-type",
+        "prefix",
+        "delimiter",
+        "marker",
+        "max-keys",
+        "encoding-type",
+        "fetch-owner",
+        "start-after",
+        "continuation-token",
+    }
+)
+
 # Header constants
 HEADER_COPY_SOURCE = "x-amz-copy-source"
 
@@ -138,6 +155,14 @@ class RequestDispatcher:
 
         skip_queries = (QUERY_LIST_TYPE, QUERY_DELETE, QUERY_UPLOADS, QUERY_LOCATION)
         if query and not any(q in query for q in skip_queries):
+            # A GET whose query is only listing params is ListObjects V1 (it lacks
+            # list-type=2), not a bucket sub-resource. Fall through to the list
+            # handler, which serves it via the backend's V2 API — raw-forwarding it
+            # sends V1 to the backend, which Hetzner & co. reject with HTTP 400.
+            if method == METHOD_GET and set(parse_qs(query, keep_blank_values=True)) <= (
+                LIST_QUERY_KEYS
+            ):
+                return None
             return await self.handler.forward_request(request, creds)
 
         if not query:
