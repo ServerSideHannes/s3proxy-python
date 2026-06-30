@@ -20,6 +20,7 @@ data:
       timeout connect {{ .Values.frontproxy.timeouts.connect }}
       timeout client {{ .Values.frontproxy.timeouts.client }}
       timeout server {{ .Values.frontproxy.timeouts.server }}
+      timeout queue {{ .Values.frontproxy.timeouts.queue }}
 
     frontend http_in
       bind *:{{ .Values.frontproxy.containerPort }}
@@ -32,7 +33,10 @@ data:
       # Use the FQDN: HAProxy's resolver does NOT apply /etc/resolv.conf search
       # domains, so a bare service name NXDOMAINs and leaves 0 backends (503 <NOSRV>).
       option redispatch
-      server-template pod 1-{{ int .Values.replicaCount }} {{ .Chart.Name }}-headless.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }} check resolvers k8s init-addr none
+      # maxconn per pod bounds in-flight requests on each backend so uvicorn can't
+      # accumulate request-body buffers and OOM; excess connections queue (timeout
+      # queue) and redispatch instead of overrunning a pod.
+      server-template pod 1-{{ int .Values.replicaCount }} {{ .Chart.Name }}-headless.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }} check resolvers k8s init-addr none maxconn {{ int .Values.frontproxy.maxConnPerPod }}
 
     resolvers k8s
       parse-resolv-conf

@@ -209,6 +209,15 @@ frontproxy:
     client: "1h"
     server: "1h"
     connect: "10s"
+    # How long a connection waits in the per-pod queue for a free slot before 503.
+    queue: "30s"
+  # Max concurrent connections HAProxy sends to EACH backend pod. This is the
+  # real bound on a pod's memory: uvicorn buffers each in-flight request body off
+  # the socket before our app's limiter runs, so without a per-pod cap a backup
+  # flood piles up bodies and OOMs the pod. Excess connections queue here (up to
+  # timeouts.queue) and redispatch to a less-loaded pod instead of hard-failing.
+  # ~40 x worst-case part size stays well under the pod memory limit.
+  maxConnPerPod: 40
   resources:
     requests:
       cpu: "50m"
