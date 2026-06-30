@@ -188,6 +188,22 @@ def streaming_upload_peak(content_length: int) -> int:
     return 2 * part + 2 * frame
 
 
+def copy_pipeline_peak(plaintext_size: int) -> int:
+    """Peak memory a server-side copy holds while decrypting + re-encrypting.
+
+    A copy request has no body, so the request-level memory limiter reserves
+    ~nothing for it -- yet the copy reads the source, decrypts it and re-encrypts
+    it. Large copies stream in MAX_BUFFER_SIZE chunks, so their peak is the
+    pipeline (source chunk + plaintext buffer + dest ciphertext), independent of
+    object size; small copies buffer the whole object (~3x). Reserving this lets
+    the limiter BOUND concurrent copies instead of admitting an unbounded dedup
+    flood that OOMs the pod.
+    """
+    if plaintext_size > STREAMING_THRESHOLD:
+        return 4 * MAX_BUFFER_SIZE
+    return max(MAX_BUFFER_SIZE, 3 * plaintext_size)
+
+
 @dataclass(slots=True)
 class EncryptedData:
     """Container for encrypted data and metadata."""
