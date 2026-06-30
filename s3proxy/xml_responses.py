@@ -70,14 +70,18 @@ def list_objects(
         <StorageClass>{obj.get("storage_class", "STANDARD")}</StorageClass>{owner_xml}
     </Contents>"""
 
+    # V2 continuation tokens are opaque cursors, not keys. Per the S3 spec only
+    # Key/Prefix/Delimiter/StartAfter are URL-encoded under encoding-type=url, and
+    # clients (botocore) never URL-decode the continuation token. URL-encoding it
+    # corrupts the round-trip (e.g. '/' -> '%2F'), the backend can't advance, and
+    # the same token repeats -> botocore aborts with "same next token received
+    # twice". XML-escape only, regardless of encoding_type.
     next_token_xml = (
-        f"<NextContinuationToken>{_encode_key(next_token, encoding_type)}</NextContinuationToken>"
-        if next_token
-        else ""
+        f"<NextContinuationToken>{escape(next_token)}</NextContinuationToken>" if next_token else ""
     )
 
     continuation_token_xml = (
-        f"<ContinuationToken>{_encode_key(continuation_token, encoding_type)}</ContinuationToken>"
+        f"<ContinuationToken>{escape(continuation_token)}</ContinuationToken>"
         if continuation_token is not None
         else ""
     )
