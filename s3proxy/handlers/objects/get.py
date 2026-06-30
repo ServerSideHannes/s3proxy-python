@@ -470,13 +470,12 @@ class GetObjectMixin(BaseHandler):
         frame_ciphertext_size: int,
         dek: bytes,
     ) -> bytes:
+        # No per-frame memory reservation here: concurrent streaming GETs are bounded
+        # at admission (the request-level reservation is held for the whole stream
+        # lifetime), so the working set is O(concurrent streams), not O(frames). A
+        # nested per-frame acquire would deadlock against that held reservation.
         expected_size = frame_ciphertext_size
-        additional = max(0, expected_size * 2 - MAX_BUFFER_SIZE)
-        extra_reserved = 0
         try:
-            if additional > 0:
-                extra_reserved = await concurrency.try_acquire_memory(additional)
-
             resp = await client.get_object(bucket, key, f"bytes={ct_start}-{ct_end}")
             async with resp["Body"] as body:
                 ciphertext = await body.read()
@@ -515,9 +514,6 @@ class GetObjectMixin(BaseHandler):
                     f"range {ct_start}-{ct_end} invalid"
                 ) from e
             raise
-        finally:
-            if extra_reserved > 0:
-                await concurrency.release_memory(extra_reserved)
 
     async def _fetch_and_decrypt_part(
         self,
@@ -544,21 +540,13 @@ class GetObjectMixin(BaseHandler):
 
         self._validate_ciphertext_range(bucket, key, part_num, 0, ct_end, actual_size)
 
-        part_size = part_meta.ciphertext_size
-        additional = max(0, part_size * 2 - MAX_BUFFER_SIZE)
-        extra_reserved = 0
-        try:
-            if additional > 0:
-                extra_reserved = await concurrency.try_acquire_memory(additional)
-
-            resp = await client.get_object(bucket, key, f"bytes={ct_start}-{ct_end}")
-            async with resp["Body"] as body:
-                ciphertext = await body.read()
-            decrypted = crypto.decrypt(ciphertext, dek)
-            return decrypted[off_start : off_end + 1]
-        finally:
-            if extra_reserved > 0:
-                await concurrency.release_memory(extra_reserved)
+        # See _fetch_and_decrypt_frame: stream concurrency is bounded at admission,
+        # so no per-frame reservation is taken here.
+        resp = await client.get_object(bucket, key, f"bytes={ct_start}-{ct_end}")
+        async with resp["Body"] as body:
+            ciphertext = await body.read()
+        decrypted = crypto.decrypt(ciphertext, dek)
+        return decrypted[off_start : off_end + 1]
 
     def _build_response_headers(self, resp: dict, last_modified: str | None) -> dict[str, str]:
         return self._build_headers(

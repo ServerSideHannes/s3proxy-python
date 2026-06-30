@@ -9,7 +9,7 @@ from urllib.parse import parse_qs
 import structlog
 from botocore.exceptions import ClientError
 from fastapi import HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from structlog.stdlib import BoundLogger
 
 from . import concurrency
@@ -45,6 +45,17 @@ def _is_dashboard_path(request: Request, path: str) -> bool:
         return False
     prefix = prefix.rstrip("/")
     return path == prefix or path.startswith(prefix + "/")
+
+
+async def _release_after_stream(iterator, reserved: int):
+    """Wrap a streaming body so its memory reservation is released only after the
+    stream is fully sent (or the client disconnects), not when the handler returns.
+    """
+    try:
+        async for chunk in iterator:
+            yield chunk
+    finally:
+        await concurrency.release_memory(reserved)
 
 
 def _needs_body_for_signature(headers: dict[str, str]) -> bool:
@@ -127,6 +138,16 @@ async def handle_proxy_request(
         response = await _handle_proxy_request_impl(request, handler, verifier)
         if response is not None:
             status_code = response.status_code
+        # A StreamingResponse sends its body AFTER this handler returns. Releasing
+        # the reservation in the finally below frees it before a byte is sent,
+        # leaving the stream ungoverned -- and each concurrent stream holds ~one
+        # decrypted frame in the transport send buffer, so a flood of concurrent
+        # GETs accumulates frames and OOMs the pod while the limiter reads ~budget.
+        # Hold the reservation for the whole stream lifetime so the limiter bounds
+        # how many streaming GETs run at once (admission control).
+        if reserved_memory > 0 and isinstance(response, StreamingResponse):
+            response.body_iterator = _release_after_stream(response.body_iterator, reserved_memory)
+            reserved_memory = 0
         return response
     except HTTPException as e:
         status_code = e.status_code
