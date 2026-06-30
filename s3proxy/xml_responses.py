@@ -77,9 +77,7 @@ def list_objects(
     # the same token repeats -> botocore aborts with "same next token received
     # twice". XML-escape only, regardless of encoding_type.
     next_token_xml = (
-        f"<NextContinuationToken>{escape(next_token)}</NextContinuationToken>"
-        if next_token
-        else ""
+        f"<NextContinuationToken>{escape(next_token)}</NextContinuationToken>" if next_token else ""
     )
 
     continuation_token_xml = (
