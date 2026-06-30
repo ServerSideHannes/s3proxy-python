@@ -123,8 +123,17 @@ class BucketHandlerMixin(BaseHandler):
             max_keys = int(query.get("max-keys", ["1000"])[0])
             encoding_type = query.get("encoding-type", [""])[0] or None
 
+            # Serve the client's legacy V1 ListObjects via the backend's V2 API.
+            # Hetzner (and other modern S3 backends) only implement ListObjectsV2 and
+            # reject V1 with HTTP 400, which breaks any V1 client (scylla-manager's
+            # rclone 1.51.0, barman-cloud-backup-delete). V1 marker pagination is
+            # stateless (marker == last key returned), which maps exactly onto V2
+            # StartAfter, so the translation is lossless for the recursive (no
+            # delimiter) listings these clients use.
             try:
-                resp = await client.list_objects_v1(bucket, prefix, marker, delimiter, max_keys)
+                resp = await client.list_objects_v2(
+                    bucket, prefix, None, max_keys, delimiter, marker
+                )
             except ClientError as e:
                 self._raise_bucket_error(e, bucket)
 
@@ -140,14 +149,20 @@ class BucketHandlerMixin(BaseHandler):
                 if stripped is not None:
                     common_prefixes.append(stripped)
 
-            # V1 uses NextMarker (or last key if truncated and no delimiter)
-            next_marker = _strip_minio_cache_suffix(resp.get("NextMarker"))
-            if resp.get("IsTruncated") and not next_marker:
-                # Fallback: use last object key or last common prefix
-                if objects:
-                    next_marker = objects[-1]["key"]
-                elif common_prefixes:
-                    next_marker = common_prefixes[-1]
+            # V1 resumes via marker == last key returned. Synthesize NextMarker from
+            # the largest RAW backend key/prefix on this page (not the filtered list:
+            # a page may be all-internal keys yet still truncated) so the next
+            # marker -> StartAfter resumes after everything returned.
+            # ponytail: O(page) max over the page. A single delimiter-level prefix
+            # with >max_keys *distinct* sub-prefixes can re-emit one boundary prefix
+            # across pages (harmless, idempotent for these read-only catalog walks);
+            # upgrade path is a redis-backed marker->continuation-token map.
+            next_marker = None
+            if resp.get("IsTruncated"):
+                raw = [o["Key"] for o in resp.get("Contents", [])]
+                raw += [cp["Prefix"] for cp in resp.get("CommonPrefixes", [])]
+                if raw:
+                    next_marker = _strip_minio_cache_suffix(max(raw))
 
             return Response(
                 content=xml_responses.list_objects_v1(
