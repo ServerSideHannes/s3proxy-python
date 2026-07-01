@@ -22,7 +22,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from structlog.stdlib import BoundLogger
 
 from . import concurrency
-from .client import SigV4Verifier
+from .client import SigV4Verifier, close_cached_clients
 from .config import Settings
 from .errors import S3Error, get_s3_error_code
 from .handlers import S3ProxyHandler
@@ -200,6 +200,7 @@ def create_lifespan(settings: Settings, credentials_store: dict[str, str]) -> As
         await stats_store.aclose()  # flush buffered samples before Redis closes
         await close_redis()
         await close_http_client()
+        await close_cached_clients()
         logger.info("Shutting down")
 
     return lifespan

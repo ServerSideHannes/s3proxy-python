@@ -1,6 +1,6 @@
 """S3 client layer - credentials, verification, and API wrapper."""
 
-from .s3 import S3Client, get_shared_session
+from .s3 import S3Client, close_cached_clients, get_shared_session
 from .types import ParsedRequest, S3Credentials
 from .verifier import CLOCK_SKEW_TOLERANCE, SigV4Verifier, _derive_signing_key
 
@@ -11,5 +11,6 @@ __all__ = [
     "S3Credentials",
     "SigV4Verifier",
     "_derive_signing_key",
+    "close_cached_clients",
     "get_shared_session",
 ]

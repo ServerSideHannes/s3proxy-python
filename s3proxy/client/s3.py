@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -27,6 +29,33 @@ def get_shared_session() -> aioboto3.Session:
     if _shared_session is None:
         _shared_session = aioboto3.Session()
     return _shared_session
+
+
+# Long-lived aiobotocore clients, keyed by (endpoint, access_key, region). Creating
+# a client per request builds a fresh aiohttp connector + SSLContext that loads the
+# whole CA store each time -- large native (OpenSSL) allocations invisible to
+# tracemalloc, which pile up under concurrency and dominate RSS (memray: millions
+# of allocations in _create_connector / load_default_certs). aiobotocore clients
+# are pool-safe and meant to be reused, so we cache one per credential set and
+# keep it open for the app's lifetime (closed via close_cached_clients on shutdown).
+_client_cache: dict[tuple, tuple[Any, Any]] = {}
+_client_cache_lock: asyncio.Lock | None = None
+
+
+def _cache_lock() -> asyncio.Lock:
+    global _client_cache_lock
+    if _client_cache_lock is None:
+        _client_cache_lock = asyncio.Lock()
+    return _client_cache_lock
+
+
+async def close_cached_clients() -> None:
+    """Close all cached aiobotocore clients (call on app shutdown)."""
+    async with _cache_lock():
+        for ctx, _client in _client_cache.values():
+            with contextlib.suppress(Exception):
+                await ctx.__aexit__(None, None, None)
+        _client_cache.clear()
 
 
 def _add_optional_kwargs(kwargs: dict[str, Any], **optional: Any) -> None:
@@ -63,28 +92,41 @@ class S3Client:
         self._client_context = None
 
     async def __aenter__(self):
-        """Enter async context - create client from shared session."""
-        # Use shared session to avoid loading JSON service models repeatedly
-        # Each new session costs ~30-150MB for botocore service definitions
-        session = get_shared_session()
-        self._client_context = session.client(
-            "s3",
-            endpoint_url=self.settings.s3_endpoint,
-            config=self._config,
-            aws_access_key_id=self.credentials.access_key,
-            aws_secret_access_key=self.credentials.secret_key,
-            region_name=self.credentials.region,
-        )
-        self._cached_client = await self._client_context.__aenter__()
+        """Enter async context - reuse a long-lived client for these credentials."""
+        self._cached_client = await self._get_or_create_client()
         return self
 
+    async def _get_or_create_client(self):
+        key = (
+            self.settings.s3_endpoint,
+            self.credentials.access_key,
+            self.credentials.secret_key,
+            self.credentials.region,
+        )
+        cached = _client_cache.get(key)
+        if cached is not None:
+            return cached[1]
+        async with _cache_lock():
+            cached = _client_cache.get(key)  # double-checked under lock
+            if cached is not None:
+                return cached[1]
+            # Shared session avoids reloading botocore JSON models per client.
+            ctx = get_shared_session().client(
+                "s3",
+                endpoint_url=self.settings.s3_endpoint,
+                config=self._config,
+                aws_access_key_id=self.credentials.access_key,
+                aws_secret_access_key=self.credentials.secret_key,
+                region_name=self.credentials.region,
+            )
+            client = await ctx.__aenter__()
+            _client_cache[key] = (ctx, client)
+            return client
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Exit async context - clean up client."""
-        if self._client_context is not None:
-            await self._client_context.__aexit__(exc_type, exc_val, exc_tb)
-            self._cached_client = None
-            self._client_context = None
-        logger.debug("Cleaned up S3 client context")
+        """Exit - the client is cached and shared, so it stays open (closed on
+        app shutdown via close_cached_clients). Nothing to tear down per request."""
+        self._cached_client = None
 
     async def get_object(
         self,
