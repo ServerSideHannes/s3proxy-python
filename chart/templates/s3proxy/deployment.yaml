@@ -9,6 +9,7 @@ spec:
   selector:
     matchLabels:
       {{- include "s3proxy.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
   template:
     metadata:
       labels:
