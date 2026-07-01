@@ -245,38 +245,58 @@ class BaseHandler:
         range_start: int | None = None,
         range_end: int | None = None,
     ) -> AsyncIterator[bytes]:
-        """Yield decrypted plaintext for each part of a multipart-encrypted object.
+        """Yield decrypted plaintext for a multipart-encrypted object, one frame
+        at a time.
 
-        Parts outside the requested byte range are skipped. Parts that partially
-        overlap the range are trimmed before yielding.
+        A client part may expand into several internal parts (separate S3 parts),
+        and each internal part is itself a sequence of independent AES-GCM frames
+        (nonce || ciphertext || tag). Every frame must be decrypted individually —
+        decrypting a whole internal part or client part as a single seal fails with
+        InvalidTag whenever it holds more than one frame. See crypto.FRAME_* and the
+        GET reader (_stream_internal_parts) which uses the same layout.
+
+        Fetching per frame also bounds peak memory to O(frame) instead of a whole
+        ~50MB client part. Frames outside the requested plaintext range are skipped
+        (no fetch); frames that partially overlap are trimmed before yielding.
         """
         sorted_parts = sorted(meta.parts, key=lambda p: p.part_number)
         pt_offset = 0
         ct_offset = 0
 
         for part in sorted_parts:
-            part_pt_end = pt_offset + part.plaintext_size - 1
+            if part.internal_parts:
+                segments = [
+                    (ip.plaintext_size, ip.ciphertext_size)
+                    for ip in sorted(part.internal_parts, key=lambda p: p.internal_part_number)
+                ]
+            else:
+                segments = [(part.plaintext_size, part.ciphertext_size)]
 
-            in_range = range_start is None or (
-                part_pt_end >= range_start and pt_offset <= range_end
-            )
+            for seg_pt_size, seg_ct_size in segments:
+                for fsize in crypto.ciphertext_frame_byte_sizes(seg_pt_size, seg_ct_size):
+                    frame_pt_size = fsize - crypto.ENCRYPTION_OVERHEAD
+                    frame_pt_end = pt_offset + frame_pt_size - 1
 
-            if in_range:
-                ct_end = ct_offset + part.ciphertext_size - 1
-                resp = await client.get_object(bucket, key, f"bytes={ct_offset}-{ct_end}")
-                async with resp["Body"] as body:
-                    ciphertext = await body.read()
-                part_plaintext = crypto.decrypt(ciphertext, dek)
+                    in_range = range_start is None or (
+                        frame_pt_end >= range_start and pt_offset <= range_end
+                    )
 
-                if range_start is not None:
-                    trim_start = max(0, range_start - pt_offset)
-                    trim_end = min(part.plaintext_size, range_end - pt_offset + 1)
-                    part_plaintext = part_plaintext[trim_start:trim_end]
+                    if in_range:
+                        ct_end = ct_offset + fsize - 1
+                        resp = await client.get_object(bucket, key, f"bytes={ct_offset}-{ct_end}")
+                        async with resp["Body"] as body:
+                            ciphertext = await body.read()
+                        plaintext = crypto.decrypt(ciphertext, dek)
 
-                yield part_plaintext
+                        if range_start is not None:
+                            trim_start = max(0, range_start - pt_offset)
+                            trim_end = min(frame_pt_size, range_end - pt_offset + 1)
+                            plaintext = plaintext[trim_start:trim_end]
 
-            pt_offset = part_pt_end + 1
-            ct_offset += part.ciphertext_size
+                        yield plaintext
+
+                    pt_offset += frame_pt_size
+                    ct_offset += fsize
 
     async def _download_encrypted_multipart(
         self,

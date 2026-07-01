@@ -14,6 +14,7 @@ from s3proxy import crypto
 from s3proxy.handlers.multipart import MultipartHandlerMixin
 from s3proxy.handlers.objects.misc import MiscObjectMixin
 from s3proxy.state import (
+    InternalPartMetadata,
     MultipartMetadata,
     PartMetadata,
     load_multipart_metadata,
@@ -601,3 +602,120 @@ class TestCopyObjectStreaming:
         # Content is still correct
         recovered = await handler._download_encrypted_multipart(mock_s3, "bucket", "dst", dst_meta)
         assert recovered == src_plaintext
+
+
+# ---------------------------------------------------------------------------
+# _iter_multipart_plaintext — framed / multi-internal-part source (issue: copy
+# of ScyllaDB backups failed with InvalidTag because client parts hold multiple
+# internal parts, each of which is multiple AES-GCM frames)
+# ---------------------------------------------------------------------------
+
+
+class TestIterMultipartPlaintextFramed:
+    """Reproduces the production layout: client parts whose internal parts each
+    span more than one frame. The old reader decrypted a whole client part as a
+    single seal and raised cryptography.exceptions.InvalidTag."""
+
+    def _build_framed_source(self, mock_s3_dek, frame_size):
+        """Return (ciphertext_blob, parts) for a source object shaped like a real
+        multipart-encrypted backup: 2 client parts × 2 internal parts, and each
+        internal part holds 3 frames of `frame_size` plaintext (last frame short).
+
+        Frames are sized by crypto.FRAME_PLAINTEXT_SIZE (patched small in the test),
+        so building the ciphertext must use that same boundary.
+        """
+        dek = mock_s3_dek
+        blob = bytearray()
+        parts = []
+        # deterministic plaintext, sliced into internal parts as we go
+        internal_pt = frame_size * 3 - 7  # 3 frames, last one short
+        pt_seed = bytes((i * 37) % 256 for i in range(internal_pt))
+        ct_offset = 0
+        internal_no = 1
+        full_plaintext = bytearray()
+        for client_no in range(1, 3):
+            ips = []
+            client_pt = 0
+            client_ct = 0
+            for _ in range(2):  # 2 internal parts per client part
+                # frame the internal part exactly as the writer does
+                ip_ct = bytearray()
+                for off in range(0, internal_pt, frame_size):
+                    frame_pt = pt_seed[off : off + frame_size]
+                    ip_ct += crypto.encrypt(frame_pt, dek)
+                blob += ip_ct
+                full_plaintext += pt_seed
+                ips.append(
+                    InternalPartMetadata(
+                        internal_part_number=internal_no,
+                        plaintext_size=internal_pt,
+                        ciphertext_size=len(ip_ct),
+                        etag=hashlib.md5(bytes(ip_ct)).hexdigest(),
+                    )
+                )
+                client_pt += internal_pt
+                client_ct += len(ip_ct)
+                internal_no += 1
+                ct_offset += len(ip_ct)
+            parts.append(
+                PartMetadata(
+                    part_number=client_no,
+                    plaintext_size=client_pt,
+                    ciphertext_size=client_ct,
+                    etag="x",
+                    internal_parts=ips,
+                )
+            )
+        return bytes(blob), parts, bytes(full_plaintext)
+
+    @pytest.mark.asyncio
+    async def test_full_roundtrip(self, mock_s3, settings, manager, monkeypatch):
+        # Small frame so multi-frame internal parts stay tiny and fast.
+        monkeypatch.setattr(crypto, "FRAME_PLAINTEXT_SIZE", 100)
+        handler = _make_misc_handler(settings, manager)
+        await mock_s3.create_bucket("b")
+
+        dek = crypto.generate_dek()
+        blob, parts, plaintext = self._build_framed_source(dek, 100)
+        await mock_s3.put_object("b", "src", blob)
+
+        meta = type("M", (), {"parts": parts})()
+        recovered = bytearray()
+        async for chunk in handler._iter_multipart_plaintext(mock_s3, "b", "src", meta, dek):
+            recovered += chunk
+        assert bytes(recovered) == plaintext
+
+    @pytest.mark.asyncio
+    async def test_range_roundtrip(self, mock_s3, settings, manager, monkeypatch):
+        monkeypatch.setattr(crypto, "FRAME_PLAINTEXT_SIZE", 100)
+        handler = _make_misc_handler(settings, manager)
+        await mock_s3.create_bucket("b")
+
+        dek = crypto.generate_dek()
+        blob, parts, plaintext = self._build_framed_source(dek, 100)
+        await mock_s3.put_object("b", "src", blob)
+
+        meta = type("M", (), {"parts": parts})()
+        # a range that starts mid-frame in the first internal part and ends
+        # mid-frame several internal parts later
+        start, end = 137, len(plaintext) - 211
+        recovered = bytearray()
+        async for chunk in handler._iter_multipart_plaintext(
+            mock_s3, "b", "src", meta, dek, range_start=start, range_end=end
+        ):
+            recovered += chunk
+        assert bytes(recovered) == plaintext[start : end + 1]
+
+    @pytest.mark.asyncio
+    async def test_whole_client_part_seal_would_fail(self, mock_s3, settings, manager, monkeypatch):
+        """Guard: decrypting a whole client part as one seal (the old behavior)
+        must raise — this is exactly the production InvalidTag."""
+        from cryptography.exceptions import InvalidTag
+
+        monkeypatch.setattr(crypto, "FRAME_PLAINTEXT_SIZE", 100)
+        dek = crypto.generate_dek()
+        blob, parts, _ = self._build_framed_source(dek, 100)
+        # first client part ciphertext = its internal parts concatenated
+        client0_ct = blob[: parts[0].ciphertext_size]
+        with pytest.raises(InvalidTag):
+            crypto.decrypt(client0_ct, dek)
