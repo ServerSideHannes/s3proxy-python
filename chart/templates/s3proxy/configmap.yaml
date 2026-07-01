@@ -22,7 +22,7 @@ data:
   S3PROXY_DASHBOARD_UI: "true"
   S3PROXY_DASHBOARD_PATH: {{ .Values.dashboard.path | quote }}
   {{- end }}
-  {{- /* Arbitrary extra env (e.g. diagnostics like S3PROXY_TRACEMALLOC=1). */ -}}
+  {{- /* Arbitrary extra env (e.g. memory debug mode: S3PROXY_MEMORY_DEBUG=1). */ -}}
   {{- range $k, $v := .Values.extraConfig }}
   {{ $k }}: {{ $v | quote }}
   {{- end }}

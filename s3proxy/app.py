@@ -21,6 +21,7 @@ from fastapi.responses import PlainTextResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from structlog.stdlib import BoundLogger
 
+from . import concurrency
 from .client import SigV4Verifier
 from .config import Settings
 from .errors import S3Error, get_s3_error_code
@@ -69,23 +70,47 @@ def _silence_health_probe_access_logs() -> None:
         access_logger.addFilter(_health_probe_filter)
 
 
-def _dump_tracemalloc(limit: int = 20) -> None:
-    """Log the top live Python allocations by size, with location.
+def _rss_mb() -> float | None:
+    """Process resident set size in MB from /proc (Linux). None elsewhere."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024  # kB -> MB
+    except OSError:
+        return None
+    return None
 
-    Diagnostic only (gated by S3PROXY_TRACEMALLOC). Lets us see, under real
-    backup load, exactly which call sites hold the resident memory that drives
-    the OOM -- instead of guessing.
+
+def _dump_tracemalloc(limit: int = 20) -> None:
+    """Log real RSS vs tracked Python heap + the top live allocations by call site.
+
+    Diagnostic only (memory debug mode). The whole point is the gap: RSS is what
+    the kernel OOM-kills on, while tracemalloc only sees Python allocations. A
+    large rss-minus-tracked gap means the memory is C-level (uvicorn/httptools
+    socket buffers, openssl, allocator retention) -- NOT something a call site in
+    the top list will explain. A small gap means it IS Python, and the top list
+    names the exact line. Logging both each interval settles which world we're in.
     """
     if not tracemalloc.is_tracing():
         return
     snap = tracemalloc.take_snapshot()
     stats = snap.statistics("lineno")
-    total_mb = sum(s.size for s in stats) / 1024 / 1024
-    logger.warning("TRACEMALLOC_SNAPSHOT", total_tracked_mb=round(total_mb, 1), shown=limit)
+    tracked_mb = sum(s.size for s in stats) / 1024 / 1024
+    rss = _rss_mb()
+    governed_mb = concurrency.get_active_memory() / 1024 / 1024
+    logger.warning(
+        "MEMORY_DEBUG",
+        rss_mb=round(rss, 1) if rss is not None else None,
+        tracked_mb=round(tracked_mb, 1),
+        untracked_mb=round(rss - tracked_mb, 1) if rss is not None else None,
+        governed_active_mb=round(governed_mb, 1),
+        shown=limit,
+    )
     for i, st in enumerate(stats[:limit], 1):
         fr = st.traceback[0]
         logger.warning(
-            "TRACEMALLOC_TOP",
+            "MEMORY_DEBUG_TOP",
             rank=i,
             size_mb=round(st.size / 1024 / 1024, 2),
             count=st.count,
@@ -100,16 +125,18 @@ async def _periodic_tracemalloc(interval: int) -> None:
 
 
 def _maybe_start_tracemalloc() -> asyncio.Task | None:
-    """Enable tracemalloc + periodic/SIGUSR1 heap dumps when S3PROXY_TRACEMALLOC is set.
+    """Enable memory debug mode (RSS + tracemalloc heap dumps) when requested.
 
-    No-op (zero overhead) when unset. Used for one-pod, time-boxed profiling.
+    Gated by S3PROXY_MEMORY_DEBUG (alias: S3PROXY_TRACEMALLOC). No-op with zero
+    overhead when unset. Used for one-pod, time-boxed profiling: dumps every
+    S3PROXY_MEMORY_DEBUG_INTERVAL secs and on SIGUSR1.
     """
-    if not os.environ.get("S3PROXY_TRACEMALLOC"):
+    if not (os.environ.get("S3PROXY_MEMORY_DEBUG") or os.environ.get("S3PROXY_TRACEMALLOC")):
         return None
-    frames = int(os.environ.get("S3PROXY_TRACEMALLOC_FRAMES", "4"))
-    interval = int(os.environ.get("S3PROXY_TRACEMALLOC_INTERVAL", "15"))
+    frames = int(os.environ.get("S3PROXY_MEMORY_DEBUG_FRAMES", "4"))
+    interval = int(os.environ.get("S3PROXY_MEMORY_DEBUG_INTERVAL", "15"))
     tracemalloc.start(frames)
-    logger.warning("TRACEMALLOC_ENABLED", frames=frames, interval_sec=interval)
+    logger.warning("MEMORY_DEBUG_ENABLED", frames=frames, interval_sec=interval, rss_mb=_rss_mb())
     with contextlib.suppress(NotImplementedError, RuntimeError):
         asyncio.get_running_loop().add_signal_handler(signal.SIGUSR1, _dump_tracemalloc)
     return asyncio.create_task(_periodic_tracemalloc(interval))

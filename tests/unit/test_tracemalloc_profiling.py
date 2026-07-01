@@ -11,6 +11,7 @@ from s3proxy import app
 
 
 def test_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("S3PROXY_MEMORY_DEBUG", raising=False)
     monkeypatch.delenv("S3PROXY_TRACEMALLOC", raising=False)
     assert app._maybe_start_tracemalloc() is None
 
@@ -35,7 +36,10 @@ def test_dump_reports_allocations_when_tracing():
         )
         app._dump_tracemalloc(limit=5)
         assert blob is not None
-        assert any(e.get("event") == "TRACEMALLOC_SNAPSHOT" for e in events)
-        assert any(e.get("event") == "TRACEMALLOC_TOP" for e in events)
+        snap = next(e for e in events if e.get("event") == "MEMORY_DEBUG")
+        # The debug line must carry the tracked total; rss/untracked are present
+        # on Linux (None elsewhere) -- the gap between them is the whole point.
+        assert "tracked_mb" in snap and "untracked_mb" in snap
+        assert any(e.get("event") == "MEMORY_DEBUG_TOP" for e in events)
     finally:
         tracemalloc.stop()
