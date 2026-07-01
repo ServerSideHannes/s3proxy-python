@@ -265,3 +265,9 @@ podDisruptionBudget:
   enabled: true
   minAvailable: 1
   # maxUnavailable: 1  # Alternative to minAvailable
+# Arbitrary extra S3PROXY_* env, injected via the config ConfigMap (envFrom).
+# Used for time-boxed diagnostics, e.g. memory debug mode:
+#   extraConfig: { S3PROXY_MEMORY_DEBUG: "1" }
+# which logs RSS vs tracked heap + top allocations every interval (raise the pod
+# memory limit first so it survives long enough to dump).
+extraConfig: {}
