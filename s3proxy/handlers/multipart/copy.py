@@ -254,7 +254,13 @@ class CopyPartMixin(BaseHandler):
         plaintext_size: int,
     ) -> Response:
         """Stream-decrypt the source and encrypt+upload each chunk as an internal S3 part."""
-        chunk_size = crypto.calculate_optimal_part_size(plaintext_size)
+        # Cap the pump chunk at MAX_BUFFER_SIZE: calculate_optimal_part_size returns
+        # up to 64MB for large sources, which made _pump_copy_chunks buffer a 64MB
+        # chunk + copy it + re-encrypt (~150MB/copy) while the limiter only reserved
+        # copy_pipeline_peak (~32MB). Under a scylla dedup flood of large SSTables
+        # that under-reservation OOMed the pod. 8MB chunks keep the copy truly
+        # streaming and matched to the reservation.
+        chunk_size = min(crypto.calculate_optimal_part_size(plaintext_size), crypto.MAX_BUFFER_SIZE)
         estimated_parts = max(1, math.ceil(plaintext_size / chunk_size))
 
         internal_part_start = await self.multipart_manager.allocate_internal_parts(
