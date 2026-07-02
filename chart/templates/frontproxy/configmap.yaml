@@ -17,6 +17,17 @@ data:
       log global
       option httplog
       option dontlognull
+      # Close the client connection after each response instead of keeping it
+      # alive. A backup floods multipart PUTs; when a backend pod is killed
+      # mid-body (KEDA churn + `option redispatch`), the response is sent before
+      # the request body is fully read, and on a kept-alive connection the
+      # leftover body bytes get parsed as the next request line -> not valid HTTP
+      # -> HAProxy emits its own "400 Bad request" and the client (barman) fails
+      # the part. Closing per response means a poisoned connection is never
+      # reused. http-server-close does NOT help here: the desync is on the
+      # client-facing connection. Cost is negligible (plaintext internal HTTP,
+      # large sequential parts).
+      option httpclose
       timeout connect {{ .Values.frontproxy.timeouts.connect }}
       timeout client {{ .Values.frontproxy.timeouts.client }}
       timeout server {{ .Values.frontproxy.timeouts.server }}
