@@ -107,9 +107,7 @@ async def test_multipart_object_copy_copies_sidecar_and_roundtrips(settings, moc
     await mock_s3.create_bucket(BUCKET)
 
     body = b"m" * (256 * 1024)  # streamed as multiple parts -> real sidecar
-    await handler.handle_put_object(
-        _stream_put_request(f"/{BUCKET}/sst/big.db", body), credentials
-    )
+    await handler.handle_put_object(_stream_put_request(f"/{BUCKET}/sst/big.db", body), credentials)
     # sanity: a multipart sidecar exists for the source
     assert mock_s3._key(BUCKET, _internal_meta_key("sst/big.db")) in mock_s3.objects
 
