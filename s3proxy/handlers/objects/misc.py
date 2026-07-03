@@ -5,6 +5,7 @@ import base64
 import hashlib
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
+from urllib.parse import quote
 
 import structlog
 from botocore.exceptions import ClientError
@@ -22,11 +23,17 @@ from ...state import (
     load_multipart_metadata,
     save_multipart_metadata,
 )
+from ...state.metadata import _internal_meta_key
 from ...utils import format_http_date, format_iso8601
 from ...xml_utils import find_element, find_elements
 from ..base import BaseHandler
 
 logger: BoundLogger = structlog.get_logger(__name__)
+
+# S3 CopyObject is a single server-side operation capped at 5 GiB; larger
+# ciphertext objects fall back to the decrypt/re-encrypt streaming path.
+# ponytail: 5 GiB ceiling; upgrade path is server-side UploadPartCopy per range.
+MAX_SERVER_SIDE_COPY_BYTES = 5 * 1024**3
 
 
 class MiscObjectMixin(BaseHandler):
@@ -198,6 +205,37 @@ class MiscObjectMixin(BaseHandler):
                     request,
                 )
 
+            # Encrypted source. A same-credential plain COPY needs no re-encrypt:
+            # the ciphertext is self-describing and key-independent (GCM AAD is
+            # None, the DEK is random and stored in metadata / the sidecar,
+            # nonces are embedded), so a native server-side CopyObject yields a
+            # byte-identical, decryptable destination and skips the
+            # download+re-encrypt+re-upload amplification (Scylla Manager dedup).
+            # A cross-credential copy must re-key under the copier's KEK, and
+            # REPLACE / oversized objects also fall back to the re-encrypt path.
+            if src_multipart_meta:
+                src_kid = src_multipart_meta.kid
+            else:
+                src_kid = head_resp.get("Metadata", {}).get(self.settings.kidtag_name, "")
+            same_credential = bool(src_kid) and src_kid == client.credentials.access_key
+            ciphertext_size = head_resp.get("ContentLength", 0) or 0
+            if (
+                metadata_directive == "COPY"
+                and same_credential
+                and ciphertext_size <= MAX_SERVER_SIDE_COPY_BYTES
+            ):
+                return await self._copy_passthrough_encrypted(
+                    client,
+                    bucket,
+                    key,
+                    content_type,
+                    copy_source,
+                    src_bucket,
+                    src_key,
+                    head_resp,
+                    src_multipart_meta,
+                )
+
             # Encrypted - need to decrypt and re-encrypt
             return await self._copy_encrypted(
                 client,
@@ -257,6 +295,69 @@ class MiscObjectMixin(BaseHandler):
         else:
             last_modified = str(last_modified) if last_modified else ""
 
+        return Response(
+            content=xml_responses.copy_object_result(etag, last_modified),
+            media_type="application/xml",
+        )
+
+    async def _copy_passthrough_encrypted(
+        self,
+        client: S3Client,
+        bucket: str,
+        key: str,
+        content_type: str | None,
+        copy_source: str,
+        src_bucket: str,
+        src_key: str,
+        head_resp: dict,
+        src_multipart_meta,
+    ) -> Response:
+        """Server-side copy of an *encrypted* object, moving no bulk bytes.
+
+        The ciphertext, wrapped DEK and kid are self-describing and not bound to
+        the object key, so a native CopyObject with MetadataDirective=COPY yields
+        a byte-identical, decryptable destination. This collapses Scylla Manager's
+        dedup copies from a full download+re-encrypt+re-upload into a
+        metadata-only op and keeps them off the in-flight memory governor.
+        """
+        logger.info(
+            "COPY_PASSTHROUGH_ENCRYPTED",
+            src_bucket=src_bucket,
+            src_key=src_key,
+            dest_bucket=bucket,
+            dest_key=key,
+            is_multipart=bool(src_multipart_meta),
+        )
+
+        resp = await client.copy_object(
+            bucket,
+            key,
+            copy_source,
+            metadata_directive="COPY",
+            content_type=content_type,
+        )
+
+        # Multipart objects keep their part/frame map in a separate sidecar
+        # object; the destination needs its own copy or the read path can't
+        # reconstruct (and decrypt) it.
+        if src_multipart_meta:
+            await client.copy_object(
+                bucket,
+                _internal_meta_key(key),
+                f"{src_bucket}/{quote(_internal_meta_key(src_key), safe='/')}",
+                metadata_directive="COPY",
+            )
+
+        # Encrypted objects report the plaintext md5 (client-etag), not the
+        # ciphertext ETag, to match GET/HEAD and the re-encrypt path.
+        src_metadata = head_resp.get("Metadata", {})
+        result = resp.get("CopyObjectResult", {})
+        etag = src_metadata.get("client-etag") or str(result.get("ETag", "")).strip('"')
+        last_modified = result.get("LastModified")
+        if hasattr(last_modified, "isoformat"):
+            last_modified = last_modified.isoformat().replace("+00:00", "Z")
+        else:
+            last_modified = format_iso8601(datetime.now(UTC))
         return Response(
             content=xml_responses.copy_object_result(etag, last_modified),
             media_type="application/xml",
