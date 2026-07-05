@@ -191,16 +191,17 @@ def streaming_upload_peak(content_length: int) -> int:
 def copy_pipeline_peak(plaintext_size: int) -> int:
     """Peak memory a server-side copy holds while decrypting + re-encrypting.
 
-    A copy request has no body, so the request-level memory limiter reserves
-    ~nothing for it -- yet the copy reads the source, decrypts it and re-encrypts
-    it. Large copies stream in MAX_BUFFER_SIZE chunks, so their peak is the
-    pipeline (source chunk + plaintext buffer + dest ciphertext), independent of
-    object size; small copies buffer the whole object (~3x). Reserving this lets
-    the limiter BOUND concurrent copies instead of admitting an unbounded dedup
-    flood that OOMs the pod.
+    A copy request has no body, so the request-level limiter reserves ~nothing
+    for it -- yet the copy reads the source, decrypts it and re-encrypts it. The
+    streaming copy path now frames exactly like the framed UploadPart path
+    (encrypt_frame per FRAME_PLAINTEXT_SIZE, one internal part at a time, sized by
+    memory_bounded_part_size), so its per-part peak matches the upload path. It
+    adds one pipeline stage the body-fed upload path lacks: the source is read in
+    MAX_BUFFER_SIZE chunks into a _PlaintextReader buffer, so reserve two extra
+    buffers for it. Small copies buffer the whole object and re-encrypt it (~3x).
     """
     if plaintext_size > STREAMING_THRESHOLD:
-        return 4 * MAX_BUFFER_SIZE
+        return streaming_upload_peak(plaintext_size) + 2 * MAX_BUFFER_SIZE
     return max(MAX_BUFFER_SIZE, 3 * plaintext_size)
 
 
