@@ -1,8 +1,8 @@
 """UploadPartCopy handler for multipart uploads."""
 
-import asyncio
 import hashlib
 import math
+import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
@@ -22,10 +22,9 @@ from ...state import (
 )
 from ...utils import format_iso8601
 from ..base import BaseHandler
+from .upload_part import _PlaintextReader
 
 logger: BoundLogger = structlog.get_logger(__name__)
-
-MAX_PARALLEL_INTERNAL_UPLOADS = 2
 
 
 class CopyPartMixin(BaseHandler):
@@ -60,21 +59,25 @@ class CopyPartMixin(BaseHandler):
             )
 
             if plaintext_size <= crypto.STREAMING_THRESHOLD:
-                return await self._simple_copy_part(
-                    client,
-                    bucket,
-                    key,
-                    upload_id,
-                    part_num,
-                    state,
-                    src_bucket,
-                    src_key,
-                    copy_source_range,
-                    head_resp,
-                    src_metadata,
-                    src_wrapped_dek,
-                    src_multipart_meta,
-                )
+                # Small copies buffer the whole object + re-encrypt it; gate them
+                # by the limiter too (they carry no body, so the request-level
+                # reservation was ~nothing and a small-object flood ran unbounded).
+                async with concurrency.reserve_memory(crypto.copy_pipeline_peak(plaintext_size)):
+                    return await self._simple_copy_part(
+                        client,
+                        bucket,
+                        key,
+                        upload_id,
+                        part_num,
+                        state,
+                        src_bucket,
+                        src_key,
+                        copy_source_range,
+                        head_resp,
+                        src_metadata,
+                        src_wrapped_dek,
+                        src_multipart_meta,
+                    )
             return await self._streaming_copy_part(
                 client,
                 bucket,
@@ -254,7 +257,10 @@ class CopyPartMixin(BaseHandler):
         plaintext_size: int,
     ) -> Response:
         """Stream-decrypt the source and encrypt+upload each chunk as an internal S3 part."""
-        chunk_size = crypto.calculate_optimal_part_size(plaintext_size)
+        # Same part sizing as the framed UploadPart path: bounds the internal part
+        # count to MAX_INTERNAL_PARTS_PER_CLIENT (so a large copy can never overflow
+        # the per-client internal-part range) and keeps parts small.
+        chunk_size = crypto.memory_bounded_part_size(plaintext_size)
         estimated_parts = max(1, math.ceil(plaintext_size / chunk_size))
 
         internal_part_start = await self.multipart_manager.allocate_internal_parts(
@@ -381,69 +387,69 @@ class CopyPartMixin(BaseHandler):
         chunk_size: int,
         internal_part_start: int,
     ) -> tuple[list[InternalPartMetadata], int, int, object]:
-        """Buffer plaintext from src_iter into chunk_size pieces and upload as internal parts."""
-        buf = bytearray()
-        current_internal = internal_part_start
-        upload_tasks: dict[int, asyncio.Task] = {}
-        semaphore = asyncio.Semaphore(MAX_PARALLEL_INTERNAL_UPLOADS)
+        """Frame-encrypt the copy source into internal S3 parts, one at a time.
+
+        Mirrors UploadPartMixin._stream_and_upload_framed: reads FRAME_PLAINTEXT_SIZE
+        plaintext frames from the source, encrypts each with encrypt_frame,
+        accumulates one internal part's ciphertext, then uploads it before starting
+        the next. Peak memory is O(one internal part ciphertext + one frame) -- it
+        never holds the whole part's plaintext and ciphertext at once and runs one
+        part at a time, which is what makes copy_pipeline_peak == streaming_upload_peak.
+        Parts are byte-identical to the framed upload path and read back via
+        decrypt_framed / _iter_multipart_plaintext.
+        """
+        reader = _PlaintextReader(src_iter)
         md5 = hashlib.md5(usedforsecurity=False)
+        internal_parts: list[InternalPartMetadata] = []
         total_plaintext = 0
+        total_ciphertext = 0
+        internal_part_num = internal_part_start
 
-        async for raw in src_iter:
-            buf.extend(raw)
-            md5.update(raw)
-            total_plaintext += len(raw)
-
-            while len(buf) >= chunk_size:
-                data = bytes(buf[:chunk_size])
-                del buf[:chunk_size]
-                await semaphore.acquire()
-                task = asyncio.create_task(
-                    self._upload_internal_part_with_semaphore(  # type: ignore[attr-defined]
-                        client,
-                        bucket,
-                        key,
-                        upload_id,
-                        part_num,
-                        state,
-                        data,
-                        current_internal,
-                        semaphore,
+        while True:
+            ciphertext = bytearray()
+            part_plaintext = 0
+            frame_idx = 0
+            while part_plaintext < chunk_size:
+                frame_pt = await reader.read(
+                    min(crypto.FRAME_PLAINTEXT_SIZE, chunk_size - part_plaintext)
+                )
+                if not frame_pt:
+                    break
+                md5.update(frame_pt)
+                part_plaintext += len(frame_pt)
+                ciphertext.extend(
+                    crypto.encrypt_frame(
+                        frame_pt, state.dek, upload_id, internal_part_num, frame_idx
                     )
                 )
-                upload_tasks[current_internal] = task
-                current_internal += 1
+                frame_idx += 1
 
-        if buf:
-            await semaphore.acquire()
-            data = bytes(buf)
-            task = asyncio.create_task(
-                self._upload_internal_part_with_semaphore(  # type: ignore[attr-defined]
-                    client,
-                    bucket,
-                    key,
-                    upload_id,
-                    part_num,
-                    state,
-                    data,
-                    current_internal,
-                    semaphore,
+            if part_plaintext == 0:
+                break
+
+            upload_start = time.monotonic()
+            resp = await client.upload_part(bucket, key, upload_id, internal_part_num, ciphertext)
+            del ciphertext
+            ct_size = crypto.framed_ciphertext_size(part_plaintext)
+            internal_parts.append(
+                InternalPartMetadata(
+                    internal_part_number=internal_part_num,
+                    plaintext_size=part_plaintext,
+                    ciphertext_size=ct_size,
+                    etag=resp["ETag"].strip('"'),
                 )
             )
-            upload_tasks[current_internal] = task
-
-        results = await asyncio.gather(*upload_tasks.values(), return_exceptions=True)
-        self._check_upload_results(results, bucket, key, upload_id, part_num)  # type: ignore[attr-defined]
-
-        results_by_part: dict[int, InternalPartMetadata] = {
-            r.internal_part_number: r
-            for r in results  # type: ignore[union-attr]
-        }
-        internal_parts = []
-        total_ciphertext = 0
-        for pn in sorted(results_by_part):
-            meta = results_by_part[pn]
-            internal_parts.append(meta)
-            total_ciphertext += meta.ciphertext_size
+            logger.info(
+                "INTERNAL_PART_UPLOADED",
+                bucket=bucket,
+                key=key,
+                client_part=part_num,
+                internal_part=internal_part_num,
+                plaintext_mb=f"{part_plaintext / 1024 / 1024:.2f}MB",
+                elapsed_sec=f"{time.monotonic() - upload_start:.2f}s",
+            )
+            total_plaintext += part_plaintext
+            total_ciphertext += ct_size
+            internal_part_num += 1
 
         return internal_parts, total_plaintext, total_ciphertext, md5

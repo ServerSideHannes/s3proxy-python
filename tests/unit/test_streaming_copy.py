@@ -194,6 +194,49 @@ class TestUploadPartCopyStreaming:
         assert bytes(recovered) == plaintext
 
     @pytest.mark.asyncio
+    async def test_streamed_parts_are_framed_and_roundtrip(
+        self, mock_s3, settings, manager, credentials, monkeypatch
+    ):
+        """An internal part larger than one frame must be written framed
+        (encrypt_frame per FRAME_PLAINTEXT_SIZE) and round-trip via decrypt_framed.
+        Guards the framed copy writer -- the old writer sealed whole parts, so
+        this many-frames-per-part case was never exercised."""
+        monkeypatch.setattr(crypto, "MAX_BUFFER_SIZE", 1024)
+        monkeypatch.setattr(crypto, "FRAME_PLAINTEXT_SIZE", 256)
+        handler = _make_handler(settings, manager)
+        await mock_s3.create_bucket("bucket")
+
+        # 20 * MAX_BUFFER_SIZE -> memory_bounded_part_size caps at 20 parts of
+        # ~1KB each, and each 1KB part spans 4 x 256B frames.
+        plaintext = bytes((i * 31) % 256 for i in range(20 * 1024))
+        await mock_s3.put_object("bucket", "src", plaintext)
+
+        resp_create = await mock_s3.create_multipart_upload("bucket", "dst")
+        upload_id = resp_create["UploadId"]
+        kid, _ = settings.keyring.key_for(credentials.access_key)
+        dek = crypto.generate_dek()
+        await manager.create_upload("bucket", "dst", upload_id, dek, kid)
+        state = await manager.get_upload("bucket", "dst", upload_id)
+
+        head_resp = {"Metadata": {}, "ContentLength": len(plaintext)}
+        await handler._streaming_copy_part(
+            mock_s3, "bucket", "dst", upload_id, 1, state,
+            "bucket", "src", None, None, None, head_resp, {}, len(plaintext),
+        )
+
+        updated = await manager.get_upload("bucket", "dst", upload_id)
+        part = updated.parts[1]
+        assert part.plaintext_size == len(plaintext)
+        # at least one internal part is genuinely multi-frame
+        assert any(crypto.frame_count(ip.plaintext_size) > 1 for ip in part.internal_parts)
+
+        recovered = bytearray()
+        for ip in sorted(part.internal_parts, key=lambda x: x.internal_part_number):
+            ct = mock_s3.multipart_uploads[upload_id]["Parts"][ip.internal_part_number]["Body"]
+            recovered.extend(crypto.decrypt_framed(ct, dek, ip.plaintext_size))
+        assert bytes(recovered) == plaintext
+
+    @pytest.mark.asyncio
     async def test_large_unencrypted_source_with_range(
         self, mock_s3, settings, manager, credentials
     ):

@@ -21,13 +21,17 @@ from s3proxy import concurrency, crypto
 MB = 1024 * 1024
 
 
-def test_copy_pipeline_peak_streamed_is_bounded():
-    # Large copies stream in MAX_BUFFER_SIZE chunks, so their peak is the
-    # pipeline (source chunk + plaintext + dest ciphertext), independent of size.
+def test_copy_pipeline_peak_matches_framed_upload():
+    # The streaming copy path now frames exactly like the framed UploadPart path
+    # (one internal part at a time), so its peak is identical: the old
+    # size-independent 4*MAX_BUFFER_SIZE under-counted the real peak ~6x -- when
+    # it un-framed a whole part -- and OOMed the pod.
     for size in (64 * MB, 512 * MB, 5 * 1024 * MB):
-        peak = crypto.copy_pipeline_peak(size)
-        assert peak == 4 * crypto.MAX_BUFFER_SIZE
-        assert peak < size  # never scales with object size
+        # Same framed writer peak, plus two MAX_BUFFER_SIZE buffers for the copy
+        # source read pipeline the body-fed upload path doesn't have.
+        assert crypto.copy_pipeline_peak(size) == (
+            crypto.streaming_upload_peak(size) + 2 * crypto.MAX_BUFFER_SIZE
+        )
 
 
 def test_copy_pipeline_peak_small_is_three_x():
@@ -48,9 +52,10 @@ async def test_reserve_memory_bounds_concurrent_copies():
     original_timeout = concurrency.BACKPRESSURE_TIMEOUT
     concurrency.BACKPRESSURE_TIMEOUT = 30
     limiter = concurrency._default
-    limiter.set_memory_limit(64)  # 64MB budget
     limiter.active_bytes = 0
-    per_copy = crypto.copy_pipeline_peak(64 * MB)  # 32MB -> budget fits 2
+    per_copy = crypto.copy_pipeline_peak(64 * MB)
+    limiter.set_memory_limit((per_copy * 2) // MB)  # budget sized to fit ~2
+    budget_fits = limiter.limit_bytes // per_copy
 
     peak_active = 0
     inside = 0
@@ -71,5 +76,5 @@ async def test_reserve_memory_bounds_concurrent_copies():
         concurrency.BACKPRESSURE_TIMEOUT = original_timeout
 
     assert peak_active <= limiter.limit_bytes  # never overran the budget
-    assert max_inside <= 2  # 64MB / 32MB == at most 2 copies at once
+    assert max_inside <= budget_fits  # limiter admits only what the budget fits
     assert limiter.active_bytes == 0  # everything released
