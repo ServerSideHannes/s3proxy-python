@@ -220,8 +220,20 @@ class TestUploadPartCopyStreaming:
 
         head_resp = {"Metadata": {}, "ContentLength": len(plaintext)}
         await handler._streaming_copy_part(
-            mock_s3, "bucket", "dst", upload_id, 1, state,
-            "bucket", "src", None, None, None, head_resp, {}, len(plaintext),
+            mock_s3,
+            "bucket",
+            "dst",
+            upload_id,
+            1,
+            state,
+            "bucket",
+            "src",
+            None,
+            None,
+            None,
+            head_resp,
+            {},
+            len(plaintext),
         )
 
         updated = await manager.get_upload("bucket", "dst", upload_id)
