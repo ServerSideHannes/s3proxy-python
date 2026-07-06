@@ -244,9 +244,16 @@ def copy_pipeline_peak(plaintext_size: int) -> int:
     adds one pipeline stage the body-fed upload path lacks: the source is read in
     MAX_BUFFER_SIZE chunks into a _PlaintextReader buffer, so reserve two extra
     buffers for it. Small copies buffer the whole object and re-encrypt it (~3x).
+
+    Large internal parts (multi-GB manifest copies): aiobotocore copies the
+    ciphertext body for signing; tracemalloc shows ~part/7 slack at 238MB parts.
     """
     if plaintext_size > STREAMING_THRESHOLD:
-        return streaming_upload_peak(plaintext_size) + 2 * MAX_BUFFER_SIZE
+        part = memory_bounded_part_size(plaintext_size)
+        peak = streaming_upload_peak(plaintext_size) + 2 * MAX_BUFFER_SIZE
+        if part > 32 * 1024 * 1024:
+            peak += part // 7
+        return peak
     return max(MAX_BUFFER_SIZE, 3 * plaintext_size)
 
 

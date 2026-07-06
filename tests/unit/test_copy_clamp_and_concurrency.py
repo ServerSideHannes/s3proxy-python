@@ -89,23 +89,59 @@ async def test_manifest_copy_plus_scylla_upload_serialized_at_192mb():
         concurrency.reset_state()
 
 
-@pytest.mark.parametrize(
-    "mb,slack",
-    [
-        (512, 1.0),
-        (1024, 1.08),  # large internal parts: transport body copy slack
-        (4767, 1.08),
-    ],
-)
+@pytest.mark.parametrize("mb", [512, 1024, 4767])
 @pytest.mark.asyncio
-async def test_copy_reservation_bounds_real_peak_large_manifests(mb: int, slack: float):
+async def test_copy_reservation_bounds_real_peak_large_manifests(mb: int):
     """copy_pipeline_peak must cover tracemalloc peak for prod-sized copies."""
     plaintext_size = mb * MB
     real_peak = await _measure_peak(plaintext_size)
     reserved = crypto.copy_pipeline_peak(plaintext_size)
-    assert reserved * slack >= real_peak, (
-        f"{mb}MB copy: reserved {reserved / MB:.1f}MB * {slack} < real {real_peak / MB:.1f}MB"
+    assert reserved >= real_peak, (
+        f"{mb}MB copy: reserved {reserved / MB:.1f}MB < real {real_peak / MB:.1f}MB"
     )
+
+
+@pytest.mark.asyncio
+async def test_old_upload_clamp_would_admit_three_concurrent_manifest_copies():
+    """Regression guard: upload-style clamp is what caused prod OOM."""
+    original_timeout = concurrency.BACKPRESSURE_TIMEOUT
+    concurrency.BACKPRESSURE_TIMEOUT = 0
+    concurrency.reset_state()
+    concurrency.set_memory_limit(192)
+    per_copy = crypto.copy_pipeline_peak(SCYLLA_MANIFEST_BYTES)
+    try:
+
+        async def acquire_upload_clamp():
+            return await concurrency.try_acquire_memory(per_copy)
+
+        results = await asyncio.gather(*[acquire_upload_clamp() for _ in range(3)])
+        assert all(r < 80 * MB for r in results)
+        assert sum(results) < 192 * MB
+        assert len(results) == 3
+    finally:
+        concurrency.BACKPRESSURE_TIMEOUT = original_timeout
+        concurrency.reset_state()
+
+
+@pytest.mark.asyncio
+async def test_mixed_three_scylla_uploads_and_manifest_copy_limits_concurrency():
+    """Prod replay: 3×50MB uploads + manifest copy — copy cannot take 4th slot."""
+    original_timeout = concurrency.BACKPRESSURE_TIMEOUT
+    concurrency.BACKPRESSURE_TIMEOUT = 0
+    concurrency.reset_state()
+    concurrency.set_memory_limit(192)
+    per_part = crypto.governor_memory_footprint(50 * MB)
+    manifest = crypto.copy_pipeline_peak(SCYLLA_MANIFEST_BYTES)
+    try:
+        uploads = await asyncio.gather(
+            *[concurrency.try_acquire_memory(per_part) for _ in range(3)]
+        )
+        assert sum(uploads) + 192 * MB > 192 * MB
+        with pytest.raises(S3Error):
+            await concurrency.try_acquire_copy_memory(manifest)
+    finally:
+        concurrency.BACKPRESSURE_TIMEOUT = original_timeout
+        concurrency.reset_state()
 
 
 @pytest.mark.asyncio

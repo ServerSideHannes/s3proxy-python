@@ -386,6 +386,7 @@ def test_honest_copy_peak_exceeds_upload_governor_cap():
     """
     huge = 5 * 1024 * MB
     assert crypto.copy_pipeline_peak(huge) > estimate_memory_footprint("PUT", huge)
+    part = crypto.memory_bounded_part_size(huge)
     assert crypto.copy_pipeline_peak(huge) == (
-        crypto.streaming_upload_peak(huge) + 2 * crypto.MAX_BUFFER_SIZE
+        crypto.streaming_upload_peak(huge) + 2 * crypto.MAX_BUFFER_SIZE + part // 7
     )
