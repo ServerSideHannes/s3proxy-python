@@ -121,11 +121,13 @@ def _upload_part(client, bucket: str, key: str, part_number: int, upload_id: str
         return {"success": False, "code": code, "error": str(e)}
 
 
-# 64MB source: copy_pipeline_peak ~48MB > 32MB governor → exclusive slot.
-# Full 256MB copies take ~3min each in CI (decrypt+reencrypt); 64MB is enough
-# to prove governor serialization without burning 10+ minutes.
+# 64MB source: copy_pipeline_peak ~48MB. Governor must exceed the clamped copy
+# slot plus the POST gate's MIN_RESERVATION (64KB); at 32MB the clamp monopolizes
+# the budget and even a single copy fails (64KB+32MB > 32MB while the gate is held).
+# 96MB fits one ~48MB copy plus concurrent ~20MB upload reservations, and still
+# rejects a second concurrent copy (48+48+gate > 96).
 SOURCE_SIZE = 64 * MB
-GOVERNOR_MB = "32"
+GOVERNOR_MB = "96"
 SOURCE_KEY = "shared-large-source.bin"
 
 
@@ -209,7 +211,9 @@ class TestCopyMemoryGovernorSubprocess:
             key = f"sst-part-{i}.bin"
             resp = client.create_multipart_upload(Bucket=bucket, Key=key)
             upload_id = resp["UploadId"]
-            r = _upload_part(client, bucket, key, 1, upload_id, 16 * MB)
+            # 5MB parts reserve ~20MB (not 32MB like 16MB parts) so two can run
+            # alongside one ~48MB copy within the 96MB mixed-workload governor.
+            r = _upload_part(client, bucket, key, 1, upload_id, 5 * MB)
             if r["success"]:
                 client.complete_multipart_upload(
                     Bucket=bucket,
