@@ -16,6 +16,7 @@ test-unit:
 INTEGRATION_memory_usage_TESTS = tests/integration/test_memory_usage.py
 INTEGRATION_memory_leak_TESTS = tests/integration/test_memory_leak.py
 INTEGRATION_memory_copy_TESTS = tests/integration/test_copy_memory_governor.py
+INTEGRATION_memory_copy_PYTEST_OPTS = -n0
 INTEGRATION_core_TESTS = \
 	tests/integration/test_integration.py \
 	tests/integration/test_handlers.py \
@@ -62,7 +63,9 @@ endif
 	@docker compose -f tests/docker-compose.yml up -d
 	@sleep 3
 	@AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin \
-		uv run pytest -m "e2e" -v -n auto --dist loadgroup $(INTEGRATION_$(SHARD)_TESTS); \
+		uv run pytest -m "e2e" -v \
+		$(if $(INTEGRATION_$(SHARD)_PYTEST_OPTS),$(INTEGRATION_$(SHARD)_PYTEST_OPTS),-n auto --dist loadgroup) \
+		$(INTEGRATION_$(SHARD)_TESTS); \
 		EXIT_CODE=$$?; \
 		docker compose -f tests/docker-compose.yml down; \
 		exit $$EXIT_CODE
