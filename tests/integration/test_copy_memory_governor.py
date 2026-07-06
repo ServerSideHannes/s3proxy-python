@@ -6,7 +6,6 @@ These tests need MinIO on localhost:9000 (same as other e2e tests).
 from __future__ import annotations
 
 import concurrent.futures
-import contextlib
 import socket
 import sys
 import time
@@ -151,9 +150,7 @@ class TestCopyMemoryGovernorSubprocess:
         except Exception:
             pass
 
-    def test_three_concurrent_large_copies_do_not_oom_server(
-        self, copy_stress_server, copy_bucket
-    ):
+    def test_three_concurrent_large_copies_do_not_oom_server(self, copy_stress_server, copy_bucket):
         """Prod regression: 3 concurrent large copies must not all run + OOM."""
         endpoint, proc = copy_stress_server
         client, bucket = copy_bucket
