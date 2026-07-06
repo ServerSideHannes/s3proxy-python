@@ -30,7 +30,11 @@ jobs:
 
   integration:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [memory, core, multipart, copy_range, misc]
+    timeout-minutes: ${{ matrix.shard == 'memory' && 15 || 10 }}
     steps:
       - uses: actions/checkout@v7
 
@@ -46,5 +50,5 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
-      - name: Run integration tests
-        run: make test-integration
+      - name: Run integration tests (${{ matrix.shard }})
+        run: make test-integration-shard SHARD=${{ matrix.shard }}
