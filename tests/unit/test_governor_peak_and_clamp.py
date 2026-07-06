@@ -378,14 +378,15 @@ async def test_many_concurrent_scylla_acquires_via_gather():
         reset_state()
 
 
-def test_honest_peak_still_available_for_copy_pipeline():
-    """copy_pipeline_peak uses honest streaming_upload_peak (not governor cap).
+def test_honest_copy_peak_exceeds_upload_governor_cap():
+    """copy_pipeline_peak uses per-chunk honest peak, not governor_memory_footprint.
 
-    Copies reserve separately in the handler; the upload gate cap must not
-    shrink copy_pipeline_peak or copies would under-reserve and OOM.
+    Upload gate caps multi-GB Content-Length at the routine workload peak; copies
+    reserve separately via reserve_copy_memory with copy_governor_clamped_reserve.
     """
     huge = 5 * 1024 * MB
     assert crypto.copy_pipeline_peak(huge) > estimate_memory_footprint("PUT", huge)
+    part = crypto.memory_bounded_part_size(huge)
     assert crypto.copy_pipeline_peak(huge) == (
-        crypto.streaming_upload_peak(huge) + 2 * crypto.MAX_BUFFER_SIZE
+        crypto.streaming_upload_peak(huge) + 2 * crypto.MAX_BUFFER_SIZE + part // 7
     )

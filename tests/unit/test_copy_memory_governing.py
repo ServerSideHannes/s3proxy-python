@@ -27,11 +27,11 @@ def test_copy_pipeline_peak_matches_framed_upload():
     # size-independent 4*MAX_BUFFER_SIZE under-counted the real peak ~6x -- when
     # it un-framed a whole part -- and OOMed the pod.
     for size in (64 * MB, 512 * MB, 5 * 1024 * MB):
-        # Same framed writer peak, plus two MAX_BUFFER_SIZE buffers for the copy
-        # source read pipeline the body-fed upload path doesn't have.
-        assert crypto.copy_pipeline_peak(size) == (
-            crypto.streaming_upload_peak(size) + 2 * crypto.MAX_BUFFER_SIZE
-        )
+        part = crypto.memory_bounded_part_size(size)
+        base = crypto.streaming_upload_peak(size) + 2 * crypto.MAX_BUFFER_SIZE
+        if part > 32 * MB:
+            base += part // 7
+        assert crypto.copy_pipeline_peak(size) == base
 
 
 def test_copy_pipeline_peak_small_is_three_x():
@@ -63,7 +63,7 @@ async def test_reserve_memory_bounds_concurrent_copies():
 
     async def one_copy():
         nonlocal peak_active, inside, max_inside
-        async with concurrency.reserve_memory(per_copy):
+        async with concurrency.reserve_copy_memory(per_copy):
             inside += 1
             max_inside = max(max_inside, inside)
             peak_active = max(peak_active, limiter.active_bytes)
