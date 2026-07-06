@@ -261,6 +261,4 @@ class TestCopyMemoryGovernorSubprocess:
         peak_mb = peak_rss / MB
         print(f"[copy-rss] peak={peak_mb:.1f}MB", file=sys.stderr)
         # Local dev has no 1Gi cap; prod manifest copy peaked ~535MB tracemalloc heap.
-        assert peak_mb < 900, (
-            f"RSS {peak_mb:.0f}MB too high for single {SOURCE_SIZE // MB}MB copy"
-        )
+        assert peak_mb < 900, f"RSS {peak_mb:.0f}MB too high for single {SOURCE_SIZE // MB}MB copy"
