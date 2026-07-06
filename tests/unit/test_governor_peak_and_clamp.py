@@ -231,8 +231,8 @@ def test_old_clamp_monopolized_full_budget():
 async def test_prod_replay_active_33mb_plus_huge_request_fits():
     """Exact prod stall: 33MB Scylla part active + clamped request at 312MB limit.
 
-    Pre-fix: 33 + 312 > 312 -> perpetual MEMORY_BACKPRESSURE.
-  Post-fix: 33 + ~67 < 312 -> second acquire succeeds immediately.
+      Pre-fix: 33 + 312 > 312 -> perpetual MEMORY_BACKPRESSURE.
+    Post-fix: 33 + ~67 < 312 -> second acquire succeeds immediately.
     """
     reset_state()
     set_memory_limit(312)
@@ -294,6 +294,7 @@ async def test_mixed_scylla_workload_concurrent_acquire():
     reset_state()
     set_memory_limit(312)
     try:
+
         async def acquire(cl: int) -> int:
             return await try_acquire_memory(estimate_memory_footprint("PUT", cl))
 
@@ -388,4 +389,3 @@ def test_honest_peak_still_available_for_copy_pipeline():
     assert crypto.copy_pipeline_peak(huge) == (
         crypto.streaming_upload_peak(huge) + 2 * crypto.MAX_BUFFER_SIZE
     )
-
