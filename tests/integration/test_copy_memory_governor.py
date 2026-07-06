@@ -138,7 +138,9 @@ def copy_stress_server():
         port,
         log_output=False,
         S3PROXY_MEMORY_LIMIT_MB=GOVERNOR_MB,
-        S3PROXY_BACKPRESSURE_TIMEOUT="2",
+        # 0 = reject immediately (SlowDown), don't queue — otherwise all 3 copies
+        # succeed serially within the 2s wait and the concurrency assertion fails.
+        S3PROXY_BACKPRESSURE_TIMEOUT="0",
         S3PROXY_MAX_PART_SIZE_MB="0",
     ) as (endpoint, proc):
         yield endpoint, proc
@@ -196,7 +198,9 @@ class TestCopyMemoryGovernorSubprocess:
         succeeded = sum(1 for r in results if r["success"])
         slowed = sum(1 for r in results if r.get("code") == "SlowDown")
         assert succeeded >= 1, f"expected at least one copy to succeed: {results}"
+        # 96MB budget fits two ~48MB copy slots; the third must be rejected, not queued.
         assert slowed >= 1, f"expected backpressure on concurrent copies: {results}"
+        assert succeeded <= 2, f"more than two copies ran concurrently: {results}"
         assert succeeded + slowed == len(results), f"unexpected errors: {results}"
 
     def test_mixed_scylla_uploads_and_large_copy_server_survives(
