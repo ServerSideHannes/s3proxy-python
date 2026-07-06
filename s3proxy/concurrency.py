@@ -12,7 +12,7 @@ from collections.abc import Callable
 
 import structlog
 
-from s3proxy.crypto import streaming_upload_peak
+from s3proxy.crypto import governor_memory_footprint, streaming_governor_clamped_reserve
 from s3proxy.errors import S3Error
 from s3proxy.metrics import MEMORY_LIMIT_BYTES, MEMORY_REJECTIONS, MEMORY_RESERVED_BYTES
 
@@ -87,21 +87,21 @@ class ConcurrencyLimiter:
 
         to_reserve = max(MIN_RESERVATION, bytes_needed)
 
-        # A single request's honest peak can exceed the whole budget: the framed
-        # upload path needs ~2-3x the internal part, more than a deliberately tight
-        # governor budget (which sits well below pod RAM to bound *concurrency*).
-        # Clamp to the budget so such a request runs exclusively (concurrency 1)
-        # rather than being refused outright -- the proxy streams it fine, it just
-        # can't share the budget. ponytail: a request whose true peak exceeds the
-        # pod's RAM (not just this budget) could still OOM when run alone; all
-        # realistic parts (<=~56MB) stay far under that.
+        # A single request's honest peak can exceed the governor budget (e.g. a
+        # multi-GB PutObject whose internal parts are hundreds of MB). Reserve the
+        # routine-workload peak, not the whole budget, so concurrent ~50MB Scylla
+        # parts are not starved behind one clamped slot. Rare huge uploads may use
+        # more RSS than reserved when run alone; the pod memory limit is the
+        # backstop.
         if to_reserve > self._limit_bytes:
+            honest = to_reserve
+            to_reserve = streaming_governor_clamped_reserve(honest, self._limit_bytes)
             logger.info(
                 "MEMORY_CLAMPED_TO_BUDGET",
-                requested_mb=round(to_reserve / 1024 / 1024, 2),
+                requested_mb=round(honest / 1024 / 1024, 2),
+                reserved_mb=round(to_reserve / 1024 / 1024, 2),
                 limit_mb=round(self._limit_bytes / 1024 / 1024, 2),
             )
-            to_reserve = self._limit_bytes
 
         async with self._condition:
             deadline = asyncio.get_event_loop().time() + BACKPRESSURE_TIMEOUT
@@ -179,7 +179,7 @@ def estimate_memory_footprint(method: str, content_length: int) -> int:
         return MAX_BUFFER_SIZE
     if method == "POST":
         return MIN_RESERVATION
-    return max(MIN_RESERVATION, streaming_upload_peak(content_length))
+    return max(MIN_RESERVATION, governor_memory_footprint(content_length))
 
 
 # Module-level convenience functions delegating to the default instance

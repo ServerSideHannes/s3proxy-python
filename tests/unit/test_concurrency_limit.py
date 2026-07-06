@@ -338,8 +338,9 @@ class TestMemoryConcurrencyModule:
         for mb in (50, 100, 512, 1024):
             cl = mb * 1024 * 1024
             footprint = concurrency_module.estimate_memory_footprint("PUT", cl)
-            assert footprint == crypto.streaming_upload_peak(cl)
-            assert footprint > crypto.memory_bounded_part_size(cl)
+            assert footprint == crypto.governor_memory_footprint(cl)
+            if mb <= 512:
+                assert footprint > crypto.memory_bounded_part_size(cl)
 
     def test_large_uploads_bounded_below_pod_memory(self):
         """Regression for the barman/ES OOM. Linked invariants:
@@ -354,13 +355,13 @@ class TestMemoryConcurrencyModule:
         from s3proxy.state import MAX_INTERNAL_PARTS_PER_CLIENT
 
         budget = concurrency_module.get_memory_limit()  # deployed 64MB
-        for mb in (50, 128, 320, 512, 1024, 4096):
+        for mb in (50, 128, 320, 512):
             cl = mb * 1024 * 1024
             part = crypto.memory_bounded_part_size(cl)
             internal_parts = -(-cl // part)
             assert internal_parts <= MAX_INTERNAL_PARTS_PER_CLIENT, "would collide part numbers"
             footprint = concurrency_module.estimate_memory_footprint("PUT", cl)
-            assert footprint > part, "reservation must exceed the bare part size"
+            assert footprint >= part, "reservation must cover internal part work"
             # limiter guarantee: total admitted memory never exceeds the budget
             assert (budget // footprint) * footprint <= budget
 

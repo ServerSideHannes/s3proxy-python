@@ -64,6 +64,14 @@ MAX_INTERNAL_PARTS_PER_CLIENT = 20
 # this boundary and the reader splits ciphertext on (FRAME_PLAINTEXT_SIZE + overhead).
 FRAME_PLAINTEXT_SIZE = 8 * 1024 * 1024  # 8 MB plaintext per frame
 
+# Largest routine client part the memory governor is sized for (barman 512MB,
+# Scylla ~50MB). When a single request's honest peak exceeds the pod budget,
+# clamp its *reservation* to this workload's peak — not the whole budget — so
+# concurrent normal-sized parts are not starved. Rare multi-GB PutObjects may
+# still use more RSS than reserved when run alone; the 1Gi pod limit is the
+# backstop.
+STREAMING_GOVERNOR_CLIENT_PART_BYTES = 512 * 1024 * 1024
+
 
 def calculate_optimal_part_size(content_length: int) -> int:
     """Calculate optimal part size to avoid creating parts < 5MB that aren't the final part."""
@@ -169,23 +177,49 @@ def memory_bounded_part_size(
 def streaming_upload_peak(content_length: int) -> int:
     """Peak memory the framed UploadPart path holds for one in-flight request.
 
-    The path encrypts one internal part at a time, so this is NOT the part size:
-    at the peak it stacks the accumulated ciphertext (~part), the AES-GCM
-    encrypt transient (nonce||ct||tag plus encrypt's concat copy, ~2 frames), the
-    held plaintext frame, and aiobotocore's copy of the body for the HTTP
-    request (~part). ``2*part + 2*frame`` upper-bounds both regimes: encrypt
-    transient dominates small (single-frame) parts, the body copy dominates large
-    multi-frame parts. Measured peaks (tracemalloc): 16MB part -> 24.5MB (bound
-    32MB), 512MB client part / 25.6MB internal -> 56.1MB (bound 67MB). Reserving
-    only the part size here is what let the limiter admit ~3x too many concurrent
-    uploads and OOM.
+    The path encrypts one internal part at a time. At peak it stacks the
+    accumulated ciphertext (~part), one plaintext frame being sealed, and (for
+    signed uploads) aiobotocore's copy of the part body for the HTTP request.
+
+    Small single-frame parts (part <= FRAME_PLAINTEXT_SIZE): encrypt transient
+    dominates, bound by ``4*part`` (measured: 100KB -> 400KB).
+
+    Multi-frame parts: ``2*part + FRAME_PLAINTEXT_SIZE`` (measured tracemalloc
+    with transport body copy: 16MB -> 24.5MB, 512MB/25.6MB internal -> 56.1MB,
+    4GB/204MB internal -> 416.7MB). The old ``2*part + 2*frame`` formula
+    double-counted the frame term and scaled with multi-GB Content-Length even
+    though only one frame is in flight — starving concurrent ~50MB Scylla parts.
     """
-    # ponytail: bound, not exact. Ceiling = 2x part + 2x frame; the avoidable
-    # copies (encrypt's nonce||ct concat, aiobotocore's body copy) could be
-    # removed to roughly halve real peak, letting the limiter admit more uploads.
     part = memory_bounded_part_size(content_length)
-    frame = min(part, FRAME_PLAINTEXT_SIZE)
-    return 2 * part + 2 * frame
+    if part <= FRAME_PLAINTEXT_SIZE:
+        return 4 * part
+    return 2 * part + FRAME_PLAINTEXT_SIZE
+
+
+def streaming_governor_clamped_reserve(honest_peak: int, budget_bytes: int) -> int:
+    """Reservation when *honest_peak* exceeds the governor budget.
+
+    Do not grab the entire budget — that blocks concurrent routine-sized parts
+    (Scylla ~50MB, barman 512MB) behind one oversized estimate. Cap at the peak
+    for the largest routine client part instead.
+    """
+    routine_peak = streaming_upload_peak(STREAMING_GOVERNOR_CLIENT_PART_BYTES)
+    return min(honest_peak, routine_peak, budget_bytes)
+
+
+def governor_memory_footprint(content_length: int) -> int:
+    """Memory to reserve for a framed upload at the request gate.
+
+    Uses the honest per-part peak for routine client part sizes (≤512MB) but
+    caps at the 512MB-workload peak for larger Content-Length values. Multi-GB
+    single PutObjects are rare in backup traffic (Scylla uses ~50MB multipart
+    parts); capping prevents a 6GB Content-Length from reserving 500MB+ and
+    starving concurrent parts. A lone multi-GB PutObject may exceed its
+    reservation — the pod memory limit is the backstop.
+    """
+    honest = streaming_upload_peak(content_length)
+    routine_cap = streaming_upload_peak(STREAMING_GOVERNOR_CLIENT_PART_BYTES)
+    return min(honest, routine_cap)
 
 
 def copy_pipeline_peak(plaintext_size: int) -> int:
