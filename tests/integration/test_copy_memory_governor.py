@@ -49,20 +49,35 @@ def _put_large_source(client, bucket: str, key: str, size: int, chunk: int = 8 *
 
 
 class _RepeatingBody:
-    """Deterministic readable without holding *size* bytes in the test process."""
+    """File-like stream without holding *size* bytes (boto3 checksum needs tell/seek)."""
 
     def __init__(self, size: int, chunk: int):
         self._size = size
         self._chunk = chunk
-        self._sent = 0
+        self._pos = 0
+
+    def tell(self) -> int:
+        return self._pos
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        if whence == 0:
+            self._pos = offset
+        elif whence == 1:
+            self._pos += offset
+        elif whence == 2:
+            self._pos = self._size + offset
+        else:
+            raise ValueError(f"invalid whence: {whence}")
+        self._pos = max(0, min(self._pos, self._size))
+        return self._pos
 
     def read(self, amt=-1):
-        if self._sent >= self._size:
+        if self._pos >= self._size:
             return b""
         if amt is None or amt < 0:
             amt = self._chunk
-        take = min(amt, self._chunk, self._size - self._sent)
-        self._sent += take
+        take = min(amt, self._chunk, self._size - self._pos)
+        self._pos += take
         return b"x" * take
 
 
@@ -167,8 +182,8 @@ class TestCopyMemoryGovernorSubprocess:
         succeeded = sum(1 for r in results if r["success"])
         slowed = sum(1 for r in results if r.get("code") == "SlowDown")
         assert succeeded >= 1, f"expected at least one copy to succeed: {results}"
-        assert succeeded + slowed == 3, f"unexpected errors: {results}"
-        assert succeeded < 3, "all 3 copies succeeded concurrently — governor failed to serialize"
+        assert slowed >= 1, f"expected backpressure on concurrent copies: {results}"
+        assert succeeded + slowed == len(results), f"unexpected errors: {results}"
 
     def test_mixed_scylla_uploads_and_large_copy_server_survives(
         self, copy_stress_server, copy_bucket
