@@ -386,7 +386,7 @@ class MiscObjectMixin(BaseHandler):
         else:
             _s = head_resp.get("Metadata", {}).get("plaintext-size")
             pt_size = int(_s) if _s else crypto.plaintext_size(head_resp.get("ContentLength", 0))
-        async with concurrency.reserve_memory(crypto.copy_pipeline_peak(pt_size)):
+        async with concurrency.reserve_copy_memory(crypto.copy_pipeline_peak(pt_size)):
             return await self._copy_encrypted_inner(
                 client,
                 bucket,

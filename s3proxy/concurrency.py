@@ -12,7 +12,11 @@ from collections.abc import Callable
 
 import structlog
 
-from s3proxy.crypto import governor_memory_footprint, streaming_governor_clamped_reserve
+from s3proxy.crypto import (
+    copy_governor_clamped_reserve,
+    governor_memory_footprint,
+    streaming_governor_clamped_reserve,
+)
 from s3proxy.errors import S3Error
 from s3proxy.metrics import MEMORY_LIMIT_BYTES, MEMORY_REJECTIONS, MEMORY_RESERVED_BYTES
 
@@ -80,7 +84,7 @@ class ConcurrencyLimiter:
         self._limit_bytes = limit_mb * 1024 * 1024
         MEMORY_LIMIT_BYTES.set(self._limit_bytes)
 
-    async def try_acquire(self, bytes_needed: int) -> int:
+    async def try_acquire(self, bytes_needed: int, *, copy: bool = False) -> int:
         """Reserve memory, waiting up to BACKPRESSURE_TIMEOUT if at capacity."""
         if self._limit_bytes <= 0:
             return 0
@@ -93,14 +97,23 @@ class ConcurrencyLimiter:
         # parts are not starved behind one clamped slot. Rare huge uploads may use
         # more RSS than reserved when run alone; the pod memory limit is the
         # backstop.
+        #
+        # Server-side copies use copy_governor_clamped_reserve instead: their
+        # honest peak already reflects real chunk work and must not be crushed to
+        # the routine upload peak (~59MB) or several multi-GB manifest copies run
+        # concurrently and OOM the pod.
         if to_reserve > self._limit_bytes:
             honest = to_reserve
-            to_reserve = streaming_governor_clamped_reserve(honest, self._limit_bytes)
+            if copy:
+                to_reserve = copy_governor_clamped_reserve(honest, self._limit_bytes)
+            else:
+                to_reserve = streaming_governor_clamped_reserve(honest, self._limit_bytes)
             logger.info(
                 "MEMORY_CLAMPED_TO_BUDGET",
                 requested_mb=round(honest / 1024 / 1024, 2),
                 reserved_mb=round(to_reserve / 1024 / 1024, 2),
                 limit_mb=round(self._limit_bytes / 1024 / 1024, 2),
+                copy=copy,
             )
 
         async with self._condition:
@@ -197,6 +210,10 @@ async def try_acquire_memory(bytes_needed: int) -> int:
     return await _default.try_acquire(bytes_needed)
 
 
+async def try_acquire_copy_memory(bytes_needed: int) -> int:
+    return await _default.try_acquire(bytes_needed, copy=True)
+
+
 @contextlib.asynccontextmanager
 async def reserve_memory(bytes_needed: int):
     """Reserve memory for the duration of a block, releasing on exit.
@@ -206,6 +223,17 @@ async def reserve_memory(bytes_needed: int):
     gated by the limiter like uploads instead of running unbounded.
     """
     reserved = await _default.try_acquire(bytes_needed)
+    try:
+        yield
+    finally:
+        if reserved > 0:
+            await _default.release(reserved)
+
+
+@contextlib.asynccontextmanager
+async def reserve_copy_memory(bytes_needed: int):
+    """Reserve memory for a server-side copy (upload-style clamp does not apply)."""
+    reserved = await _default.try_acquire(bytes_needed, copy=True)
     try:
         yield
     finally:

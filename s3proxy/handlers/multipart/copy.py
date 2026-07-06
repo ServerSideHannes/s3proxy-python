@@ -62,7 +62,8 @@ class CopyPartMixin(BaseHandler):
                 # Small copies buffer the whole object + re-encrypt it; gate them
                 # by the limiter too (they carry no body, so the request-level
                 # reservation was ~nothing and a small-object flood ran unbounded).
-                async with concurrency.reserve_memory(crypto.copy_pipeline_peak(plaintext_size)):
+                peak = crypto.copy_pipeline_peak(plaintext_size)
+                async with concurrency.reserve_copy_memory(peak):
                     return await self._simple_copy_part(
                         client,
                         bucket,
@@ -221,7 +222,8 @@ class CopyPartMixin(BaseHandler):
         # reserved ~nothing -- but this streams the source through decrypt +
         # re-encrypt. Reserve the pipeline peak so concurrent copies are bounded
         # (a dedup flood otherwise runs unbounded and OOMs the pod).
-        async with concurrency.reserve_memory(crypto.copy_pipeline_peak(plaintext_size)):
+        peak = crypto.copy_pipeline_peak(plaintext_size)
+        async with concurrency.reserve_copy_memory(peak):
             return await self._streaming_copy_part_inner(
                 client,
                 bucket,

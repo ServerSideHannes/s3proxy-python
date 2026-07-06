@@ -63,7 +63,7 @@ async def test_reserve_memory_bounds_concurrent_copies():
 
     async def one_copy():
         nonlocal peak_active, inside, max_inside
-        async with concurrency.reserve_memory(per_copy):
+        async with concurrency.reserve_copy_memory(per_copy):
             inside += 1
             max_inside = max(max_inside, inside)
             peak_active = max(peak_active, limiter.active_bytes)
