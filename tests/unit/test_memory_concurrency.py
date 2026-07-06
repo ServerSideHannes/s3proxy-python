@@ -60,8 +60,10 @@ class TestMemoryFootprintEstimation:
         for mb in (50, 100, 512, 1024):
             cl = mb * 1024 * 1024
             footprint = concurrency_module.estimate_memory_footprint("PUT", cl)
-            assert footprint == crypto.streaming_upload_peak(cl)
-            assert footprint > crypto.memory_bounded_part_size(cl)
+            assert footprint == crypto.governor_memory_footprint(cl)
+            if mb <= 512:
+                assert footprint == crypto.streaming_upload_peak(cl)
+            assert footprint >= crypto.memory_bounded_part_size(cl)
 
     def test_minimum_reservation_enforced(self):
         """0-byte file should still reserve MIN_RESERVATION (64KB)."""
@@ -155,19 +157,19 @@ class TestMemoryBudgetManagement:
         assert concurrency_module.get_active_memory() == 0
 
     @pytest.mark.asyncio
-    async def test_single_request_larger_than_budget_runs_exclusively(self):
-        """A request whose footprint exceeds the whole budget is NOT rejected -- it
-        is clamped to the budget and runs exclusively (concurrency 1). The proxy
-        streams it fine; the budget bounds concurrency, not one request's peak.
-        (Rejecting it would refuse large uploads under a tight budget -- the
-        integration OOM test uploads 30MB at a 16MB budget and must succeed.)
+    async def test_single_request_larger_than_budget_clamps_to_routine_peak(self):
+        """A request whose footprint exceeds the budget is clamped to the routine
+        workload peak (512MB client part), not the whole budget — so concurrent
+        normal-sized parts are not starved.
         """
         import s3proxy.concurrency as concurrency_module
+        from s3proxy import crypto
 
         limit = concurrency_module.get_memory_limit()
+        routine = crypto.streaming_upload_peak(crypto.STREAMING_GOVERNOR_CLIENT_PART_BYTES)
         reserved = await concurrency_module.try_acquire_memory(100 * 1024 * 1024)
-        assert reserved == limit  # clamped to the whole budget
-        assert concurrency_module.get_active_memory() == limit
+        assert reserved == min(100 * 1024 * 1024, routine, limit)
+        assert concurrency_module.get_active_memory() == reserved
         await concurrency_module.release_memory(reserved)
         assert concurrency_module.get_active_memory() == 0
 
@@ -280,12 +282,11 @@ class TestRealWorldScenarios:
         limit = 64 * 1024 * 1024
         reservations = []
 
-        # 16MB ES part: the framed path's real peak (streaming_upload_peak) is well
-        # above the bare 8MB internal-part size -- the under-count that caused the
-        # OOM. One such reservation is half the budget, so two run concurrently.
+        # 16MB ES part: honest reservation fits the 64MB budget with room for
+        # concurrency (the under-count admitted ~8 -> OOM).
         es = concurrency_module.estimate_memory_footprint("PUT", 16 * 1024 * 1024)
         assert es == crypto.streaming_upload_peak(16 * 1024 * 1024)
-        assert es == limit // 2
+        assert es <= limit // 2
         reservations.append(await concurrency_module.try_acquire_memory(es))
 
         used = es

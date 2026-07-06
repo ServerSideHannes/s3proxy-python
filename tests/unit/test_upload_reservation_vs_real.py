@@ -79,7 +79,7 @@ async def _measure_peak(content_length):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mb", [16, 64, 512])
+@pytest.mark.parametrize("mb", [16, 50, 64, 512])
 async def test_reservation_bounds_real_framed_peak(mb):
     content_length = mb * MB
     real_peak = await _measure_peak(content_length)
@@ -114,3 +114,24 @@ def test_es_part_fits_deploy_budget_with_concurrency():
         )
     finally:
         set_memory_limit(DEPLOY_LIMIT_MB)
+
+
+@pytest.mark.asyncio
+async def test_scylla_50mb_signed_part_reservation_covers_transport_copy():
+    """Prod Scylla SST parts are ~50MB signed uploads with aiobotocore body copy."""
+    content_length = 50 * MB
+    real_peak = await _measure_peak(content_length)
+    reserved = estimate_memory_footprint("PUT", content_length)
+    assert 24 * MB <= real_peak <= 40 * MB
+    assert reserved >= real_peak
+    assert reserved < 40 * MB
+
+
+def test_multi_gb_content_length_capped_not_honest_peak():
+    """6.6GB Content-Length must not reserve the honest ~600MB+ signed peak."""
+    cl = 6_597_946_546
+    honest = crypto.streaming_upload_peak(cl)
+    reserved = estimate_memory_footprint("PUT", cl)
+    assert honest > 500 * MB
+    assert reserved < 80 * MB
+    assert reserved < honest
