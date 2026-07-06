@@ -37,6 +37,16 @@ data:
       bind *:{{ .Values.frontproxy.containerPort }}
       default_backend s3proxy_pods
 
+    {{- if .Values.frontproxy.metrics.enabled }}
+    # Native HAProxy Prometheus exporter (queue depth, sessions, backend health).
+    # Scraped via the `metrics` Service port + ServiceMonitor.
+    frontend prometheus
+      bind *:{{ .Values.frontproxy.metrics.port }}
+      mode http
+      no log
+      http-request use-service prometheus-exporter if { path /metrics }
+    {{- end }}
+
     backend s3proxy_pods
       balance leastconn
       # Per-request balancing: don't pin a client to one server, and re-resolve the

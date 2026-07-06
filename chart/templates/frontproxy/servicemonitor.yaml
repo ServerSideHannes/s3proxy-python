@@ -1,0 +1,26 @@
+{{- if and .Values.frontproxy.enabled .Values.frontproxy.metrics.enabled .Values.frontproxy.metrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Chart.Name }}-frontproxy
+  labels:
+    {{- include "s3proxy.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontproxy
+    {{- with .Values.frontproxy.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  jobLabel: app.kubernetes.io/name
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "s3proxy.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: frontproxy
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.frontproxy.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.frontproxy.metrics.serviceMonitor.scrapeTimeout }}
+{{- end }}
