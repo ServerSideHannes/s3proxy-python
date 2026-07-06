@@ -12,11 +12,10 @@ test: test-unit
 test-unit:
 	uv run pytest -m "not e2e and not ha" -v -n auto
 
-# Integration shards for parallel CI (make test-integration-shard SHARD=memory)
-INTEGRATION_memory_TESTS = \
-	tests/integration/test_memory_usage.py \
-	tests/integration/test_memory_leak.py \
-	tests/integration/test_copy_memory_governor.py
+# Integration shards for parallel CI (make test-integration-shard SHARD=memory_usage)
+INTEGRATION_memory_usage_TESTS = tests/integration/test_memory_usage.py
+INTEGRATION_memory_leak_TESTS = tests/integration/test_memory_leak.py
+INTEGRATION_memory_copy_TESTS = tests/integration/test_copy_memory_governor.py
 INTEGRATION_core_TESTS = \
 	tests/integration/test_integration.py \
 	tests/integration/test_handlers.py \
@@ -54,7 +53,7 @@ test-integration:
 		docker compose -f tests/docker-compose.yml down; \
 		exit $$EXIT_CODE
 
-# Run one integration shard (CI matrix). SHARD=memory|core|multipart|copy_range|misc
+# Run one integration shard (CI matrix). SHARD=memory_usage|memory_leak|memory_copy|...
 test-integration-shard:
 ifndef SHARD
 	$(error SHARD is required, e.g. make test-integration-shard SHARD=memory)

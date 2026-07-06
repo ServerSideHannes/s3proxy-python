@@ -124,53 +124,67 @@ def _upload_part(client, bucket: str, key: str, part_number: int, upload_id: str
         return {"success": False, "code": code, "error": str(e)}
 
 
+# 256MB source: copy_pipeline_peak ~49.6MB > 48MB governor → exclusive slot.
+# (512MB works too but triples CI upload time with no extra coverage.)
+SOURCE_SIZE = 256 * MB
+GOVERNOR_MB = "48"
+SOURCE_KEY = "shared-large-source.bin"
+
+
+@pytest.fixture(scope="module")
+def copy_stress_server():
+    port = _find_free_port()
+    with run_s3proxy(
+        port,
+        log_output=False,
+        S3PROXY_MEMORY_LIMIT_MB=GOVERNOR_MB,
+        S3PROXY_BACKPRESSURE_TIMEOUT="2",
+        S3PROXY_MAX_PART_SIZE_MB="0",
+    ) as (endpoint, proc):
+        yield endpoint, proc
+
+
+@pytest.fixture(scope="module")
+def copy_bucket(copy_stress_server):
+    endpoint, _ = copy_stress_server
+    client = _client(endpoint)
+    bucket = f"copy-gov-{uuid.uuid4().hex[:8]}"
+    try:
+        client.create_bucket(Bucket=bucket)
+    except ClientError as exc:
+        pytest.skip(f"MinIO/S3 backend not available for e2e: {exc}")
+    yield client, bucket
+    try:
+        resp = client.list_objects_v2(Bucket=bucket)
+        if "Contents" in resp:
+            client.delete_objects(
+                Bucket=bucket,
+                Delete={"Objects": [{"Key": o["Key"]} for o in resp["Contents"]]},
+            )
+        client.delete_bucket(Bucket=bucket)
+    except Exception:
+        pass
+
+
+@pytest.fixture(scope="module")
+def large_source(copy_bucket):
+    """Upload once for all copy-governor tests (avoids 3× redundant 256MB puts)."""
+    client, bucket = copy_bucket
+    _put_large_source(client, bucket, SOURCE_KEY, SOURCE_SIZE)
+    return SOURCE_KEY
+
+
 @pytest.mark.e2e
 class TestCopyMemoryGovernorSubprocess:
     """Real subprocess + boto3: copies must not OOM the server."""
 
-    # 512MB source: copy_pipeline_peak ~75MB > 48MB governor → exclusive slot.
-    SOURCE_SIZE = 512 * MB
-    GOVERNOR_MB = "48"
-
-    @pytest.fixture
-    def copy_stress_server(self):
-        port = _find_free_port()
-        with run_s3proxy(
-            port,
-            log_output=False,
-            S3PROXY_MEMORY_LIMIT_MB=self.GOVERNOR_MB,
-            S3PROXY_BACKPRESSURE_TIMEOUT="2",
-            S3PROXY_MAX_PART_SIZE_MB="0",
-        ) as (endpoint, proc):
-            yield endpoint, proc
-
-    @pytest.fixture
-    def copy_bucket(self, copy_stress_server):
-        endpoint, _ = copy_stress_server
-        client = _client(endpoint)
-        bucket = f"copy-gov-{uuid.uuid4().hex[:8]}"
-        try:
-            client.create_bucket(Bucket=bucket)
-        except ClientError as exc:
-            pytest.skip(f"MinIO/S3 backend not available for e2e: {exc}")
-        yield client, bucket
-        try:
-            resp = client.list_objects_v2(Bucket=bucket)
-            if "Contents" in resp:
-                client.delete_objects(
-                    Bucket=bucket,
-                    Delete={"Objects": [{"Key": o["Key"]} for o in resp["Contents"]]},
-                )
-            client.delete_bucket(Bucket=bucket)
-        except Exception:
-            pass
-
-    def test_three_concurrent_large_copies_do_not_oom_server(self, copy_stress_server, copy_bucket):
+    def test_three_concurrent_large_copies_do_not_oom_server(
+        self, copy_stress_server, copy_bucket, large_source
+    ):
         """Prod regression: 3 concurrent large copies must not all run + OOM."""
         endpoint, proc = copy_stress_server
         client, bucket = copy_bucket
-        source_key = "large-source.bin"
-        _put_large_source(client, bucket, source_key, self.SOURCE_SIZE)
+        source_key = large_source
 
         def one_copy(i: int) -> dict:
             return _upload_part_copy(client, bucket, f"dest-{i}.bin", source_key)
@@ -186,13 +200,12 @@ class TestCopyMemoryGovernorSubprocess:
         assert succeeded + slowed == len(results), f"unexpected errors: {results}"
 
     def test_mixed_scylla_uploads_and_large_copy_server_survives(
-        self, copy_stress_server, copy_bucket
+        self, copy_stress_server, copy_bucket, large_source
     ):
         """Prod mix: concurrent ~50MB parts + large manifest-style copy."""
         endpoint, proc = copy_stress_server
         client, bucket = copy_bucket
-        source_key = "manifest-source.bin"
-        _put_large_source(client, bucket, source_key, self.SOURCE_SIZE)
+        source_key = large_source
 
         def scylla_part(i: int) -> dict:
             key = f"sst-part-{i}.bin"
@@ -221,12 +234,13 @@ class TestCopyMemoryGovernorSubprocess:
         assert sum(1 for r in upload_results if r["success"]) >= 2
         assert copy_result["success"] or copy_result.get("code") == "SlowDown"
 
-    def test_single_large_copy_rss_stays_bounded(self, copy_stress_server, copy_bucket):
+    def test_single_large_copy_rss_stays_bounded(
+        self, copy_stress_server, copy_bucket, large_source
+    ):
         """One large copy must not push RSS toward pod limit (1Gi in prod)."""
         endpoint, proc = copy_stress_server
         client, bucket = copy_bucket
-        source_key = "rss-source.bin"
-        _put_large_source(client, bucket, source_key, self.SOURCE_SIZE)
+        source_key = large_source
 
         ps_proc = psutil.Process(proc.pid)
         peak_rss = ps_proc.memory_info().rss
@@ -248,5 +262,5 @@ class TestCopyMemoryGovernorSubprocess:
         print(f"[copy-rss] peak={peak_mb:.1f}MB", file=sys.stderr)
         # Local dev has no 1Gi cap; prod manifest copy peaked ~535MB tracemalloc heap.
         assert peak_mb < 900, (
-            f"RSS {peak_mb:.0f}MB too high for single {self.SOURCE_SIZE // MB}MB copy"
+            f"RSS {peak_mb:.0f}MB too high for single {SOURCE_SIZE // MB}MB copy"
         )
