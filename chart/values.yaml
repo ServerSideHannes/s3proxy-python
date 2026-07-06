@@ -218,6 +218,17 @@ frontproxy:
   # timeouts.queue) and redispatch to a less-loaded pod instead of hard-failing.
   # ~40 x worst-case part size stays well under the pod memory limit.
   maxConnPerPod: 40
+  # HAProxy's built-in Prometheus exporter on a separate port (not exposed via
+  # Ingress). Exposes haproxy_frontend_current_sessions,
+  # haproxy_backend_current_queue, haproxy_server_current_queue, etc.
+  metrics:
+    enabled: true
+    port: 8404
+    serviceMonitor:
+      enabled: true
+      interval: 30s
+      scrapeTimeout: 10s
+      labels: {}
   resources:
     requests:
       cpu: "50m"

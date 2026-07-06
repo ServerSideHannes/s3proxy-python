@@ -28,6 +28,11 @@ spec:
             - name: http
               containerPort: {{ .Values.frontproxy.containerPort }}
               protocol: TCP
+            {{- if .Values.frontproxy.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.frontproxy.metrics.port }}
+              protocol: TCP
+            {{- end }}
           volumeMounts:
             - name: config
               mountPath: /usr/local/etc/haproxy/haproxy.cfg

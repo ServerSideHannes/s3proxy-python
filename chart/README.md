@@ -70,6 +70,12 @@ helm install s3proxy oci://ghcr.io/serversidehannes/s3proxy-python/charts/s3prox
 | `frontproxy.timeouts.client` | `1h` | Client-side timeout (tolerate large transfers) |
 | `frontproxy.timeouts.server` | `1h` | Backend timeout (tolerate large transfers) |
 | `frontproxy.timeouts.connect` | `10s` | Backend connect timeout |
+| `frontproxy.metrics.enabled` | `true` | Expose HAProxy's native `/metrics` endpoint (queue depth, sessions) |
+| `frontproxy.metrics.port` | `8404` | Prometheus scrape port on the frontproxy pods |
+| `frontproxy.metrics.serviceMonitor.enabled` | `true` | Create a Prometheus Operator ServiceMonitor for the frontproxy |
+| `frontproxy.metrics.serviceMonitor.interval` | `30s` | Scrape interval |
+| `frontproxy.metrics.serviceMonitor.scrapeTimeout` | `10s` | Scrape timeout |
+| `frontproxy.metrics.serviceMonitor.labels` | `{}` | Extra labels on the ServiceMonitor (e.g. for Prometheus selector) |
 | `frontproxy.podDisruptionBudget.enabled` | `true` | Enable front proxy PDB |
 | `frontproxy.podDisruptionBudget.minAvailable` | `1` | Min available front proxy pods |
 | `ingress.enabled` | `false` | Expose S3 outside the cluster via Ingress (requires `frontproxy.enabled`) |

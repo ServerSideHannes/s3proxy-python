@@ -16,4 +16,10 @@ spec:
       port: {{ .Values.frontproxy.service.port }}
       targetPort: http
       protocol: TCP
+    {{- if .Values.frontproxy.metrics.enabled }}
+    - name: metrics
+      port: {{ .Values.frontproxy.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+    {{- end }}
 {{- end }}
