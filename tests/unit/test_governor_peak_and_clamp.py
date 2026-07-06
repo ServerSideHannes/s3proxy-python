@@ -237,7 +237,8 @@ async def test_prod_replay_active_33mb_plus_huge_request_fits():
     reset_state()
     set_memory_limit(312)
     try:
-        scylla_reserved = await try_acquire_memory(estimate_memory_footprint("PUT", SCYLLA_PART_BYTES))
+        scylla_needed = estimate_memory_footprint("PUT", SCYLLA_PART_BYTES)
+        scylla_reserved = await try_acquire_memory(scylla_needed)
         assert 24 * MB <= scylla_reserved <= 35 * MB
 
         huge = estimate_memory_footprint("PUT", SCYLLA_OBJECT_BYTES)
@@ -309,48 +310,50 @@ async def test_mixed_scylla_workload_concurrent_acquire():
         reset_state()
 
 
-@pytest.mark.asyncio
-async def test_request_handler_put_reserves_governor_footprint():
-    """Request gate must use governor_memory_footprint, not raw streaming peak."""
+async def _assert_put_reserves_governor_footprint(content_length: int) -> None:
     import s3proxy.concurrency as concurrency_module
     import s3proxy.request_handler as request_handler_module
 
+    request = MagicMock(spec=Request)
+    request.method = "PUT"
+    request.url = MagicMock()
+    request.url.path = "/bucket/scylla-backup/sst/big-Data.db"
+    request.url.query = ""
+    request.headers = {"content-length": str(content_length)}
+    request.scope = {"raw_path": b"/bucket/scylla-backup/sst/big-Data.db"}
+    request.client = MagicMock()
+    request.client.host = "10.0.0.1"
+
+    expected = estimate_memory_footprint("PUT", content_length)
+    acquired: list[int] = []
+    original_acquire = concurrency_module.try_acquire_memory
+
+    async def spy_acquire(needed: int) -> int:
+        acquired.append(needed)
+        return await original_acquire(needed)
+
+    with (
+        patch.object(
+            request_handler_module, "_handle_proxy_request_impl", new_callable=AsyncMock
+        ) as mock_impl,
+        patch.object(concurrency_module, "try_acquire_memory", side_effect=spy_acquire),
+    ):
+        mock_impl.return_value = None
+        await request_handler_module.handle_proxy_request(request, MagicMock(), MagicMock())
+
+    assert acquired == [expected]
+    assert expected == crypto.governor_memory_footprint(content_length)
+    assert concurrency_module.get_active_memory() == 0
+
+
+@pytest.mark.asyncio
+async def test_request_handler_put_reserves_governor_footprint():
+    """Request gate must use governor_memory_footprint, not raw streaming peak."""
     reset_state()
     set_memory_limit(312)
     try:
         for content_length in (SCYLLA_PART_BYTES, SCYLLA_OBJECT_BYTES):
-            request = MagicMock(spec=Request)
-            request.method = "PUT"
-            request.url = MagicMock()
-            request.url.path = "/bucket/scylla-backup/sst/big-Data.db"
-            request.url.query = ""
-            request.headers = {"content-length": str(content_length)}
-            request.scope = {"raw_path": b"/bucket/scylla-backup/sst/big-Data.db"}
-            request.client = MagicMock()
-            request.client.host = "10.0.0.1"
-
-            expected = estimate_memory_footprint("PUT", content_length)
-            acquired: list[int] = []
-            original_acquire = concurrency_module.try_acquire_memory
-
-            async def spy_acquire(needed: int) -> int:
-                acquired.append(needed)
-                return await original_acquire(needed)
-
-            with (
-                patch.object(
-                    request_handler_module, "_handle_proxy_request_impl", new_callable=AsyncMock
-                ) as mock_impl,
-                patch.object(concurrency_module, "try_acquire_memory", side_effect=spy_acquire),
-            ):
-                mock_impl.return_value = None
-                await request_handler_module.handle_proxy_request(
-                    request, MagicMock(), MagicMock()
-                )
-
-            assert acquired == [expected]
-            assert expected == crypto.governor_memory_footprint(content_length)
-            assert concurrency_module.get_active_memory() == 0
+            await _assert_put_reserves_governor_footprint(content_length)
     finally:
         reset_state()
 
