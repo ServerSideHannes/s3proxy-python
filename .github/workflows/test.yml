@@ -34,7 +34,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [memory_usage, memory_leak, memory_copy, core, multipart, copy_range, misc]
-    timeout-minutes: ${{ contains(fromJSON('["memory_usage", "memory_leak"]'), matrix.shard) && 15 || 10 }}
+    timeout-minutes: ${{ matrix.shard == 'memory_copy' && 25 || (contains(fromJSON('["memory_usage", "memory_leak"]'), matrix.shard) && 15 || 10) }}
     steps:
       - uses: actions/checkout@v7
 

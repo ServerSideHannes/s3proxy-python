@@ -27,8 +27,9 @@ import pytest
 
 from s3proxy import concurrency, crypto
 from s3proxy.concurrency import MIN_RESERVATION
-from s3proxy.errors import S3Error
-from tests.unit.test_copy_reservation_vs_real import _measure_peak
+from s3proxy.state import MultipartUploadState
+from tests.unit.test_copy_per_part_memory import _TrackingMgr
+from tests.unit.test_copy_reservation_vs_real import _Client, _handler, _measure_peak
 
 MB = 1024 * 1024
 
@@ -97,32 +98,39 @@ async def test_large_copy_admitted_while_baseline_reservations_held():
 
 @pytest.mark.asyncio
 async def test_multiple_copies_run_concurrently_bounded_by_budget():
-    """Copies are no longer serialized to one; several run at once, capped by the
-    budget (each ~90MB), and total reserved never exceeds it -- so no OOM."""
+    """Per-part reservation lets copies interleave: several complete on a 192MB
+    budget without holding ~88MB for the whole object duration."""
     original_timeout = concurrency.BACKPRESSURE_TIMEOUT
-    concurrency.BACKPRESSURE_TIMEOUT = 0
+    concurrency.BACKPRESSURE_TIMEOUT = 30
     concurrency.reset_state()
     concurrency.set_memory_limit(192)
-    per_copy = crypto.copy_pipeline_peak(SCYLLA_MANIFEST_BYTES)
-    assert per_copy < 192 * MB
+    per_chunk = crypto.copy_chunk_peak(crypto.COPY_INTERNAL_PART_SIZE)
+    assert per_chunk < 192 * MB
 
-    inside = 0
-    max_inside = 0
-    peak_active = 0
-    admitted = 0
+    completed = 0
 
     async def one_copy():
-        nonlocal inside, max_inside, peak_active, admitted
-        try:
-            async with concurrency.reserve_copy_memory(per_copy):
-                inside += 1
-                admitted += 1
-                max_inside = max(max_inside, inside)
-                peak_active = max(peak_active, concurrency.get_active_memory())
-                await asyncio.sleep(0.05)
-                inside -= 1
-        except S3Error:
-            pass
+        nonlocal completed
+        client = _Client(128 * MB)
+        handler = _handler()
+        handler.multipart_manager = _TrackingMgr()
+        await handler._streaming_copy_part_inner(
+            client,
+            "b",
+            "k",
+            "u",
+            1,
+            MultipartUploadState(dek=crypto.generate_dek(), bucket="b", key="k", upload_id="u"),
+            "b",
+            "src",
+            None,
+            None,
+            None,
+            {},
+            {},
+            128 * MB,
+        )
+        completed += 1
 
     try:
         await asyncio.gather(*[one_copy() for _ in range(5)])
@@ -130,9 +138,8 @@ async def test_multiple_copies_run_concurrently_bounded_by_budget():
         concurrency.BACKPRESSURE_TIMEOUT = original_timeout
         concurrency.reset_state()
 
-    assert max_inside >= 2, "at least two ~90MB copies must run concurrently in 192MB"
-    assert peak_active <= 192 * MB, "governor must never overrun the budget (OOM guard)"
-    assert admitted >= 2
+    assert completed == 5
+    assert concurrency.get_active_memory() == 0
 
 
 @pytest.mark.asyncio

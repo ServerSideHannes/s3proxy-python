@@ -219,27 +219,24 @@ class CopyPartMixin(BaseHandler):
         plaintext_size: int,
     ) -> Response:
         # UploadPartCopy carries no request body, so the request-level limiter
-        # reserved ~nothing -- but this streams the source through decrypt +
-        # re-encrypt. Reserve the pipeline peak so concurrent copies are bounded
-        # (a dedup flood otherwise runs unbounded and OOMs the pod).
-        peak = crypto.copy_pipeline_peak(plaintext_size)
-        async with concurrency.reserve_copy_memory(peak):
-            return await self._streaming_copy_part_inner(
-                client,
-                bucket,
-                key,
-                upload_id,
-                part_num,
-                state,
-                src_bucket,
-                src_key,
-                copy_source_range,
-                src_wrapped_dek,
-                src_multipart_meta,
-                head_resp,
-                src_metadata,
-                plaintext_size,
-            )
+        # reserved ~nothing. Per-internal-part reservations in _pump_copy_chunks
+        # gate concurrent copies without holding memory for the whole object.
+        return await self._streaming_copy_part_inner(
+            client,
+            bucket,
+            key,
+            upload_id,
+            part_num,
+            state,
+            src_bucket,
+            src_key,
+            copy_source_range,
+            src_wrapped_dek,
+            src_multipart_meta,
+            head_resp,
+            src_metadata,
+            plaintext_size,
+        )
 
     async def _streaming_copy_part_inner(
         self,
@@ -397,11 +394,9 @@ class CopyPartMixin(BaseHandler):
         Mirrors UploadPartMixin._stream_and_upload_framed: reads FRAME_PLAINTEXT_SIZE
         plaintext frames from the source, encrypts each with encrypt_frame,
         accumulates one internal part's ciphertext, then uploads it before starting
-        the next. Peak memory is O(one internal part ciphertext + one frame) -- it
-        never holds the whole part's plaintext and ciphertext at once and runs one
-        part at a time, which is what makes copy_pipeline_peak == streaming_upload_peak.
-        Parts are byte-identical to the framed upload path and read back via
-        decrypt_framed / _iter_multipart_plaintext.
+        the next. Memory governor reservation is per internal part (acquire before
+        encrypt, release before upload) so a multi-GB copy does not hold ~88MB for
+        its entire duration and other copies can interleave during S3 I/O waits.
         """
         reader = _PlaintextReader(src_iter)
         md5 = hashlib.md5(usedforsecurity=False)
@@ -410,28 +405,39 @@ class CopyPartMixin(BaseHandler):
         total_ciphertext = 0
         internal_part_num = internal_part_start
 
+        prefetch: bytes | None = None
         while True:
+            if prefetch is None:
+                prefetch = await reader.read(min(crypto.FRAME_PLAINTEXT_SIZE, chunk_size))
+                if not prefetch:
+                    break
+
+            part_reserve = crypto.copy_chunk_peak(chunk_size)
             ciphertext = bytearray()
             part_plaintext = 0
             frame_idx = 0
-            while part_plaintext < chunk_size:
-                frame_pt = await reader.read(
-                    min(crypto.FRAME_PLAINTEXT_SIZE, chunk_size - part_plaintext)
-                )
-                if not frame_pt:
-                    break
-                md5.update(frame_pt)
-                part_plaintext += len(frame_pt)
-                ciphertext.extend(
-                    crypto.encrypt_frame(
-                        frame_pt, state.dek, upload_id, internal_part_num, frame_idx
+            async with concurrency.reserve_copy_memory(part_reserve):
+                frame_pt = prefetch
+                prefetch = None
+                while True:
+                    md5.update(frame_pt)
+                    part_plaintext += len(frame_pt)
+                    ciphertext.extend(
+                        crypto.encrypt_frame(
+                            frame_pt, state.dek, upload_id, internal_part_num, frame_idx
+                        )
                     )
-                )
-                frame_idx += 1
+                    frame_idx += 1
+                    if part_plaintext >= chunk_size:
+                        break
+                    frame_pt = await reader.read(
+                        min(crypto.FRAME_PLAINTEXT_SIZE, chunk_size - part_plaintext)
+                    )
+                    if not frame_pt:
+                        break
 
-            if part_plaintext == 0:
-                break
-
+            # Reservation released before upload so other copies can encrypt while
+            # this one waits on S3 I/O (ciphertext RSS is smaller than encrypt peak).
             upload_start = time.monotonic()
             resp = await client.upload_part(bucket, key, upload_id, internal_part_num, ciphertext)
             del ciphertext

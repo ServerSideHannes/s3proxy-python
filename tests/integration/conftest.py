@@ -6,11 +6,94 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Generator
 from contextlib import contextmanager
 
 import boto3
 import pytest
+
+# === MINIO BACKEND ===
+
+
+def _is_minio(endpoint: str) -> bool:
+    try:
+        req = urllib.request.Request(f"{endpoint}/minio/health/live")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            return resp.status == 200
+    except urllib.error.URLError, TimeoutError, OSError:
+        return False
+
+
+def _wait_for_minio(endpoint: str, timeout: float = 30) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _is_minio(endpoint):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
+@contextlib.contextmanager
+def minio_backend() -> Generator[str]:
+    """Yield a MinIO HTTP endpoint, starting a throwaway container if needed."""
+    for port in (9000, 19000, 19001):
+        endpoint = f"http://localhost:{port}"
+        if _is_minio(endpoint):
+            yield endpoint
+            return
+
+    port = 19000
+    while port < 19100:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if s.connect_ex(("localhost", port)) == 0:
+                port += 1
+                continue
+        break
+    else:
+        raise RuntimeError("no free port for temporary MinIO")
+
+    name = f"s3proxy-test-minio-{port}"
+    subprocess.run(["docker", "rm", "-f", name], capture_output=True, check=False)
+    proc = subprocess.Popen(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--name",
+            name,
+            "-p",
+            f"{port}:9000",
+            "-e",
+            "MINIO_ROOT_USER=minioadmin",
+            "-e",
+            "MINIO_ROOT_PASSWORD=minioadmin",
+            "minio/minio",
+            "server",
+            "/data",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    endpoint = f"http://localhost:{port}"
+    try:
+        if not _wait_for_minio(endpoint):
+            raise RuntimeError(f"MinIO container failed to become healthy on port {port}")
+        yield endpoint
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            subprocess.run(["docker", "kill", name], capture_output=True, check=False)
+
 
 # === SHARED S3PROXY HELPER ===
 
@@ -61,7 +144,7 @@ def run_s3proxy(
 
     output = sys.stderr if log_output else subprocess.DEVNULL
     proc = subprocess.Popen(
-        ["python", "-m", "s3proxy.main"],
+        [sys.executable, "-m", "s3proxy.main"],
         env=env,
         stdout=output,
         stderr=output,

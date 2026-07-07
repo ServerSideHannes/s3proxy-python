@@ -205,23 +205,27 @@ class MiscObjectMixin(BaseHandler):
                     request,
                 )
 
-            # Encrypted source. A same-credential plain COPY needs no re-encrypt:
-            # the ciphertext is self-describing and key-independent (GCM AAD is
-            # None, the DEK is random and stored in metadata / the sidecar,
-            # nonces are embedded), so a native server-side CopyObject yields a
-            # byte-identical, decryptable destination and skips the
-            # download+re-encrypt+re-upload amplification (Scylla Manager dedup).
-            # A cross-credential copy must re-key under the copier's KEK, and
-            # REPLACE / oversized objects also fall back to the re-encrypt path.
+            # Encrypted source. A plain COPY needs no re-encrypt: the ciphertext
+            # is self-describing and key-independent (GCM AAD is None, the DEK is
+            # random and stored in metadata / the sidecar, nonces are embedded),
+            # so a native server-side CopyObject yields a byte-identical
+            # destination and skips the download+re-encrypt+re-upload
+            # amplification (Scylla Manager dedup versioning).
+            #
+            # Re-encrypt only to re-key to a *different* owning credential. A
+            # same-kid copy is byte-identical, and a legacy object with no kid
+            # cannot be decrypted to re-encrypt anyway (re-encrypt would fail with
+            # UnknownKidError) -- both must pass through as-is. REPLACE and
+            # objects above the single-op CopyObject limit still re-encrypt.
             if src_multipart_meta:
                 src_kid = src_multipart_meta.kid
             else:
                 src_kid = head_resp.get("Metadata", {}).get(self.settings.kidtag_name, "")
-            same_credential = bool(src_kid) and src_kid == client.credentials.access_key
+            needs_rekey = bool(src_kid) and src_kid != client.credentials.access_key
             ciphertext_size = head_resp.get("ContentLength", 0) or 0
             if (
                 metadata_directive == "COPY"
-                and same_credential
+                and not needs_rekey
                 and ciphertext_size <= MAX_SERVER_SIDE_COPY_BYTES
             ):
                 return await self._copy_passthrough_encrypted(

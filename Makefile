@@ -1,4 +1,4 @@
-.PHONY: test test-all test-unit test-integration test-integration-shard test-run test-oom e2e cluster lint
+.PHONY: test test-all test-unit test-integration test-integration-shard test-run test-oom verify-copy-memory e2e cluster lint
 
 # Lint: ruff check + format check
 lint:
@@ -12,10 +12,14 @@ test: test-unit
 test-unit:
 	uv run pytest -m "not e2e and not ha" -v -n auto
 
+# Pre-merge gate: subprocess Prometheus proof of per-part copy memory release.
+verify-copy-memory:
+	uv run pytest tests/integration/test_copy_per_part_metrics.py -m e2e -v -n0
+
 # Integration shards for parallel CI (make test-integration-shard SHARD=memory_usage)
 INTEGRATION_memory_usage_TESTS = tests/integration/test_memory_usage.py
 INTEGRATION_memory_leak_TESTS = tests/integration/test_memory_leak.py
-INTEGRATION_memory_copy_TESTS = tests/integration/test_copy_memory_governor.py
+INTEGRATION_memory_copy_TESTS = tests/integration/test_copy_memory_governor.py tests/integration/test_copy_per_part_metrics.py
 INTEGRATION_memory_copy_PYTEST_OPTS = -n0
 INTEGRATION_core_TESTS = \
 	tests/integration/test_integration.py \
