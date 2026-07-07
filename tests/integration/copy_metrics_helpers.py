@@ -15,8 +15,10 @@ MB = 1024 * 1024
 # Prod pod budget and per-chunk peak for 32MB internal parts.
 PROD_GOVERNOR_MB = 192
 CHUNK_PEAK = crypto.copy_chunk_peak(crypto.COPY_INTERNAL_PART_SIZE)
-# Between internal parts only the POST gate (~64KB) should remain reserved.
+# Between internal parts of a single copy (no concurrent pipeline overlap).
 BASELINE_CEILING = 2 * MB
+# Two pipelines holding through upload: 2 × ~88MB.
+TWO_PIPELINE_FLOOR = CHUNK_PEAK * 2 * 0.85
 
 # Scylla backup copies ~1.25GB SSTables (40 × 32MB internal parts in s3proxy).
 SCYLLA_SSTABLE_MB = 1280
@@ -100,23 +102,29 @@ def assert_copy_memory_sawtooth(
     )
 
 
-def assert_concurrent_copies_not_flatlined(
+def assert_concurrent_copies_bounded(
     reserved: list[int],
     *,
-    concurrent_copies: int,
+    concurrent_pipelines: int = 2,
     min_samples: int = 20,
 ) -> None:
-    """Two whole-object holds keep min ~concurrent_copies×CHUNK_PEAK with no drops."""
+    """Concurrent copies must stay within pipeline cap, not flat whole-object hold."""
     assert len(reserved) >= min_samples, f"too few samples ({len(reserved)})"
-    min_reserved = min(reserved)
-    drops = sum(1 for b in reserved if b <= BASELINE_CEILING)
-    flat_floor = CHUNK_PEAK * concurrent_copies * 0.85
+    max_reserved = max(reserved)
+    budget = PROD_GOVERNOR_MB * MB
 
-    assert min_reserved <= BASELINE_CEILING, (
-        f"concurrent copies never released between parts: min={min_reserved / MB:.2f}MB "
-        f"(old whole-object code stays >= {flat_floor / MB:.2f}MB for {concurrent_copies} copies)"
+    assert max_reserved <= budget, (
+        f"reserved {max_reserved / MB:.2f}MB exceeded {PROD_GOVERNOR_MB}MB governor budget"
     )
-    assert drops >= 5, (
-        f"expected inter-part drops during {concurrent_copies} concurrent copies; "
-        f"got {drops} (min={min_reserved / MB:.2f}MB)"
+    assert max_reserved <= CHUNK_PEAK * concurrent_pipelines * 1.25, (
+        f"peak reserved {max_reserved / MB:.2f}MB exceeds {concurrent_pipelines} pipeline cap "
+        f"({CHUNK_PEAK * concurrent_pipelines / MB:.2f}MB) — too many concurrent copies?"
     )
+    # Old whole-object code: min stays ~176MB with zero drops for entire multi-minute copy.
+    # With hold-through-upload + 2 pipelines, min ~176MB is expected; we assert max is bounded.
+    flat_floor = CHUNK_PEAK * concurrent_pipelines * 0.85
+    min_reserved = min(reserved)
+    if min_reserved >= flat_floor:
+        # If flat at 2×chunk, verify it's not ALSO flat at whole-object duration
+        # by checking max isn't much higher (no 3rd pipeline admitted).
+        assert max_reserved <= CHUNK_PEAK * concurrent_pipelines * 1.25

@@ -1,7 +1,9 @@
 """UploadPartCopy handler for multipart uploads."""
 
+import asyncio
 import hashlib
 import math
+import os
 import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -25,6 +27,20 @@ from ..base import BaseHandler
 from .upload_part import _PlaintextReader
 
 logger: BoundLogger = structlog.get_logger(__name__)
+
+# Cap concurrent streaming copy pipelines per pod. Without this, HAProxy maxconn
+# can land many UploadPartCopy requests on one pod; each holds ciphertext and
+# read buffers outside the governor if reservation is released before upload.
+MAX_PARALLEL_COPY_PIPELINES = int(os.environ.get("S3PROXY_MAX_PARALLEL_COPIES", "2"))
+_copy_pipeline_semaphore = asyncio.Semaphore(MAX_PARALLEL_COPY_PIPELINES)
+
+
+def reset_copy_pipeline_semaphore(limit: int | None = None) -> None:
+    """Reset the global copy pipeline semaphore (testing only)."""
+    global _copy_pipeline_semaphore
+    _copy_pipeline_semaphore = asyncio.Semaphore(
+        limit if limit is not None else MAX_PARALLEL_COPY_PIPELINES
+    )
 
 
 class CopyPartMixin(BaseHandler):
@@ -220,23 +236,24 @@ class CopyPartMixin(BaseHandler):
     ) -> Response:
         # UploadPartCopy carries no request body, so the request-level limiter
         # reserved ~nothing. Per-internal-part reservations in _pump_copy_chunks
-        # gate concurrent copies without holding memory for the whole object.
-        return await self._streaming_copy_part_inner(
-            client,
-            bucket,
-            key,
-            upload_id,
-            part_num,
-            state,
-            src_bucket,
-            src_key,
-            copy_source_range,
-            src_wrapped_dek,
-            src_multipart_meta,
-            head_resp,
-            src_metadata,
-            plaintext_size,
-        )
+        # gate memory; the pipeline semaphore caps how many copies run at once.
+        async with _copy_pipeline_semaphore:
+            return await self._streaming_copy_part_inner(
+                client,
+                bucket,
+                key,
+                upload_id,
+                part_num,
+                state,
+                src_bucket,
+                src_key,
+                copy_source_range,
+                src_wrapped_dek,
+                src_multipart_meta,
+                head_resp,
+                src_metadata,
+                plaintext_size,
+            )
 
     async def _streaming_copy_part_inner(
         self,
@@ -395,8 +412,9 @@ class CopyPartMixin(BaseHandler):
         plaintext frames from the source, encrypts each with encrypt_frame,
         accumulates one internal part's ciphertext, then uploads it before starting
         the next. Memory governor reservation is per internal part (acquire before
-        encrypt, release before upload) so a multi-GB copy does not hold ~88MB for
-        its entire duration and other copies can interleave during S3 I/O waits.
+        encrypt, hold through upload, release after ciphertext is freed) so RSS
+        matches what the limiter tracks and a multi-GB copy does not hold one
+        reservation for its entire duration.
         """
         reader = _PlaintextReader(src_iter)
         md5 = hashlib.md5(usedforsecurity=False)
@@ -436,11 +454,12 @@ class CopyPartMixin(BaseHandler):
                     if not frame_pt:
                         break
 
-            # Reservation released before upload so other copies can encrypt while
-            # this one waits on S3 I/O (ciphertext RSS is smaller than encrypt peak).
-            upload_start = time.monotonic()
-            resp = await client.upload_part(bucket, key, upload_id, internal_part_num, ciphertext)
-            del ciphertext
+                upload_start = time.monotonic()
+                resp = await client.upload_part(
+                    bucket, key, upload_id, internal_part_num, ciphertext
+                )
+                del ciphertext
+
             ct_size = crypto.framed_ciphertext_size(part_plaintext)
             internal_parts.append(
                 InternalPartMetadata(

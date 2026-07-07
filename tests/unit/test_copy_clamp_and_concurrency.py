@@ -98,12 +98,14 @@ async def test_large_copy_admitted_while_baseline_reservations_held():
 
 @pytest.mark.asyncio
 async def test_multiple_copies_run_concurrently_bounded_by_budget():
-    """Per-part reservation lets copies interleave: several complete on a 192MB
-    budget without holding ~88MB for the whole object duration."""
+    """Pipeline cap + per-part reservation: five copies complete on 192MB budget."""
+    from s3proxy.handlers.multipart.copy import reset_copy_pipeline_semaphore
+
     original_timeout = concurrency.BACKPRESSURE_TIMEOUT
     concurrency.BACKPRESSURE_TIMEOUT = 30
     concurrency.reset_state()
     concurrency.set_memory_limit(192)
+    reset_copy_pipeline_semaphore(2)
     per_chunk = crypto.copy_chunk_peak(crypto.COPY_INTERNAL_PART_SIZE)
     assert per_chunk < 192 * MB
 
@@ -114,7 +116,7 @@ async def test_multiple_copies_run_concurrently_bounded_by_budget():
         client = _Client(128 * MB)
         handler = _handler()
         handler.multipart_manager = _TrackingMgr()
-        await handler._streaming_copy_part_inner(
+        await handler._streaming_copy_part(
             client,
             "b",
             "k",

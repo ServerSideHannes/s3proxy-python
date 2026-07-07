@@ -18,13 +18,12 @@ from botocore.exceptions import ClientError
 
 from tests.integration.conftest import minio_backend, run_s3proxy
 from tests.integration.copy_metrics_helpers import (
-    BASELINE_CEILING,
     CHUNK_PEAK,
     MB,
     PROD_GOVERNOR_MB,
     SCYLLA_SSTABLE_SIZE,
     MetricsPoller,
-    assert_concurrent_copies_not_flatlined,
+    assert_concurrent_copies_bounded,
     assert_copy_memory_sawtooth,
 )
 from tests.integration.test_copy_memory_governor import (
@@ -55,6 +54,7 @@ def metrics_server():
             S3PROXY_MEMORY_LIMIT_MB=str(PROD_GOVERNOR_MB),
             S3PROXY_BACKPRESSURE_TIMEOUT="30",
             S3PROXY_MAX_PART_SIZE_MB="0",
+            S3PROXY_MAX_PARALLEL_COPIES="2",
         ) as (endpoint, proc),
     ):
         yield port, endpoint, proc
@@ -122,7 +122,7 @@ class TestCopyPerPartMetricsSubprocess:
     def test_three_concurrent_copies_all_succeed_on_192mb(
         self, metrics_server, metrics_bucket, fast_source
     ):
-        """Per-part interleaving: 3 large copies fit where whole-object hold allowed 2."""
+        """Pipeline cap=2: 3 copies queue but all succeed without OOM."""
         _, _, proc = metrics_server
         client, bucket = metrics_bucket
 
@@ -191,12 +191,31 @@ class TestScyllaBackupCopyLoad:
         assert all(r["success"] for r in results), (
             f"expected both 1280MB copies to succeed on {PROD_GOVERNOR_MB}MB budget: {results}"
         )
-        assert_concurrent_copies_not_flatlined(poller.samples, concurrent_copies=2)
-        # Old code: min stays ~176MB (2 × 88MB whole-object holds). Per-part frees budget.
-        assert min(poller.samples) <= BASELINE_CEILING, (
-            f"reservation never dropped during concurrent Scylla copies "
-            f"(min={min(poller.samples) / MB:.2f}MB, expected <= {BASELINE_CEILING / MB:.2f}MB)"
-        )
+        assert_concurrent_copies_bounded(poller.samples, concurrent_pipelines=2)
         assert max(poller.samples) <= CHUNK_PEAK * 2.5, (
-            f"peak reserved {max(poller.samples) / MB:.2f}MB — more than brief 2-chunk overlap?"
+            f"peak reserved {max(poller.samples) / MB:.2f}MB — more than 2-pipeline cap?"
+        )
+
+    def test_five_concurrent_copies_all_succeed_with_pipeline_cap(
+        self, metrics_server, metrics_bucket, fast_source
+    ):
+        """Scylla-shaped: many concurrent copies, only 2 pipelines, no OOM."""
+        port, _, proc = metrics_server
+        client, bucket = metrics_bucket
+
+        poller = MetricsPoller(port, interval_s=0.02)
+        poller.start()
+
+        def one_copy(i: int) -> dict:
+            return _upload_part_copy(client, bucket, f"flood-{i}.bin", fast_source)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+            results = list(pool.map(one_copy, range(5)))
+
+        poller.stop()
+
+        assert proc.poll() is None, "s3proxy OOM/crashed under 5 concurrent copies"
+        assert all(r["success"] for r in results), f"copy failures: {results}"
+        assert max(poller.samples) <= PROD_GOVERNOR_MB * MB, (
+            f"peak reserved {max(poller.samples) / MB:.2f}MB exceeded budget"
         )

@@ -264,10 +264,9 @@ def copy_internal_part_size(plaintext_size: int) -> int:
 def copy_chunk_peak(chunk_plaintext_bytes: int) -> int:
     """Peak memory while encrypting one internal copy chunk (streaming path).
 
-    The streaming copy path acquires/releases this amount per internal part so
-    memory is free between chunks and during S3 upload I/O. Reservation covers
-    read-buffer slack plus framed encrypt peak; ciphertext upload runs after
-    release (smaller RSS than encrypt peak).
+    The streaming copy path acquires/releases this amount per internal part.
+    Reservation covers read-buffer slack plus framed encrypt peak and the
+    ciphertext buffer through S3 upload (released after del ciphertext).
     """
     framed = (
         4 * chunk_plaintext_bytes
