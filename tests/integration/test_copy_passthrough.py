@@ -128,6 +128,32 @@ async def test_multipart_object_copy_copies_sidecar_and_roundtrips(settings, moc
 
 
 @pytest.mark.asyncio
+async def test_legacy_no_kid_object_passes_through_not_reencrypt(settings, mock_s3, credentials):
+    """Legacy encrypted objects (isec set, no isec-kid) can't be decrypted to
+    re-encrypt; the copy must pass through byte-identically, not fail."""
+    handler = _handler(settings, mock_s3, credentials)
+    await mock_s3.create_bucket(BUCKET)
+
+    # Seed an object with a wrapped DEK but NO kid tag (pre-kid-tracking era).
+    src_meta = {settings.dektag_name: "d2hhdGV2ZXI=", "client-etag": "deadbeef"}
+    await mock_s3.put_object(BUCKET, "legacy/x.db", b"opaque-ciphertext", metadata=src_meta)
+
+    mark = len(mock_s3.call_history)
+    await handler.handle_copy_object(
+        _copy_request(f"/{BUCKET}/legacy/x.db.snap", f"/{BUCKET}/legacy/x.db"), credentials
+    )
+    during = mock_s3.call_history[mark:]
+
+    assert "legacy/x.db.snap" in _keys_touched(during, "copy_object")
+    assert "legacy/x.db" not in _keys_touched(during, "get_object")  # no decrypt attempt
+    assert "legacy/x.db.snap" not in _keys_touched(during, "put_object")
+    # Destination is a faithful, byte-identical copy incl. the wrapped DEK.
+    dst = mock_s3.objects[mock_s3._key(BUCKET, "legacy/x.db.snap")]
+    assert dst["Body"] == b"opaque-ciphertext"
+    assert dst["Metadata"].get(settings.dektag_name) == src_meta[settings.dektag_name]
+
+
+@pytest.mark.asyncio
 async def test_replace_directive_still_reencrypts(settings, mock_s3, credentials):
     handler = _handler(settings, mock_s3, credentials)
     await mock_s3.create_bucket(BUCKET)

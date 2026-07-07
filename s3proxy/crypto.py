@@ -261,31 +261,40 @@ def copy_internal_part_size(plaintext_size: int) -> int:
     return COPY_INTERNAL_PART_SIZE
 
 
+def copy_chunk_peak(chunk_plaintext_bytes: int) -> int:
+    """Peak memory while encrypting one internal copy chunk (streaming path).
+
+    The streaming copy path acquires/releases this amount per internal part so
+    memory is free between chunks and during S3 upload I/O. Reservation covers
+    read-buffer slack plus framed encrypt peak; ciphertext upload runs after
+    release (smaller RSS than encrypt peak).
+    """
+    framed = (
+        4 * chunk_plaintext_bytes
+        if chunk_plaintext_bytes <= FRAME_PLAINTEXT_SIZE
+        else 2 * chunk_plaintext_bytes + FRAME_PLAINTEXT_SIZE
+    )
+    peak = framed + 2 * MAX_BUFFER_SIZE
+    if chunk_plaintext_bytes > 32 * 1024 * 1024:
+        peak += chunk_plaintext_bytes // 7
+    return peak
+
+
+def copy_small_buffered_peak(plaintext_size: int) -> int:
+    """Peak for a small copy that buffers the whole object in RAM."""
+    return max(MAX_BUFFER_SIZE, 3 * plaintext_size)
+
+
 def copy_pipeline_peak(plaintext_size: int) -> int:
-    """Peak memory a server-side copy holds while decrypting + re-encrypting.
+    """Peak memory for one copy chunk (streaming) or a small buffered copy.
 
-    A copy request has no body, so the request-level limiter reserves ~nothing
-    for it -- yet the copy reads the source, decrypts it and re-encrypts it. The
-    streaming copy path frames exactly like the framed UploadPart path
-    (encrypt_frame per FRAME_PLAINTEXT_SIZE, one internal part at a time) but uses
-    a FIXED copy_internal_part_size, so the per-part peak -- and thus the whole
-    reservation -- is O(1) in object size (~90MB) rather than object_size/20
-    (~535MB for a 4.7GB copy, which monopolized the budget and deadlocked). It
-    adds one pipeline stage the body-fed upload path lacks: the source is read in
-    MAX_BUFFER_SIZE chunks into a _PlaintextReader buffer, so reserve two extra
-    buffers for it. Small copies buffer the whole object and re-encrypt it (~3x).
-
-    aiobotocore copies the ciphertext body for signing; tracemalloc shows
-    ~part/7 slack once parts exceed 32MB.
+    Streaming copies reserve per internal part via copy_chunk_peak; this returns
+    the per-chunk peak (O(1) in object size, ~88MB for 32MB parts). Small
+    copies hold the whole object under one reservation.
     """
     if plaintext_size > STREAMING_THRESHOLD:
-        part = copy_internal_part_size(plaintext_size)
-        framed = 4 * part if part <= FRAME_PLAINTEXT_SIZE else 2 * part + FRAME_PLAINTEXT_SIZE
-        peak = framed + 2 * MAX_BUFFER_SIZE
-        if part > 32 * 1024 * 1024:
-            peak += part // 7
-        return peak
-    return max(MAX_BUFFER_SIZE, 3 * plaintext_size)
+        return copy_chunk_peak(copy_internal_part_size(plaintext_size))
+    return copy_small_buffered_peak(plaintext_size)
 
 
 @dataclass(slots=True)
