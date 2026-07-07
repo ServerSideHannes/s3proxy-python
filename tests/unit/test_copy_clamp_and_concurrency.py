@@ -12,6 +12,7 @@ import asyncio
 import pytest
 
 from s3proxy import concurrency, crypto
+from s3proxy.concurrency import MIN_RESERVATION
 from s3proxy.errors import S3Error
 from tests.unit.test_copy_reservation_vs_real import _measure_peak
 
@@ -139,6 +140,53 @@ async def test_mixed_three_scylla_uploads_and_manifest_copy_limits_concurrency()
         assert sum(uploads) + 192 * MB > 192 * MB
         with pytest.raises(S3Error):
             await concurrency.try_acquire_copy_memory(manifest)
+    finally:
+        concurrency.BACKPRESSURE_TIMEOUT = original_timeout
+        concurrency.reset_state()
+
+
+@pytest.mark.asyncio
+async def test_pending_exclusive_copy_not_starved_by_small_requests():
+    """Writer preference: a budget-monopolizing copy must not be starved by a
+    stream of small requests.
+
+    The copy reserves the whole budget, so it can only be admitted when
+    active_bytes == 0. A small request that easily fits must NOT jump the queue
+    while the copy is waiting -- otherwise active_bytes never drains and the copy
+    backpressures forever (prod: requested_mb == limit_mb that never clears, then
+    503). It must instead queue behind the pending copy.
+    """
+    original_timeout = concurrency.BACKPRESSURE_TIMEOUT
+    concurrency.BACKPRESSURE_TIMEOUT = 5
+    concurrency.reset_state()
+    concurrency.set_memory_limit(192)
+    try:
+        # An in-flight ~25MB upload holds memory, so the copy cannot start yet.
+        blocker = await concurrency.try_acquire_memory(crypto.governor_memory_footprint(50 * MB))
+        assert 0 < blocker < 192 * MB
+
+        copy_task = asyncio.create_task(
+            concurrency.try_acquire_copy_memory(crypto.copy_pipeline_peak(SCYLLA_MANIFEST_BYTES))
+        )
+        # A tiny request that trivially fits alongside the blocker (25 + 0.06 <<
+        # 192) but must be held back because an exclusive copy is pending.
+        small_task = asyncio.create_task(concurrency.try_acquire_memory(MIN_RESERVATION))
+        await asyncio.sleep(0.05)
+
+        assert not copy_task.done(), "copy must wait for exclusive access"
+        assert not small_task.done(), "small request must queue behind the pending copy"
+
+        # Drain the blocker: active_bytes -> 0 -> the copy wins the slot, not the
+        # queued small request.
+        await concurrency.release_memory(blocker)
+        reserved = await asyncio.wait_for(copy_task, timeout=2)
+        assert reserved == 192 * MB
+        assert concurrency.get_active_memory() == 192 * MB
+        assert not small_task.done(), "copy holds the whole budget; small still waits"
+
+        # Copy releases -> the small request finally proceeds.
+        await concurrency.release_memory(reserved)
+        assert await asyncio.wait_for(small_task, timeout=2) == MIN_RESERVATION
     finally:
         concurrency.BACKPRESSURE_TIMEOUT = original_timeout
         concurrency.reset_state()
