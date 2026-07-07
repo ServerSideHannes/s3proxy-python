@@ -264,10 +264,9 @@ def copy_internal_part_size(plaintext_size: int) -> int:
 def copy_chunk_peak(chunk_plaintext_bytes: int) -> int:
     """Peak memory while encrypting one internal copy chunk (streaming path).
 
-    The streaming copy path acquires/releases this amount per internal part so
-    memory is free between chunks and during S3 upload I/O. Reservation covers
-    read-buffer slack plus framed encrypt peak; ciphertext upload runs after
-    release (smaller RSS than encrypt peak).
+    The streaming copy path acquires/releases this amount per internal part.
+    Reservation covers read-buffer slack plus framed encrypt peak and the
+    ciphertext buffer through S3 upload (released after del ciphertext).
     """
     framed = (
         4 * chunk_plaintext_bytes
@@ -278,6 +277,16 @@ def copy_chunk_peak(chunk_plaintext_bytes: int) -> int:
     if chunk_plaintext_bytes > 32 * 1024 * 1024:
         peak += chunk_plaintext_bytes // 7
     return peak
+
+
+# UploadPartCopy passthrough moves bytes server-side; in-process peak is tiny.
+COPY_PASSTHROUGH_SEGMENT_PEAK = 64 * 1024
+
+
+def copy_passthrough_segment_peak(plaintext_size: int) -> int:
+    """Governor reservation for one native copy segment (no decrypt/re-encrypt)."""
+    _ = plaintext_size
+    return COPY_PASSTHROUGH_SEGMENT_PEAK
 
 
 def copy_small_buffered_peak(plaintext_size: int) -> int:

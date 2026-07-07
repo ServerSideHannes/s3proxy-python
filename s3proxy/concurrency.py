@@ -140,6 +140,7 @@ class ConcurrencyLimiter:
             if exclusive:
                 self._pending_exclusive += 1
             try:
+                logged_backpressure = False
                 while not self._can_admit(to_reserve, exclusive):
                     remaining = deadline - asyncio.get_event_loop().time()
                     if remaining <= 0:
@@ -158,13 +159,15 @@ class ConcurrencyLimiter:
                             f"Memory limit: {active_mb:.0f}MB + "
                             f"{request_mb:.0f}MB > {limit_mb:.0f}MB"
                         )
-                    logger.info(
-                        "MEMORY_BACKPRESSURE",
-                        active_mb=round(self._active_bytes / 1024 / 1024, 2),
-                        requested_mb=round(to_reserve / 1024 / 1024, 2),
-                        limit_mb=round(self._limit_bytes / 1024 / 1024, 2),
-                        remaining_sec=round(remaining, 1),
-                    )
+                    if not logged_backpressure:
+                        logger.info(
+                            "MEMORY_BACKPRESSURE",
+                            active_mb=round(self._active_bytes / 1024 / 1024, 2),
+                            requested_mb=round(to_reserve / 1024 / 1024, 2),
+                            limit_mb=round(self._limit_bytes / 1024 / 1024, 2),
+                            remaining_sec=round(remaining, 1),
+                        )
+                        logged_backpressure = True
                     with contextlib.suppress(TimeoutError):
                         await asyncio.wait_for(self._condition.wait(), timeout=remaining)
 
