@@ -378,15 +378,14 @@ async def test_many_concurrent_scylla_acquires_via_gather():
         reset_state()
 
 
-def test_honest_copy_peak_exceeds_upload_governor_cap():
-    """copy_pipeline_peak uses per-chunk honest peak, not governor_memory_footprint.
-
-    Upload gate caps multi-GB Content-Length at the routine workload peak; copies
-    reserve separately via reserve_copy_memory with copy_governor_clamped_reserve.
+def test_copy_peak_is_bounded_and_independent_of_object_size():
+    """Copies frame at a fixed internal part size, so copy_pipeline_peak is O(1)
+    in object size -- it no longer tracks streaming_upload_peak (object/20). This
+    is what stops a multi-GB copy monopolizing the governor budget/deadlocking.
     """
     huge = 5 * 1024 * MB
-    assert crypto.copy_pipeline_peak(huge) > estimate_memory_footprint("PUT", huge)
-    part = crypto.memory_bounded_part_size(huge)
-    assert crypto.copy_pipeline_peak(huge) == (
-        crypto.streaming_upload_peak(huge) + 2 * crypto.MAX_BUFFER_SIZE + part // 7
-    )
+    peak = crypto.copy_pipeline_peak(huge)
+    assert peak == crypto.copy_pipeline_peak(64 * MB)  # size-independent
+    assert peak < 128 * MB
+    # far below the old object/20 peak that forced full-budget clamping
+    assert peak < crypto.streaming_upload_peak(huge) // 4

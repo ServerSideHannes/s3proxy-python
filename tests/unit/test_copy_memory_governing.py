@@ -21,17 +21,17 @@ from s3proxy import concurrency, crypto
 MB = 1024 * 1024
 
 
-def test_copy_pipeline_peak_matches_framed_upload():
-    # The streaming copy path now frames exactly like the framed UploadPart path
-    # (one internal part at a time), so its peak is identical: the old
-    # size-independent 4*MAX_BUFFER_SIZE under-counted the real peak ~6x -- when
-    # it un-framed a whole part -- and OOMed the pod.
-    for size in (64 * MB, 512 * MB, 5 * 1024 * MB):
-        part = crypto.memory_bounded_part_size(size)
-        base = crypto.streaming_upload_peak(size) + 2 * crypto.MAX_BUFFER_SIZE
-        if part > 32 * MB:
-            base += part // 7
-        assert crypto.copy_pipeline_peak(size) == base
+def test_copy_pipeline_peak_is_bounded_regardless_of_object_size():
+    # Copies frame at a FIXED internal part size, so the peak is O(1) in object
+    # size instead of object_size/20. A 4.7GB SSTable dedup copy used to peak at
+    # ~535MB -- larger than the whole governor budget -- so it reserved the
+    # entire budget and deadlocked against any concurrent request. It now stays
+    # ~90MB, identical to a 64MB copy.
+    peaks = [crypto.copy_pipeline_peak(s) for s in (64 * MB, 512 * MB, 4767 * MB, 5 * 1024 * MB)]
+    assert all(p == peaks[0] for p in peaks), peaks
+    part = crypto.COPY_INTERNAL_PART_SIZE
+    assert peaks[0] == 2 * part + crypto.FRAME_PLAINTEXT_SIZE + 2 * crypto.MAX_BUFFER_SIZE
+    assert peaks[0] < 128 * MB
 
 
 def test_copy_pipeline_peak_small_is_three_x():
