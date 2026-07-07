@@ -1,4 +1,4 @@
-.PHONY: test test-all test-unit test-integration test-integration-shard test-run test-oom verify-copy-memory e2e cluster lint
+.PHONY: test test-all test-unit test-integration test-integration-shard test-run test-oom verify-copy-memory verify-passthrough e2e cluster lint
 
 # Lint: ruff check + format check
 lint:
@@ -16,10 +16,14 @@ test-unit:
 verify-copy-memory:
 	uv run pytest tests/integration/test_copy_per_part_metrics.py -m e2e -v -n0
 
+# Exhaustive UploadPartCopy passthrough proof (real subprocess + MinIO).
+verify-passthrough:
+	uv run pytest tests/integration/test_upload_part_copy_passthrough_e2e.py -m e2e -v -n0
+
 # Integration shards for parallel CI (make test-integration-shard SHARD=memory_usage)
 INTEGRATION_memory_usage_TESTS = tests/integration/test_memory_usage.py
 INTEGRATION_memory_leak_TESTS = tests/integration/test_memory_leak.py
-INTEGRATION_memory_copy_TESTS = tests/integration/test_copy_memory_governor.py tests/integration/test_copy_per_part_metrics.py
+INTEGRATION_memory_copy_TESTS = tests/integration/test_copy_memory_governor.py tests/integration/test_copy_per_part_metrics.py tests/integration/test_upload_part_copy_passthrough_e2e.py
 INTEGRATION_memory_copy_PYTEST_OPTS = -n0
 INTEGRATION_core_TESTS = \
 	tests/integration/test_integration.py \
