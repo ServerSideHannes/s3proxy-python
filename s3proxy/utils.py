@@ -17,7 +17,7 @@ def parse_http_date(date_str: str | None) -> datetime | None:
         return None
     try:
         return parsedate_to_datetime(date_str)
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return None
 
 

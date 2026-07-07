@@ -235,7 +235,7 @@ async def _handle_proxy_request_impl(
     dispatcher = RequestDispatcher(handler)
     try:
         return await dispatcher.dispatch(request, verified_creds)
-    except HTTPException, S3Error:
+    except (HTTPException, S3Error):
         raise
     except UnknownKidError as e:
         logger.warning("Cannot decrypt object: key not configured", kid=e.kid)

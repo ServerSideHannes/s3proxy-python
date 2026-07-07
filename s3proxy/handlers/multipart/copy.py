@@ -1,12 +1,15 @@
 """UploadPartCopy handler for multipart uploads."""
 
 import asyncio
+import base64
 import hashlib
 import math
 import os
 import time
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from urllib.parse import quote
 
 import structlog
 from fastapi import Request, Response
@@ -17,10 +20,12 @@ from ...client import S3Client, S3Credentials
 from ...errors import S3Error
 from ...state import (
     InternalPartMetadata,
+    MultipartMetadata,
     MultipartUploadState,
     PartMetadata,
     load_multipart_metadata,
     load_upload_state,
+    persist_upload_state,
 )
 from ...utils import format_iso8601
 from ..base import BaseHandler
@@ -41,6 +46,15 @@ def reset_copy_pipeline_semaphore(limit: int | None = None) -> None:
     _copy_pipeline_semaphore = asyncio.Semaphore(
         limit if limit is not None else MAX_PARALLEL_COPY_PIPELINES
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _CiphertextSegment:
+    """One contiguous ciphertext span in a completed encrypted object."""
+
+    plaintext_size: int
+    ciphertext_size: int
+    ct_offset: int
 
 
 class CopyPartMixin(BaseHandler):
@@ -78,6 +92,25 @@ class CopyPartMixin(BaseHandler):
                 # Small copies buffer the whole object + re-encrypt it; gate them
                 # by the limiter too (they carry no body, so the request-level
                 # reservation was ~nothing and a small-object flood ran unbounded).
+                if self._can_passthrough_part_copy(
+                    copy_source_range, src_wrapped_dek, src_multipart_meta, src_metadata, creds
+                ):
+                    return await self._passthrough_copy_part(
+                        client,
+                        bucket,
+                        key,
+                        upload_id,
+                        part_num,
+                        state,
+                        src_bucket,
+                        src_key,
+                        copy_source,
+                        head_resp,
+                        src_metadata,
+                        src_wrapped_dek,
+                        src_multipart_meta,
+                        plaintext_size,
+                    )
                 peak = crypto.copy_pipeline_peak(plaintext_size)
                 async with concurrency.reserve_copy_memory(peak):
                     return await self._simple_copy_part(
@@ -95,6 +128,25 @@ class CopyPartMixin(BaseHandler):
                         src_wrapped_dek,
                         src_multipart_meta,
                     )
+            if self._can_passthrough_part_copy(
+                copy_source_range, src_wrapped_dek, src_multipart_meta, src_metadata, creds
+            ):
+                return await self._passthrough_copy_part(
+                    client,
+                    bucket,
+                    key,
+                    upload_id,
+                    part_num,
+                    state,
+                    src_bucket,
+                    src_key,
+                    copy_source,
+                    head_resp,
+                    src_metadata,
+                    src_wrapped_dek,
+                    src_multipart_meta,
+                    plaintext_size,
+                )
             return await self._streaming_copy_part(
                 client,
                 bucket,
@@ -135,6 +187,297 @@ class CopyPartMixin(BaseHandler):
             return total
         start, end = self._parse_copy_source_range(copy_source_range, total)
         return end - start + 1
+
+    def _can_passthrough_part_copy(
+        self,
+        copy_source_range: str | None,
+        src_wrapped_dek: str | None,
+        src_multipart_meta: MultipartMetadata | None,
+        src_metadata: dict,
+        creds: S3Credentials,
+    ) -> bool:
+        """True when a native server-side copy preserves decryptability without re-encrypt."""
+        if copy_source_range:
+            return False
+        if not src_wrapped_dek and not src_multipart_meta:
+            return False
+        if src_multipart_meta:
+            src_kid = src_multipart_meta.kid
+        else:
+            src_kid = src_metadata.get(self.settings.kidtag_name, "")
+        needs_rekey = bool(src_kid) and src_kid != creds.access_key
+        return not needs_rekey
+
+    def _resolve_source_dek(
+        self,
+        src_multipart_meta: MultipartMetadata | None,
+        src_wrapped_dek: str | None,
+        src_metadata: dict,
+        creds: S3Credentials,
+    ) -> tuple[bytes, str]:
+        if src_multipart_meta:
+            kid = src_multipart_meta.kid
+            dek = crypto.unwrap_key(
+                src_multipart_meta.wrapped_dek, self.keyring.key_by_id(kid)
+            )
+            return dek, kid
+        kid = src_metadata.get(self.settings.kidtag_name, "")
+        wrapped = base64.b64decode(src_wrapped_dek or "")
+        if kid:
+            kek = self.keyring.key_by_id(kid)
+        else:
+            kid, kek = self.keyring.key_for(creds.access_key)
+        return crypto.unwrap_key(wrapped, kek), kid
+
+    def _source_ciphertext_segments(
+        self,
+        src_multipart_meta: MultipartMetadata | None,
+        head_resp: dict,
+        src_wrapped_dek: str | None,
+        src_metadata: dict,
+    ) -> list[_CiphertextSegment]:
+        if src_multipart_meta:
+            segments: list[_CiphertextSegment] = []
+            ct_offset = 0
+            for part in sorted(src_multipart_meta.parts, key=lambda p: p.part_number):
+                if part.internal_parts:
+                    for ip in sorted(
+                        part.internal_parts, key=lambda x: x.internal_part_number
+                    ):
+                        segments.append(
+                            _CiphertextSegment(ip.plaintext_size, ip.ciphertext_size, ct_offset)
+                        )
+                        ct_offset += ip.ciphertext_size
+                else:
+                    segments.append(
+                        _CiphertextSegment(
+                            part.plaintext_size, part.ciphertext_size, ct_offset
+                        )
+                    )
+                    ct_offset += part.ciphertext_size
+            return segments
+
+        ct_size = head_resp.get("ContentLength", 0) or 0
+        size_str = src_metadata.get("plaintext-size")
+        if size_str:
+            plaintext_size = int(size_str)
+        else:
+            plaintext_size = crypto.plaintext_size(ct_size)
+        return [_CiphertextSegment(plaintext_size, ct_size, 0)]
+
+    async def _adopt_upload_dek(
+        self,
+        client: S3Client,
+        bucket: str,
+        key: str,
+        upload_id: str,
+        state: MultipartUploadState,
+        dek: bytes,
+        kid: str,
+        creds: S3Credentials,
+    ) -> None:
+        if state.dek == dek and state.kid == kid:
+            return
+        if state.parts and state.dek != dek:
+            raise S3Error.invalid_request(
+                "Upload already contains parts encrypted with a different key"
+            )
+        state.dek = dek
+        state.kid = kid
+        if kid:
+            kek = self.keyring.key_by_id(kid)
+        else:
+            kid, kek = self.keyring.key_for(creds.access_key)
+        wrapped = crypto.wrap_key(dek, kek)
+        await persist_upload_state(client, bucket, key, upload_id, wrapped, kid)
+        await self.multipart_manager.store_reconstructed_state(bucket, key, upload_id, state)
+
+    async def _md5_plaintext_from_copy_source(
+        self,
+        client: S3Client,
+        src_bucket: str,
+        src_key: str,
+        copy_source_range: str | None,
+        src_wrapped_dek: str | None,
+        src_multipart_meta: MultipartMetadata | None,
+        head_resp: dict,
+        src_metadata: dict,
+    ) -> "hashlib._Hash":
+        """Frame-bounded plaintext MD5 for the UploadPartCopy synthetic ETag."""
+        md5 = hashlib.md5(usedforsecurity=False)
+        async for chunk in self._iter_copy_source(
+            client,
+            src_bucket,
+            src_key,
+            copy_source_range,
+            src_wrapped_dek,
+            src_multipart_meta,
+            head_resp,
+            src_metadata,
+        ):
+            md5.update(chunk)
+        return md5
+
+    async def _passthrough_copy_part(
+        self,
+        client: S3Client,
+        bucket: str,
+        key: str,
+        upload_id: str,
+        part_num: int,
+        state: MultipartUploadState,
+        src_bucket: str,
+        src_key: str,
+        copy_source: str,
+        head_resp: dict,
+        src_metadata: dict,
+        src_wrapped_dek: str | None,
+        src_multipart_meta: MultipartMetadata | None,
+        plaintext_size: int,
+    ) -> Response:
+        """Server-side copy of encrypted ciphertext; destination adopts the source DEK."""
+        src_dek, src_kid = self._resolve_source_dek(
+            src_multipart_meta, src_wrapped_dek, src_metadata, client.credentials
+        )
+        await self._adopt_upload_dek(
+            client, bucket, key, upload_id, state, src_dek, src_kid, client.credentials
+        )
+
+        segments = self._source_ciphertext_segments(
+            src_multipart_meta, head_resp, src_wrapped_dek, src_metadata
+        )
+        if not segments:
+            raise S3Error.invalid_request("Copy source has no ciphertext segments")
+
+        copy_source_path = copy_source or f"/{src_bucket}/{quote(src_key, safe='/')}"
+
+        logger.info(
+            "UPLOAD_PART_COPY_PASSTHROUGH",
+            bucket=bucket,
+            key=key,
+            part_num=part_num,
+            src_bucket=src_bucket,
+            src_key=src_key,
+            plaintext_mb=f"{plaintext_size / 1024 / 1024:.2f}MB",
+            segments=len(segments),
+        )
+
+        has_internal_layout = bool(
+            src_multipart_meta and any(p.internal_parts for p in src_multipart_meta.parts)
+        )
+        if not has_internal_layout and len(segments) == 1:
+            # Single-part encrypted object (or legacy multipart without internal parts):
+            # copy straight to the client part number.
+            seg = segments[0]
+            ct_end = seg.ct_offset + seg.ciphertext_size - 1
+            copy_range = f"bytes={seg.ct_offset}-{ct_end}"
+            resp = await client.upload_part_copy(
+                bucket,
+                key,
+                upload_id,
+                part_num,
+                copy_source_path,
+                copy_source_range=copy_range,
+            )
+            md5 = await self._md5_plaintext_from_copy_source(
+                client,
+                src_bucket,
+                src_key,
+                None,
+                src_wrapped_dek,
+                src_multipart_meta,
+                head_resp,
+                src_metadata,
+            )
+            etag = md5.hexdigest()
+            await self.multipart_manager.add_part(
+                bucket,
+                key,
+                upload_id,
+                PartMetadata(
+                    part_number=part_num,
+                    plaintext_size=seg.plaintext_size,
+                    ciphertext_size=seg.ciphertext_size,
+                    etag=etag,
+                    md5=etag,
+                ),
+            )
+            return Response(
+                content=xml_responses.upload_part_copy_result(
+                    etag, format_iso8601(datetime.now(UTC))
+                ),
+                media_type="application/xml",
+            )
+
+        internal_part_start = await self.multipart_manager.allocate_internal_parts(
+            bucket, key, upload_id, len(segments), client_part_number=0
+        )
+
+        internal_parts: list[InternalPartMetadata] = []
+        total_plaintext = 0
+        total_ciphertext = 0
+
+        for i, seg in enumerate(segments):
+            internal_num = internal_part_start + i
+            ct_end = seg.ct_offset + seg.ciphertext_size - 1
+            copy_range = f"bytes={seg.ct_offset}-{ct_end}"
+            resp = await client.upload_part_copy(
+                bucket,
+                key,
+                upload_id,
+                internal_num,
+                copy_source_path,
+                copy_source_range=copy_range,
+            )
+            etag_part = resp["CopyPartResult"]["ETag"].strip('"')
+            internal_parts.append(
+                InternalPartMetadata(
+                    internal_part_number=internal_num,
+                    plaintext_size=seg.plaintext_size,
+                    ciphertext_size=seg.ciphertext_size,
+                    etag=etag_part,
+                )
+            )
+            total_plaintext += seg.plaintext_size
+            total_ciphertext += seg.ciphertext_size
+
+        md5 = await self._md5_plaintext_from_copy_source(
+            client,
+            src_bucket,
+            src_key,
+            None,
+            src_wrapped_dek,
+            src_multipart_meta,
+            head_resp,
+            src_metadata,
+        )
+        etag = md5.hexdigest()
+        await self.multipart_manager.add_part(
+            bucket,
+            key,
+            upload_id,
+            PartMetadata(
+                part_number=part_num,
+                plaintext_size=total_plaintext,
+                ciphertext_size=total_ciphertext,
+                etag=etag,
+                md5=etag,
+                internal_parts=internal_parts,
+            ),
+        )
+
+        logger.info(
+            "UPLOAD_PART_COPY_PASSTHROUGH_COMPLETE",
+            bucket=bucket,
+            key=key,
+            part_num=part_num,
+            internal_parts=len(internal_parts),
+            plaintext_mb=f"{total_plaintext / 1024 / 1024:.2f}MB",
+        )
+        return Response(
+            content=xml_responses.upload_part_copy_result(etag, format_iso8601(datetime.now(UTC))),
+            media_type="application/xml",
+        )
 
     async def _simple_copy_part(
         self,
