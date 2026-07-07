@@ -1,6 +1,5 @@
 """UploadPartCopy server-side passthrough for encrypted sources (Scylla dedup path)."""
 
-import base64
 import contextlib
 import hashlib
 from unittest.mock import AsyncMock, MagicMock
@@ -15,7 +14,6 @@ from s3proxy.state import (
     MultipartMetadata,
     MultipartStateManager,
     PartMetadata,
-    load_multipart_metadata,
     save_multipart_metadata,
 )
 
@@ -211,7 +209,7 @@ async def test_upload_part_copy_passthrough_roundtrips_via_get(
 
     part_state = await handler.multipart_manager.get_upload(BUCKET, "sst/dest.db", upload_id)
     complete_body = (
-        f'<CompleteMultipartUpload><Part><PartNumber>1</PartNumber>'
+        f"<CompleteMultipartUpload><Part><PartNumber>1</PartNumber>"
         f'<ETag>"{part_state.parts[1].etag}"</ETag></Part></CompleteMultipartUpload>'
     ).encode()
     complete_req = MagicMock()

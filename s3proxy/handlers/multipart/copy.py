@@ -95,7 +95,7 @@ class CopyPartMixin(BaseHandler):
                 if self._can_passthrough_part_copy(
                     copy_source_range, src_wrapped_dek, src_multipart_meta, src_metadata, creds
                 ):
-                    return await self._passthrough_copy_part(
+                    return await self._gated_passthrough_copy_part(
                         client,
                         bucket,
                         key,
@@ -131,7 +131,7 @@ class CopyPartMixin(BaseHandler):
             if self._can_passthrough_part_copy(
                 copy_source_range, src_wrapped_dek, src_multipart_meta, src_metadata, creds
             ):
-                return await self._passthrough_copy_part(
+                return await self._gated_passthrough_copy_part(
                     client,
                     bucket,
                     key,
@@ -217,9 +217,7 @@ class CopyPartMixin(BaseHandler):
     ) -> tuple[bytes, str]:
         if src_multipart_meta:
             kid = src_multipart_meta.kid
-            dek = crypto.unwrap_key(
-                src_multipart_meta.wrapped_dek, self.keyring.key_by_id(kid)
-            )
+            dek = crypto.unwrap_key(src_multipart_meta.wrapped_dek, self.keyring.key_by_id(kid))
             return dek, kid
         kid = src_metadata.get(self.settings.kidtag_name, "")
         wrapped = base64.b64decode(src_wrapped_dek or "")
@@ -241,28 +239,21 @@ class CopyPartMixin(BaseHandler):
             ct_offset = 0
             for part in sorted(src_multipart_meta.parts, key=lambda p: p.part_number):
                 if part.internal_parts:
-                    for ip in sorted(
-                        part.internal_parts, key=lambda x: x.internal_part_number
-                    ):
+                    for ip in sorted(part.internal_parts, key=lambda x: x.internal_part_number):
                         segments.append(
                             _CiphertextSegment(ip.plaintext_size, ip.ciphertext_size, ct_offset)
                         )
                         ct_offset += ip.ciphertext_size
                 else:
                     segments.append(
-                        _CiphertextSegment(
-                            part.plaintext_size, part.ciphertext_size, ct_offset
-                        )
+                        _CiphertextSegment(part.plaintext_size, part.ciphertext_size, ct_offset)
                     )
                     ct_offset += part.ciphertext_size
             return segments
 
         ct_size = head_resp.get("ContentLength", 0) or 0
         size_str = src_metadata.get("plaintext-size")
-        if size_str:
-            plaintext_size = int(size_str)
-        else:
-            plaintext_size = crypto.plaintext_size(ct_size)
+        plaintext_size = int(size_str) if size_str else crypto.plaintext_size(ct_size)
         return [_CiphertextSegment(plaintext_size, ct_size, 0)]
 
     async def _adopt_upload_dek(
@@ -302,7 +293,7 @@ class CopyPartMixin(BaseHandler):
         src_multipart_meta: MultipartMetadata | None,
         head_resp: dict,
         src_metadata: dict,
-    ) -> "hashlib._Hash":
+    ):
         """Frame-bounded plaintext MD5 for the UploadPartCopy synthetic ETag."""
         md5 = hashlib.md5(usedforsecurity=False)
         async for chunk in self._iter_copy_source(
@@ -317,6 +308,61 @@ class CopyPartMixin(BaseHandler):
         ):
             md5.update(chunk)
         return md5
+
+    async def _gated_passthrough_copy_part(
+        self,
+        client: S3Client,
+        bucket: str,
+        key: str,
+        upload_id: str,
+        part_num: int,
+        state: MultipartUploadState,
+        src_bucket: str,
+        src_key: str,
+        copy_source: str,
+        head_resp: dict,
+        src_metadata: dict,
+        src_wrapped_dek: str | None,
+        src_multipart_meta: MultipartMetadata | None,
+        plaintext_size: int,
+    ) -> Response:
+        """Passthrough with the same governor + pipeline cap as the re-encrypt path."""
+        peak = crypto.copy_pipeline_peak(plaintext_size)
+        if plaintext_size > crypto.STREAMING_THRESHOLD:
+            async with _copy_pipeline_semaphore, concurrency.reserve_copy_memory(peak):
+                return await self._passthrough_copy_part(
+                    client,
+                    bucket,
+                    key,
+                    upload_id,
+                    part_num,
+                    state,
+                    src_bucket,
+                    src_key,
+                    copy_source,
+                    head_resp,
+                    src_metadata,
+                    src_wrapped_dek,
+                    src_multipart_meta,
+                    plaintext_size,
+                )
+        async with concurrency.reserve_copy_memory(peak):
+            return await self._passthrough_copy_part(
+                client,
+                bucket,
+                key,
+                upload_id,
+                part_num,
+                state,
+                src_bucket,
+                src_key,
+                copy_source,
+                head_resp,
+                src_metadata,
+                src_wrapped_dek,
+                src_multipart_meta,
+                plaintext_size,
+            )
 
     async def _passthrough_copy_part(
         self,
