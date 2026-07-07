@@ -61,9 +61,27 @@ class ConcurrencyLimiter:
         self._limit_mb = limit_mb
         self._limit_bytes = limit_mb * 1024 * 1024
         self._active_bytes = 0
+        self._pending_exclusive = 0
         self._lock = asyncio.Lock()
         self._condition = asyncio.Condition(self._lock)
         MEMORY_LIMIT_BYTES.set(self._limit_bytes)
+
+    def _can_admit(self, to_reserve: int, exclusive: bool) -> bool:
+        """Whether a request may reserve right now.
+
+        A request that needs the whole budget (exclusive -- e.g. a multi-GB copy
+        clamped to limit_bytes) is admissible only when nothing else holds
+        memory: active_bytes + limit_bytes > limit_bytes for any active_bytes > 0.
+        Without fairness the limiter never reaches that state under load -- every
+        release wakes all waiters and a small request re-grabs memory before the
+        copy can, so active_bytes never drains to 0 and the copy backpressures
+        until it 503s. Writer preference fixes it: while an exclusive request is
+        waiting, hold back new non-exclusive admissions so active_bytes drains
+        and the copy gets its exclusive slot (bounded by in-flight requests).
+        """
+        if self._active_bytes + to_reserve > self._limit_bytes:
+            return False
+        return exclusive or self._pending_exclusive == 0
 
     @property
     def limit_bytes(self) -> int:
@@ -116,38 +134,49 @@ class ConcurrencyLimiter:
                 copy=copy,
             )
 
+        exclusive = to_reserve >= self._limit_bytes
         async with self._condition:
             deadline = asyncio.get_event_loop().time() + BACKPRESSURE_TIMEOUT
-            while self._active_bytes + to_reserve > self._limit_bytes:
-                remaining = deadline - asyncio.get_event_loop().time()
-                if remaining <= 0:
-                    active_mb = self._active_bytes / 1024 / 1024
-                    request_mb = to_reserve / 1024 / 1024
-                    limit_mb = self._limit_bytes / 1024 / 1024
-                    logger.warning(
-                        "MEMORY_REJECTED",
-                        active_mb=round(active_mb, 2),
-                        requested_mb=round(request_mb, 2),
-                        limit_mb=round(limit_mb, 2),
-                        waited_sec=BACKPRESSURE_TIMEOUT,
+            if exclusive:
+                self._pending_exclusive += 1
+            try:
+                while not self._can_admit(to_reserve, exclusive):
+                    remaining = deadline - asyncio.get_event_loop().time()
+                    if remaining <= 0:
+                        active_mb = self._active_bytes / 1024 / 1024
+                        request_mb = to_reserve / 1024 / 1024
+                        limit_mb = self._limit_bytes / 1024 / 1024
+                        logger.warning(
+                            "MEMORY_REJECTED",
+                            active_mb=round(active_mb, 2),
+                            requested_mb=round(request_mb, 2),
+                            limit_mb=round(limit_mb, 2),
+                            waited_sec=BACKPRESSURE_TIMEOUT,
+                        )
+                        MEMORY_REJECTIONS.inc()
+                        raise S3Error.slow_down(
+                            f"Memory limit: {active_mb:.0f}MB + "
+                            f"{request_mb:.0f}MB > {limit_mb:.0f}MB"
+                        )
+                    logger.info(
+                        "MEMORY_BACKPRESSURE",
+                        active_mb=round(self._active_bytes / 1024 / 1024, 2),
+                        requested_mb=round(to_reserve / 1024 / 1024, 2),
+                        limit_mb=round(self._limit_bytes / 1024 / 1024, 2),
+                        remaining_sec=round(remaining, 1),
                     )
-                    MEMORY_REJECTIONS.inc()
-                    raise S3Error.slow_down(
-                        f"Memory limit: {active_mb:.0f}MB + {request_mb:.0f}MB > {limit_mb:.0f}MB"
-                    )
-                logger.info(
-                    "MEMORY_BACKPRESSURE",
-                    active_mb=round(self._active_bytes / 1024 / 1024, 2),
-                    requested_mb=round(to_reserve / 1024 / 1024, 2),
-                    limit_mb=round(self._limit_bytes / 1024 / 1024, 2),
-                    remaining_sec=round(remaining, 1),
-                )
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self._condition.wait(), timeout=remaining)
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(self._condition.wait(), timeout=remaining)
 
-            self._active_bytes += to_reserve
-            MEMORY_RESERVED_BYTES.set(self._active_bytes)
-            return to_reserve
+                self._active_bytes += to_reserve
+                MEMORY_RESERVED_BYTES.set(self._active_bytes)
+                return to_reserve
+            finally:
+                if exclusive:
+                    self._pending_exclusive -= 1
+                    # Whether we got the slot or gave up, release the non-exclusive
+                    # requests we were holding back.
+                    self._condition.notify_all()
 
     async def release(self, bytes_reserved: int) -> None:
         """Release reserved memory and wake waiting requests."""
