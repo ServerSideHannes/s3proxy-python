@@ -259,14 +259,17 @@ class CopyPartMixin(BaseHandler):
         plaintext_size: int,
     ) -> Response:
         """Stream-decrypt the source and encrypt+upload each chunk as an internal S3 part."""
-        # Same part sizing as the framed UploadPart path: bounds the internal part
-        # count to MAX_INTERNAL_PARTS_PER_CLIENT (so a large copy can never overflow
-        # the per-client internal-part range) and keeps parts small.
-        chunk_size = crypto.memory_bounded_part_size(plaintext_size)
+        # Fixed internal part size: the copy peak is O(1) in object size (~90MB)
+        # instead of object_size/20 (~535MB for a 4.7GB SSTable, which had to
+        # reserve the whole governor budget and deadlocked). A large copy needs
+        # many internal parts, so allocate them sequentially (client_part_number=0)
+        # rather than from the fixed 20-wide per-client window -- safe because
+        # copies are single-part uploads and reassembly is metadata-driven.
+        chunk_size = crypto.copy_internal_part_size(plaintext_size)
         estimated_parts = max(1, math.ceil(plaintext_size / chunk_size))
 
         internal_part_start = await self.multipart_manager.allocate_internal_parts(
-            bucket, key, upload_id, estimated_parts, client_part_number=part_num
+            bucket, key, upload_id, estimated_parts, client_part_number=0
         )
 
         logger.info(

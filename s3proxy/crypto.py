@@ -42,6 +42,20 @@ MAX_BUFFER_SIZE = 8 * 1024 * 1024  # 8 MB per internal part
 # than this many internal parts without colliding into the next part's range.
 MAX_INTERNAL_PARTS_PER_CLIENT = 20
 
+# Server-side copies use a FIXED internal part size instead of object_size/20.
+# A large single-part copy (Scylla dedup copies a 4.7GB SSTable as one
+# UploadPartCopy) otherwise picked 238MB internal parts -> ~535MB peak -> it had
+# to reserve the whole governor budget and deadlocked against any concurrent
+# request (active_bytes never hits 0). A fixed part keeps the copy peak ~90MB
+# regardless of object size, so copies never monopolize the budget. Copies are
+# single-part and their internal parts are allocated sequentially, so a large
+# copy can use many internal parts without the per-client-range collision that
+# limits streaming uploads.
+COPY_INTERNAL_PART_SIZE = 32 * 1024 * 1024  # 32 MB
+# Keep clear of S3's 10,000-part ceiling; only grow the part for objects so
+# large a 32MB part would exceed it (>~288GB), which backup SSTables never hit.
+COPY_MAX_INTERNAL_PARTS = 9000
+
 # Framed internal-part format.
 # S3's 10,000-part limit forces large internal parts for big objects, but we do
 # not want to hold a whole part (plaintext + ciphertext) in memory. So a part is
@@ -233,24 +247,41 @@ def governor_memory_footprint(content_length: int) -> int:
     return min(honest, routine_cap)
 
 
+def copy_internal_part_size(plaintext_size: int) -> int:
+    """Internal S3 part size for a server-side copy.
+
+    Fixed at COPY_INTERNAL_PART_SIZE so a copy's peak memory is bounded and
+    independent of object size (the pump frames one internal part at a time).
+    Grown only when an object is large enough that a 32MB part would need more
+    than COPY_MAX_INTERNAL_PARTS parts.
+    """
+    parts = -(-plaintext_size // COPY_INTERNAL_PART_SIZE)  # ceil
+    if parts > COPY_MAX_INTERNAL_PARTS:
+        return -(-plaintext_size // COPY_MAX_INTERNAL_PARTS)  # ceil, grow part
+    return COPY_INTERNAL_PART_SIZE
+
+
 def copy_pipeline_peak(plaintext_size: int) -> int:
     """Peak memory a server-side copy holds while decrypting + re-encrypting.
 
     A copy request has no body, so the request-level limiter reserves ~nothing
     for it -- yet the copy reads the source, decrypts it and re-encrypts it. The
-    streaming copy path now frames exactly like the framed UploadPart path
-    (encrypt_frame per FRAME_PLAINTEXT_SIZE, one internal part at a time, sized by
-    memory_bounded_part_size), so its per-part peak matches the upload path. It
+    streaming copy path frames exactly like the framed UploadPart path
+    (encrypt_frame per FRAME_PLAINTEXT_SIZE, one internal part at a time) but uses
+    a FIXED copy_internal_part_size, so the per-part peak -- and thus the whole
+    reservation -- is O(1) in object size (~90MB) rather than object_size/20
+    (~535MB for a 4.7GB copy, which monopolized the budget and deadlocked). It
     adds one pipeline stage the body-fed upload path lacks: the source is read in
     MAX_BUFFER_SIZE chunks into a _PlaintextReader buffer, so reserve two extra
     buffers for it. Small copies buffer the whole object and re-encrypt it (~3x).
 
-    Large internal parts (multi-GB manifest copies): aiobotocore copies the
-    ciphertext body for signing; tracemalloc shows ~part/7 slack at 238MB parts.
+    aiobotocore copies the ciphertext body for signing; tracemalloc shows
+    ~part/7 slack once parts exceed 32MB.
     """
     if plaintext_size > STREAMING_THRESHOLD:
-        part = memory_bounded_part_size(plaintext_size)
-        peak = streaming_upload_peak(plaintext_size) + 2 * MAX_BUFFER_SIZE
+        part = copy_internal_part_size(plaintext_size)
+        framed = 4 * part if part <= FRAME_PLAINTEXT_SIZE else 2 * part + FRAME_PLAINTEXT_SIZE
+        peak = framed + 2 * MAX_BUFFER_SIZE
         if part > 32 * 1024 * 1024:
             peak += part // 7
         return peak

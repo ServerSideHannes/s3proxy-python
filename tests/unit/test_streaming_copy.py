@@ -143,9 +143,13 @@ class TestUploadPartCopyStreaming:
 
     @pytest.mark.asyncio
     async def test_large_unencrypted_source_splits_into_multiple_parts(
-        self, mock_s3, settings, manager, credentials
+        self, mock_s3, settings, manager, credentials, monkeypatch
     ):
         """Source > STREAMING_THRESHOLD → multiple internal parts."""
+        # Pin the fixed copy part size to one buffer so parts stay single-frame
+        # and this test's per-part crypto.decrypt roundtrip applies; the 32MB
+        # multi-frame path is covered by test_streamed_parts_are_framed_and_roundtrip.
+        monkeypatch.setattr(crypto, "COPY_INTERNAL_PART_SIZE", crypto.MAX_BUFFER_SIZE)
         handler = _make_handler(settings, manager)
         await mock_s3.create_bucket("bucket")
 
@@ -250,9 +254,10 @@ class TestUploadPartCopyStreaming:
 
     @pytest.mark.asyncio
     async def test_large_unencrypted_source_with_range(
-        self, mock_s3, settings, manager, credentials
+        self, mock_s3, settings, manager, credentials, monkeypatch
     ):
         """Range request on a large unencrypted source streams only the range bytes."""
+        monkeypatch.setattr(crypto, "COPY_INTERNAL_PART_SIZE", crypto.MAX_BUFFER_SIZE)
         handler = _make_handler(settings, manager)
         await mock_s3.create_bucket("bucket")
 
@@ -302,8 +307,11 @@ class TestUploadPartCopyStreaming:
         assert bytes(recovered) == plaintext[:range_size]
 
     @pytest.mark.asyncio
-    async def test_large_multipart_encrypted_source(self, mock_s3, settings, manager, credentials):
+    async def test_large_multipart_encrypted_source(
+        self, mock_s3, settings, manager, credentials, monkeypatch
+    ):
         """Large multipart-encrypted source → iterates source parts, re-encrypts in chunks."""
+        monkeypatch.setattr(crypto, "COPY_INTERNAL_PART_SIZE", crypto.MAX_BUFFER_SIZE)
         handler = _make_handler(settings, manager)
         await mock_s3.create_bucket("bucket")
 
