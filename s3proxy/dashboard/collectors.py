@@ -134,7 +134,7 @@ def _latency_percentiles(cumulative: dict[str, float] | None = None) -> dict[str
             continue
         try:
             buckets.append((float(le), float(count)))
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             continue
     if total < 1 and buckets:
         total = max(c for _, c in buckets)

@@ -279,6 +279,16 @@ def copy_chunk_peak(chunk_plaintext_bytes: int) -> int:
     return peak
 
 
+# UploadPartCopy passthrough moves bytes server-side; in-process peak is tiny.
+COPY_PASSTHROUGH_SEGMENT_PEAK = 64 * 1024
+
+
+def copy_passthrough_segment_peak(plaintext_size: int) -> int:
+    """Governor reservation for one native copy segment (no decrypt/re-encrypt)."""
+    _ = plaintext_size
+    return COPY_PASSTHROUGH_SEGMENT_PEAK
+
+
 def copy_small_buffered_peak(plaintext_size: int) -> int:
     """Peak for a small copy that buffers the whole object in RAM."""
     return max(MAX_BUFFER_SIZE, 3 * plaintext_size)

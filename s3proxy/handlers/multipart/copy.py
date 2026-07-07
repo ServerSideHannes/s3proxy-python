@@ -93,7 +93,12 @@ class CopyPartMixin(BaseHandler):
                 # by the limiter too (they carry no body, so the request-level
                 # reservation was ~nothing and a small-object flood ran unbounded).
                 if self._can_passthrough_part_copy(
-                    copy_source_range, src_wrapped_dek, src_multipart_meta, src_metadata, creds
+                    copy_source_range,
+                    src_wrapped_dek,
+                    src_multipart_meta,
+                    src_metadata,
+                    creds,
+                    plaintext_size,
                 ):
                     return await self._gated_passthrough_copy_part(
                         client,
@@ -129,7 +134,12 @@ class CopyPartMixin(BaseHandler):
                         src_multipart_meta,
                     )
             if self._can_passthrough_part_copy(
-                copy_source_range, src_wrapped_dek, src_multipart_meta, src_metadata, creds
+                copy_source_range,
+                src_wrapped_dek,
+                src_multipart_meta,
+                src_metadata,
+                creds,
+                plaintext_size,
             ):
                 return await self._gated_passthrough_copy_part(
                     client,
@@ -195,11 +205,15 @@ class CopyPartMixin(BaseHandler):
         src_multipart_meta: MultipartMetadata | None,
         src_metadata: dict,
         creds: S3Credentials,
+        plaintext_size: int,
     ) -> bool:
         """True when a native server-side copy preserves decryptability without re-encrypt."""
         if copy_source_range:
             return False
         if not src_wrapped_dek and not src_multipart_meta:
+            return False
+        # Large PutObject blobs have no sidecar part map; streaming re-encrypt frames them.
+        if not src_multipart_meta and plaintext_size > crypto.STREAMING_THRESHOLD:
             return False
         if src_multipart_meta:
             src_kid = src_multipart_meta.kid
@@ -326,10 +340,9 @@ class CopyPartMixin(BaseHandler):
         src_multipart_meta: MultipartMetadata | None,
         plaintext_size: int,
     ) -> Response:
-        """Passthrough with the same governor + pipeline cap as the re-encrypt path."""
-        peak = crypto.copy_pipeline_peak(plaintext_size)
+        """Passthrough with the same pipeline cap as the re-encrypt path."""
         if plaintext_size > crypto.STREAMING_THRESHOLD:
-            async with _copy_pipeline_semaphore, concurrency.reserve_copy_memory(peak):
+            async with _copy_pipeline_semaphore:
                 return await self._passthrough_copy_part(
                     client,
                     bucket,
@@ -346,23 +359,22 @@ class CopyPartMixin(BaseHandler):
                     src_multipart_meta,
                     plaintext_size,
                 )
-        async with concurrency.reserve_copy_memory(peak):
-            return await self._passthrough_copy_part(
-                client,
-                bucket,
-                key,
-                upload_id,
-                part_num,
-                state,
-                src_bucket,
-                src_key,
-                copy_source,
-                head_resp,
-                src_metadata,
-                src_wrapped_dek,
-                src_multipart_meta,
-                plaintext_size,
-            )
+        return await self._passthrough_copy_part(
+            client,
+            bucket,
+            key,
+            upload_id,
+            part_num,
+            state,
+            src_bucket,
+            src_key,
+            copy_source,
+            head_resp,
+            src_metadata,
+            src_wrapped_dek,
+            src_multipart_meta,
+            plaintext_size,
+        )
 
     async def _passthrough_copy_part(
         self,
@@ -417,14 +429,16 @@ class CopyPartMixin(BaseHandler):
             seg = segments[0]
             ct_end = seg.ct_offset + seg.ciphertext_size - 1
             copy_range = f"bytes={seg.ct_offset}-{ct_end}"
-            resp = await client.upload_part_copy(
-                bucket,
-                key,
-                upload_id,
-                part_num,
-                copy_source_path,
-                copy_source_range=copy_range,
-            )
+            part_reserve = crypto.copy_passthrough_segment_peak(seg.plaintext_size)
+            async with concurrency.reserve_copy_memory(part_reserve):
+                resp = await client.upload_part_copy(
+                    bucket,
+                    key,
+                    upload_id,
+                    part_num,
+                    copy_source_path,
+                    copy_source_range=copy_range,
+                )
             md5 = await self._md5_plaintext_from_copy_source(
                 client,
                 src_bucket,
@@ -467,14 +481,16 @@ class CopyPartMixin(BaseHandler):
             internal_num = internal_part_start + i
             ct_end = seg.ct_offset + seg.ciphertext_size - 1
             copy_range = f"bytes={seg.ct_offset}-{ct_end}"
-            resp = await client.upload_part_copy(
-                bucket,
-                key,
-                upload_id,
-                internal_num,
-                copy_source_path,
-                copy_source_range=copy_range,
-            )
+            part_reserve = crypto.copy_passthrough_segment_peak(seg.plaintext_size)
+            async with concurrency.reserve_copy_memory(part_reserve):
+                resp = await client.upload_part_copy(
+                    bucket,
+                    key,
+                    upload_id,
+                    internal_num,
+                    copy_source_path,
+                    copy_source_range=copy_range,
+                )
             etag_part = resp["CopyPartResult"]["ETag"].strip('"')
             internal_parts.append(
                 InternalPartMetadata(
