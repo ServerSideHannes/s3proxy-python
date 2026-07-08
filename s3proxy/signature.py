@@ -11,10 +11,12 @@ from .errors import S3Error
 
 
 def deferred_signature_required(request: Request) -> bool:
-    return bool(getattr(request.state, "s3proxy_deferred_sig", False))
+    return getattr(request.state, "s3proxy_deferred_sig", False) is True
 
 
-def verify_deferred_payload_hash(request: Request, verifier: SigV4Verifier, payload_hash: str) -> None:
+def verify_deferred_payload_hash(
+    request: Request, verifier: SigV4Verifier, payload_hash: str
+) -> None:
     """Verify a request whose body was streamed after computing its SHA256."""
     if not deferred_signature_required(request):
         return

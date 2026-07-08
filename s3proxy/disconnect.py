@@ -12,19 +12,19 @@ from .errors import S3Error
 CHECK_INTERVAL_BYTES = 8 * 1024 * 1024
 
 
-class ClientDisconnected(S3Error):
+class ClientDisconnectError(S3Error):
     """Client closed the connection mid-upload."""
 
     @classmethod
-    def raised(cls) -> ClientDisconnected:
+    def raised(cls) -> ClientDisconnectError:
         return cls(400, "BadRequest", "Client disconnected")
 
 
 async def _client_disconnected(request: Request) -> bool:
     result = request.is_disconnected()
     if inspect.isawaitable(result):
-        return bool(await result)
-    return bool(result)
+        result = await result
+    return result is True
 
 
 async def track_chunk(request: Request, chunk_len: int, bytes_since_check: int) -> int:
@@ -33,5 +33,5 @@ async def track_chunk(request: Request, chunk_len: int, bytes_since_check: int) 
     if bytes_since_check < CHECK_INTERVAL_BYTES:
         return bytes_since_check
     if await _client_disconnected(request):
-        raise ClientDisconnected.raised()
+        raise ClientDisconnectError.raised()
     return 0

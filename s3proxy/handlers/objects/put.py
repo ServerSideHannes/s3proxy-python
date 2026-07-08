@@ -11,15 +11,15 @@ from structlog.stdlib import BoundLogger
 
 from ... import crypto
 from ...client import S3Client, S3Credentials
-from ...disconnect import ClientDisconnected, track_chunk
+from ...disconnect import ClientDisconnectError, track_chunk
 from ...errors import S3Error
+from ...signature import verify_deferred_payload_hash
 from ...state import (
     MultipartMetadata,
     PartMetadata,
     save_multipart_metadata,
 )
 from ...streaming import decode_aws_chunked, decode_aws_chunked_stream
-from ...signature import verify_deferred_payload_hash
 from ...utils import etag_matches
 from ..base import BaseHandler
 
@@ -39,7 +39,7 @@ async def _iter_request_body(request: Request, decode_chunked: bool) -> AsyncIte
             yield chunk
         return
     preloaded = getattr(request.state, "s3proxy_preloaded_body", None)
-    if preloaded is not None:
+    if isinstance(preloaded, (bytes, bytearray)):
         for offset in range(0, len(preloaded), _STREAM_CHUNK):
             yield preloaded[offset : offset + _STREAM_CHUNK]
         return
@@ -150,8 +150,10 @@ class PutObjectMixin(BaseHandler):
             content_length_mb=round(content_length / 1024 / 1024, 2),
         )
 
-        body = getattr(request.state, "s3proxy_preloaded_body", None)
-        if body is None:
+        preloaded = getattr(request.state, "s3proxy_preloaded_body", None)
+        if isinstance(preloaded, (bytes, bytearray)):
+            body = bytes(preloaded)
+        else:
             body = await request.body()
         if needs_chunked_decode:
             body = decode_aws_chunked(body)
@@ -217,7 +219,7 @@ class PutObjectMixin(BaseHandler):
         total_plaintext_size = 0
         part_num = 0
         md5_hash = hashlib.md5(usedforsecurity=False)
-        deferred_sig = getattr(request.state, "s3proxy_deferred_sig", False)
+        deferred_sig = getattr(request.state, "s3proxy_deferred_sig", False) is True
         sha256_hash = hashlib.sha256() if (expected_sha256 or deferred_sig) else None
         buffer = bytearray()
 
@@ -332,7 +334,7 @@ class PutObjectMixin(BaseHandler):
             )
             return Response(headers={"ETag": f'"{etag}"'})
 
-        except ClientDisconnected:
+        except ClientDisconnectError:
             await self._safe_abort(client, bucket, key, upload_id)
             raise
         except S3Error:

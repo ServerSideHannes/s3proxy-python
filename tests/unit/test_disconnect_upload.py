@@ -4,8 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from s3proxy.disconnect import CHECK_INTERVAL_BYTES, ClientDisconnected
-from s3proxy.errors import S3Error
+from s3proxy.disconnect import CHECK_INTERVAL_BYTES, ClientDisconnectError
 from s3proxy.handlers.objects.put import PutObjectMixin
 
 MB = 1024 * 1024
@@ -56,7 +55,7 @@ async def test_put_streaming_aborts_multipart_on_client_disconnect():
     request = _DisconnectRequest(12 * MB)
     client = _Client()
 
-    with pytest.raises(ClientDisconnected):
+    with pytest.raises(ClientDisconnectError):
         await _handler()._put_streaming(
             request,
             client,

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from s3proxy.config import Settings
-from s3proxy.disconnect import CHECK_INTERVAL_BYTES, ClientDisconnected, track_chunk
+from s3proxy.disconnect import CHECK_INTERVAL_BYTES, ClientDisconnectError, track_chunk
 
 
 class TestResolvedMaxInFlight:
@@ -57,7 +57,7 @@ async def test_track_chunk_raises_when_client_disconnected():
     request = MagicMock()
     request.is_disconnected = AsyncMock(return_value=True)
 
-    with pytest.raises(ClientDisconnected):
+    with pytest.raises(ClientDisconnectError):
         await track_chunk(request, CHECK_INTERVAL_BYTES, 0)
 
     request.is_disconnected.assert_awaited_once()

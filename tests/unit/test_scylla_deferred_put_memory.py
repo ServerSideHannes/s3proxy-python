@@ -108,8 +108,7 @@ async def test_scylla_sized_deferred_put_peak_is_bounded_not_double_body():
         f"({honest_peak_mb:.1f}MB) — likely double-buffer regression"
     )
     assert measured_mb < double_body_mb / 4, (
-        f"peak {measured_mb:.1f}MB is too close to old 2x-body failure "
-        f"({double_body_mb:.0f}MB)"
+        f"peak {measured_mb:.1f}MB is too close to old 2x-body failure ({double_body_mb:.0f}MB)"
     )
 
 

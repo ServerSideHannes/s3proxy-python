@@ -1,7 +1,8 @@
 """PUT handler must not double-buffer a body already loaded for signature."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from s3proxy.handlers.objects.put import _iter_request_body
 
