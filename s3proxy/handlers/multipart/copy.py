@@ -63,7 +63,7 @@ class CopyPartMixin(BaseHandler):
         async with self._client(creds) as client:
             upload_id, part_num = self._extract_multipart_params(request)
             copy_source = request.headers.get("x-amz-copy-source", "")
-            copy_source_range = request.headers.get("x-amz-copy-source-range")
+            raw_copy_source_range = request.headers.get("x-amz-copy-source-range")
             src_bucket, src_key = self._parse_copy_source(copy_source)
 
             state = await self.multipart_manager.get_upload(bucket, key, upload_id)
@@ -84,6 +84,12 @@ class CopyPartMixin(BaseHandler):
             src_wrapped_dek = src_metadata.get(self.settings.dektag_name)
             src_multipart_meta = await load_multipart_metadata(client, src_bucket, src_key)
 
+            total_plaintext = self._copy_plaintext_size(
+                head_resp, None, src_wrapped_dek, src_multipart_meta
+            )
+            copy_source_range = self._normalize_copy_source_range(
+                raw_copy_source_range, total_plaintext
+            )
             plaintext_size = self._copy_plaintext_size(
                 head_resp, copy_source_range, src_wrapped_dek, src_multipart_meta
             )
@@ -197,6 +203,22 @@ class CopyPartMixin(BaseHandler):
             return total
         start, end = self._parse_copy_source_range(copy_source_range, total)
         return end - start + 1
+
+    def _normalize_copy_source_range(
+        self, copy_source_range: str | None, total_plaintext_size: int
+    ) -> str | None:
+        """Treat a range spanning the entire object as 'copy whole object'.
+
+        Scylla Manager often sends ``bytes=0-(size-1)`` on manifest UploadPartCopy
+        even when copying the full SST. That must not force the streaming re-encrypt
+        path (which queues behind the copy pipeline and exceeds the 300s client timeout).
+        """
+        if not copy_source_range:
+            return None
+        start, end = self._parse_copy_source_range(copy_source_range, total_plaintext_size)
+        if start == 0 and end == total_plaintext_size - 1:
+            return None
+        return copy_source_range
 
     def _can_passthrough_part_copy(
         self,
@@ -340,25 +362,7 @@ class CopyPartMixin(BaseHandler):
         src_multipart_meta: MultipartMetadata | None,
         plaintext_size: int,
     ) -> Response:
-        """Passthrough with the same pipeline cap as the re-encrypt path."""
-        if plaintext_size > crypto.STREAMING_THRESHOLD:
-            async with _copy_pipeline_semaphore:
-                return await self._passthrough_copy_part(
-                    client,
-                    bucket,
-                    key,
-                    upload_id,
-                    part_num,
-                    state,
-                    src_bucket,
-                    src_key,
-                    copy_source,
-                    head_resp,
-                    src_metadata,
-                    src_wrapped_dek,
-                    src_multipart_meta,
-                    plaintext_size,
-                )
+        """Server-side ciphertext copy; does not use the streaming pipeline semaphore."""
         return await self._passthrough_copy_part(
             client,
             bucket,

@@ -304,12 +304,30 @@ def check_dek_adoption(ctx: RunContext, source: str, dest: str) -> None:
 
 
 def check_reencrypt_control(ctx: RunContext, source: str, dest: str, size: int) -> None:
+    # Partial range forces streaming re-encrypt; full-object range is passthrough.
+    partial_end = min(size - 1, 32 * MB - 1)
+    peak, enc = poll_during(
+        ctx,
+        lambda: upload_part_copy(ctx, dest, source, byte_range=f"bytes=0-{partial_end}"),
+    )
+    ctx.ok("encrypts partial range", enc >= (partial_end + 1) * 0.5, f"{enc / MB:.0f}MB")
+    ctx.ok("high peak memory", peak >= CHUNK_PEAK * 0.5, f"{peak / MB:.2f}MB")
+
+
+def check_scylla_manifest_full_range_passthrough(ctx: RunContext, source: str, dest: str, size: int) -> None:
+    """Scylla sends bytes=0-(size-1) on manifest UploadPartCopy; must passthrough."""
     peak, enc = poll_during(
         ctx,
         lambda: upload_part_copy(ctx, dest, source, byte_range=f"bytes=0-{size - 1}"),
     )
-    ctx.ok("encrypts full object", enc >= size * 0.5, f"{enc / MB:.0f}MB")
-    ctx.ok("high peak memory", peak >= CHUNK_PEAK * 0.5, f"{peak / MB:.2f}MB")
+    ctx.ok("full-range zero bytes_encrypted", enc <= 2 * MB, f"{enc / MB:.2f}MB")
+    ctx.ok("full-range low peak memory", peak <= CHUNK_PEAK * 0.5, f"{peak / MB:.2f}MB")
+    ctx.ok("full-range ciphertext identical", raw_ciphertext(ctx, source) == raw_ciphertext(ctx, dest))
+    ctx.ok(
+        "UPLOAD_PART_COPY_PASSTHROUGH logged",
+        log_has_passthrough(ctx.log_path),
+        str(ctx.log_path),
+    )
 
 
 def check_scylla_scale(ctx: RunContext, source: str, dest: str) -> None:
