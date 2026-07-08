@@ -20,6 +20,8 @@ from s3proxy.crypto import (
 from s3proxy.errors import S3Error
 from s3proxy.metrics import MEMORY_LIMIT_BYTES, MEMORY_REJECTIONS, MEMORY_RESERVED_BYTES
 
+from .request_context import get_request_context
+
 logger = structlog.get_logger(__name__)
 
 # Constants
@@ -47,7 +49,7 @@ def _create_malloc_release() -> Callable[[], int] | None:
 _malloc_release = _create_malloc_release()
 
 
-BACKPRESSURE_TIMEOUT = int(os.environ.get("S3PROXY_BACKPRESSURE_TIMEOUT", "30"))
+BACKPRESSURE_TIMEOUT = int(os.environ.get("S3PROXY_BACKPRESSURE_TIMEOUT", "120"))
 
 
 class ConcurrencyLimiter:
@@ -153,6 +155,7 @@ class ConcurrencyLimiter:
                             requested_mb=round(request_mb, 2),
                             limit_mb=round(limit_mb, 2),
                             waited_sec=BACKPRESSURE_TIMEOUT,
+                            **get_request_context(),
                         )
                         MEMORY_REJECTIONS.inc()
                         raise S3Error.slow_down(
@@ -166,6 +169,7 @@ class ConcurrencyLimiter:
                             requested_mb=round(to_reserve / 1024 / 1024, 2),
                             limit_mb=round(self._limit_bytes / 1024 / 1024, 2),
                             remaining_sec=round(remaining, 1),
+                            **get_request_context(),
                         )
                         logged_backpressure = True
                     with contextlib.suppress(TimeoutError):

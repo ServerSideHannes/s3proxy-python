@@ -6,6 +6,7 @@ the MultipartStateManager from the concrete storage implementation.
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import TYPE_CHECKING
@@ -22,7 +23,8 @@ logger: BoundLogger = structlog.get_logger(__name__)
 Updater = Callable[[bytes], bytes]
 
 # Maximum retries for Redis optimistic locking (WATCH/MULTI/EXEC)
-MAX_WATCH_RETRIES = 5
+MAX_WATCH_RETRIES = 25
+WATCH_RETRY_BASE_DELAY_SEC = 0.005
 
 
 class StateStore(ABC):
@@ -141,9 +143,17 @@ class RedisStateStore(StateStore):
                             "REDIS_WATCH_RETRIES_EXHAUSTED",
                             key=key,
                             operation="get_and_delete",
+                            attempts=MAX_WATCH_RETRIES,
                         )
                         raise
-                    logger.debug("REDIS_WATCH_RETRY", key=key, attempt=attempt + 1)
+                    logger.warning(
+                        "REDIS_WATCH_RETRY",
+                        key=key,
+                        attempt=attempt + 1,
+                        max_attempts=MAX_WATCH_RETRIES,
+                        operation="get_and_delete",
+                    )
+                    await asyncio.sleep(WATCH_RETRY_BASE_DELAY_SEC * (2**attempt))
         return None
 
     async def update(self, key: str, updater: Updater, ttl_seconds: int) -> bytes | None:
@@ -168,7 +178,19 @@ class RedisStateStore(StateStore):
                     return new_data
                 except redis.WatchError:
                     if attempt == MAX_WATCH_RETRIES - 1:
-                        logger.error("REDIS_WATCH_RETRIES_EXHAUSTED", key=key, operation="update")
+                        logger.error(
+                            "REDIS_WATCH_RETRIES_EXHAUSTED",
+                            key=key,
+                            operation="update",
+                            attempts=MAX_WATCH_RETRIES,
+                        )
                         raise
-                    logger.debug("REDIS_WATCH_RETRY", key=key, attempt=attempt + 1)
+                    logger.warning(
+                        "REDIS_WATCH_RETRY",
+                        key=key,
+                        attempt=attempt + 1,
+                        max_attempts=MAX_WATCH_RETRIES,
+                        operation="update",
+                    )
+                    await asyncio.sleep(WATCH_RETRY_BASE_DELAY_SEC * (2**attempt))
         return None

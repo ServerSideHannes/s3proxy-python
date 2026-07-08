@@ -86,6 +86,16 @@ class CopyPartMixin(BaseHandler):
             try:
                 head_resp = await client.head_object(src_bucket, src_key)
             except Exception as e:
+                logger.error(
+                    "UPLOAD_PART_COPY_HEAD_FAILED",
+                    bucket=bucket,
+                    key=key,
+                    client_part=part_num,
+                    src_bucket=src_bucket,
+                    src_key=src_key,
+                    error_type=type(e).__name__,
+                    error=str(e),
+                )
                 raise S3Error.no_such_key(src_key) from e
 
             src_metadata = head_resp.get("Metadata", {})

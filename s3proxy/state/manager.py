@@ -3,7 +3,8 @@
 import structlog
 from structlog.stdlib import BoundLogger
 
-from ..crypto import MAX_INTERNAL_PARTS_PER_CLIENT
+from ..crypto import MAX_INTERNAL_PARTS_PER_CLIENT, validate_internal_part_allocation
+from ..errors import S3Error
 from .models import (
     MultipartUploadState,
     PartMetadata,
@@ -230,7 +231,19 @@ class MultipartStateManager:
         internal part numbers to avoid conflicts.
         """
         if client_part_number > 0:
-            start = (client_part_number - 1) * MAX_INTERNAL_PARTS_PER_CLIENT + 1
+            try:
+                start, end = validate_internal_part_allocation(client_part_number, count)
+            except ValueError as e:
+                logger.error(
+                    "INTERNAL_PART_ALLOCATION_REJECTED",
+                    bucket=bucket,
+                    key=key,
+                    client_part=client_part_number,
+                    requested=count,
+                    max_per_client=MAX_INTERNAL_PARTS_PER_CLIENT,
+                    error=str(e),
+                )
+                raise S3Error.invalid_part(str(e)) from e
 
             if count > MAX_INTERNAL_PARTS_PER_CLIENT:
                 logger.warning(
@@ -242,14 +255,14 @@ class MultipartStateManager:
                     max=MAX_INTERNAL_PARTS_PER_CLIENT,
                 )
 
-            logger.debug(
+            logger.info(
                 "ALLOCATE_INTERNAL_PARTS",
                 bucket=bucket,
                 key=key,
                 client_part=client_part_number,
                 count=count,
                 start=start,
-                end=start + count - 1,
+                end=end,
             )
             return start
 

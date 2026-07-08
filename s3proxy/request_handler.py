@@ -24,6 +24,7 @@ from .metrics import (
     REQUESTS_IN_FLIGHT,
     get_operation_name,
 )
+from .request_context import bind_request, clear_request, get_request_context
 from .routing import RequestDispatcher
 
 pod_name = os.environ.get("HOSTNAME", "unknown")
@@ -133,6 +134,8 @@ async def handle_proxy_request(
 
     REQUESTS_IN_FLIGHT.labels(method=method).inc()
 
+    bind_request(method=method, path=path, query=query, content_length=None)
+
     # Check memory limit BEFORE reading body data - reject if at capacity
     reserved_memory = 0
     needs_limit = method in ("PUT", "POST", "GET")
@@ -143,6 +146,7 @@ async def handle_proxy_request(
             content_length = int(request.headers.get("content-length", "0"))
         except ValueError:
             content_length = 0
+        bind_request(method=method, path=path, query=query, content_length=content_length)
         memory_needed = concurrency.estimate_memory_footprint(method, content_length)
 
         logger.info(
@@ -182,11 +186,37 @@ async def handle_proxy_request(
         return response
     except HTTPException as e:
         status_code = e.status_code
+        if isinstance(e, S3Error):
+            logger.warning(
+                "REQUEST_S3_ERROR",
+                status_code=e.status_code,
+                code=e.code,
+                message=e.message,
+                active_mb=round(concurrency.get_active_memory() / 1024 / 1024, 2),
+                **get_request_context(),
+            )
+        else:
+            logger.warning(
+                "REQUEST_HTTP_ERROR",
+                status_code=e.status_code,
+                detail=e.detail,
+                active_mb=round(concurrency.get_active_memory() / 1024 / 1024, 2),
+                **get_request_context(),
+            )
         raise
-    except Exception:
+    except Exception as e:
         status_code = 500
+        logger.error(
+            "REQUEST_UNHANDLED_EXCEPTION",
+            error_type=type(e).__name__,
+            error=str(e),
+            active_mb=round(concurrency.get_active_memory() / 1024 / 1024, 2),
+            **get_request_context(),
+            exc_info=True,
+        )
         raise
     finally:
+        clear_request()
         # Record metrics
         duration = time.perf_counter() - start_time
         REQUESTS_IN_FLIGHT.labels(method=method).dec()

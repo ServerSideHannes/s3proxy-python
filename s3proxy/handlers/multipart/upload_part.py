@@ -150,6 +150,16 @@ class UploadPartMixin(BaseHandler):
                 estimated_parts,
                 client_part_number=part_num,
             )
+            internal_part_end = internal_part_start + estimated_parts - 1
+            logger.info(
+                "UPLOAD_PART_INTERNAL_RANGE",
+                bucket=bucket,
+                key=key,
+                part_number=part_num,
+                internal_part_start=internal_part_start,
+                internal_part_end=internal_part_end,
+                estimated_internal_parts=estimated_parts,
+            )
 
             try:
                 # Known-length direct streams (unsigned or large signed, e.g. barman
@@ -168,6 +178,7 @@ class UploadPartMixin(BaseHandler):
                         content_length,
                         internal_part_size,
                         internal_part_start,
+                        estimated_parts,
                     )
                 else:
                     result = await self._stream_and_upload(
@@ -392,6 +403,7 @@ class UploadPartMixin(BaseHandler):
         content_length: int,
         optimal_part_size: int,
         internal_part_start: int,
+        estimated_internal_parts: int,
     ) -> dict[str, str | int]:
         """Memory-bounded UploadPart for known-length direct streams.
 
@@ -431,6 +443,23 @@ class UploadPartMixin(BaseHandler):
                 )
                 frame_idx += 1
 
+            if remaining > 0:
+                bytes_read = part_pt_size - remaining
+                logger.error(
+                    "UPLOAD_PART_STREAM_SHORT",
+                    bucket=bucket,
+                    key=key,
+                    client_part=part_num,
+                    internal_part=ipn,
+                    expected_bytes=part_pt_size,
+                    received_bytes=bytes_read,
+                    content_length=content_length,
+                )
+                raise S3Error.bad_request(
+                    f"Upload body ended early: got {bytes_read}B of {part_pt_size}B "
+                    f"for client part {part_num} internal part {ipn}"
+                )
+
             upload_start = time.monotonic()
             resp = await client.upload_part(bucket, key, upload_id, ipn, ciphertext)
             del ciphertext
@@ -456,6 +485,16 @@ class UploadPartMixin(BaseHandler):
             total_ciphertext_size += ct_size
             internal_part_num += 1
             remaining_total -= part_pt_size
+
+        if internal_part_num - 1 > internal_part_start + estimated_internal_parts - 1:
+            logger.warning(
+                "UPLOAD_PART_INTERNAL_RANGE_EXCEEDED",
+                bucket=bucket,
+                key=key,
+                client_part=part_num,
+                allocated_end=internal_part_start + estimated_internal_parts - 1,
+                actual_end=internal_part_num - 1,
+            )
 
         client_etag = md5_hash.hexdigest()
         part_meta = PartMetadata(
@@ -617,14 +656,47 @@ class UploadPartMixin(BaseHandler):
                         bucket=bucket,
                         key=key,
                         upload_id=upload_id,
+                        client_part=part_num,
                     )
                     raise S3Error.no_such_upload(upload_id)
+                if isinstance(result, ClientError):
+                    error_code = result.response.get("Error", {}).get("Code", "")
+                    error_msg = result.response.get("Error", {}).get("Message", str(result))
+                    logger.error(
+                        "UPLOAD_PART_INTERNAL_FAILED",
+                        bucket=bucket,
+                        key=key,
+                        client_part=part_num,
+                        upload_id=upload_id[:20] + "...",
+                        aws_error_code=error_code,
+                        aws_error_message=error_msg,
+                    )
+                else:
+                    logger.error(
+                        "UPLOAD_PART_INTERNAL_FAILED",
+                        bucket=bucket,
+                        key=key,
+                        client_part=part_num,
+                        upload_id=upload_id[:20] + "...",
+                        error_type=exc_name,
+                        error=str(result),
+                    )
                 raise result
 
     def _handle_client_error(
         self, e: ClientError, bucket: str, key: str, part_num: int, upload_id: str
     ) -> NoReturn:
-        logger.error("UPLOAD_PART_CLIENT_ERROR", bucket=bucket, key=key, part_num=part_num)
+        error_code = e.response.get("Error", {}).get("Code", "")
+        error_msg = e.response.get("Error", {}).get("Message", str(e))
+        logger.error(
+            "UPLOAD_PART_CLIENT_ERROR",
+            bucket=bucket,
+            key=key,
+            part_num=part_num,
+            upload_id=upload_id[:20] + "...",
+            aws_error_code=error_code,
+            aws_error_message=error_msg,
+        )
         raise_for_client_error(e, bucket, key)
 
     def _handle_generic_error(
@@ -635,6 +707,7 @@ class UploadPartMixin(BaseHandler):
             bucket=bucket,
             key=key,
             part_num=part_num,
+            upload_id=upload_id[:20] + "...",
             error=str(e),
             error_type=type(e).__name__,
         )
