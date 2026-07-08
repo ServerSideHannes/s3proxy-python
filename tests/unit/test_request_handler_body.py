@@ -17,19 +17,26 @@ MB = 1024 * 1024
 
 class TestDeferSignatureForBody:
     def test_defers_large_put_without_payload_hash(self):
-        assert _defer_signature_for_body({}, 179 * MB) is True
+        assert _defer_signature_for_body({}, 179 * MB, {}) is True
 
     def test_no_defer_with_unsigned_payload(self):
         assert (
-            _defer_signature_for_body({"x-amz-content-sha256": "UNSIGNED-PAYLOAD"}, 179 * MB)
+            _defer_signature_for_body({"x-amz-content-sha256": "UNSIGNED-PAYLOAD"}, 179 * MB, {})
             is False
         )
 
     def test_no_defer_with_explicit_hash(self):
-        assert _defer_signature_for_body({"x-amz-content-sha256": "abc"}, 179 * MB) is False
+        assert _defer_signature_for_body({"x-amz-content-sha256": "abc"}, 179 * MB, {}) is False
 
     def test_no_defer_small_put_without_header(self):
-        assert _defer_signature_for_body({}, 4 * MB) is False
+        assert _defer_signature_for_body({}, 4 * MB, {}) is False
+
+    def test_no_defer_presigned_large_put(self):
+        query = {
+            "X-Amz-Algorithm": ["AWS4-HMAC-SHA256"],
+            "X-Amz-Signature": ["abc123"],
+        }
+        assert _defer_signature_for_body({}, 179 * MB, query) is False
 
 
 def _make_request(
@@ -37,17 +44,31 @@ def _make_request(
     method: str = "PUT",
     content_length: int,
     content_sha: str | None = None,
+    query: str = "",
+    presigned: bool = False,
 ) -> MagicMock:
     request = MagicMock(spec=Request)
     request.method = method
     request.url = MagicMock()
     request.url.path = "/bucket/scylla-backup/sst/big-Data.db"
-    request.url.query = ""
+    if presigned:
+        request.url.query = (
+            "X-Amz-Algorithm=AWS4-HMAC-SHA256"
+            "&X-Amz-Credential=key/20260708/us-east-1/s3/aws4_request"
+            "&X-Amz-Date=20260708T150228Z"
+            "&X-Amz-Expires=900"
+            "&X-Amz-SignedHeaders=content-md5%3Bcontent-type%3Bhost"
+            "&X-Amz-Signature=deadbeef"
+        )
+    else:
+        request.url.query = query
     headers: dict[str, str] = {
         "content-length": str(content_length),
-        "authorization": "AWS4-HMAC-SHA256 Credential=x, SignedHeaders=host, Signature=sig",
-        "x-amz-date": "20260708T080000Z",
+        "content-type": "application/octet-stream",
     }
+    if not presigned:
+        headers["authorization"] = "AWS4-HMAC-SHA256 Credential=x, SignedHeaders=host, Signature=sig"
+        headers["x-amz-date"] = "20260708T080000Z"
     if content_sha is not None:
         headers["x-amz-content-sha256"] = content_sha
     request.headers = headers
@@ -72,6 +93,22 @@ async def test_large_put_without_header_defers_signature():
     assert request.state.s3proxy_deferred_sig is True
     verifier.prepare_header_auth.assert_called_once()
     verifier.verify.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_large_presigned_put_verifies_without_body_preload():
+    """Scylla Manager uses presigned PUTs; must not enter deferred header-auth path."""
+    request = _make_request(content_length=179 * MB, presigned=True)
+    verifier = MagicMock()
+    verifier.verify = MagicMock(return_value=(True, MagicMock(), ""))
+
+    with patch("s3proxy.request_handler.RequestDispatcher") as dispatcher_cls:
+        dispatcher_cls.return_value.dispatch = AsyncMock(return_value=None)
+        await _handle_proxy_request_impl(request, MagicMock(), verifier)
+
+    request.body.assert_not_awaited()
+    verifier.verify.assert_called_once()
+    verifier.prepare_header_auth.assert_not_called()
 
 
 @pytest.mark.asyncio

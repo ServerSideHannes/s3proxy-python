@@ -58,13 +58,20 @@ async def _release_after_stream(iterator, reserved: int):
         await concurrency.release_memory(reserved)
 
 
-def _needs_body_for_signature(headers: dict[str, str]) -> bool:
-    """Body is needed only when x-amz-content-sha256 is absent.
+def _is_presigned_request(query: dict[str, list[str]]) -> bool:
+    """Presigned URLs sign UNSIGNED-PAYLOAD; body is not needed for verification."""
+    return "X-Amz-Signature" in query or "Signature" in query
+
+
+def _needs_body_for_signature(headers: dict[str, str], query: dict[str, list[str]]) -> bool:
+    """Body is needed only when x-amz-content-sha256 is absent (header auth).
 
     The verifier uses that header as the payload hash verbatim and only rehashes
-    the body as a fallback when it is missing. Buffering it otherwise just pins
-    the whole part in memory.
+    the body as a fallback when it is missing. Presigned URLs always use
+    UNSIGNED-PAYLOAD in the canonical request, so the body is never required.
     """
+    if _is_presigned_request(query):
+        return False
     return headers.get("x-amz-content-sha256", "") == ""
 
 
@@ -75,9 +82,14 @@ def _parse_content_length(headers: dict[str, str]) -> int:
         return 0
 
 
-def _defer_signature_for_body(headers: dict[str, str], content_length: int) -> bool:
-    """Large bodies without x-amz-content-sha256 are hashed while streaming."""
-    return _needs_body_for_signature(headers) and content_length > crypto.MAX_BUFFER_SIZE
+def _defer_signature_for_body(
+    headers: dict[str, str], content_length: int, query: dict[str, list[str]]
+) -> bool:
+    """Large header-auth bodies without x-amz-content-sha256 are hashed while streaming."""
+    return (
+        _needs_body_for_signature(headers, query)
+        and content_length > crypto.MAX_BUFFER_SIZE
+    )
 
 
 def _signature_path(request: Request) -> str:
@@ -222,10 +234,12 @@ async def _handle_proxy_request_impl(
 
     content_length = _parse_content_length(headers)
     defer_sig = request.method in ("PUT", "POST") and _defer_signature_for_body(
-        headers, content_length
+        headers, content_length, query
     )
 
-    needs_body = request.method in ("PUT", "POST") and _needs_body_for_signature(headers)
+    needs_body = request.method in ("PUT", "POST") and _needs_body_for_signature(
+        headers, query
+    )
     body = b""
     if needs_body and not defer_sig:
         body = await request.body()
