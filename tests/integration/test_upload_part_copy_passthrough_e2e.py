@@ -141,6 +141,6 @@ class TestUploadPartCopyPassthroughScylla:
         )
         assert proc.poll() is None
         assert enc_pt <= 1 * MB
-        assert enc_re >= QUICK_SIZE * 0.5
+        assert enc_re >= (partial_end + 1) * 0.5
         assert peak_pt <= CHUNK_PEAK * 0.5
         assert peak_re >= CHUNK_PEAK * 0.5

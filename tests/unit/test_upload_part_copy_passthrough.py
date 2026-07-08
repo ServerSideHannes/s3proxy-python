@@ -409,7 +409,6 @@ async def test_large_passthrough_not_blocked_by_pipeline_semaphore(
     await manager.create_upload(BUCKET, "sst/big-Data.db.sm_manifest", upload_id, src_dek, kid)
 
     gate = asyncio.Event()
-    original_streaming = handler._streaming_copy_part
 
     async def blocked_streaming(*args, **kwargs):
         gate.set()

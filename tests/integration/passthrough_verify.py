@@ -314,7 +314,9 @@ def check_reencrypt_control(ctx: RunContext, source: str, dest: str, size: int) 
     ctx.ok("high peak memory", peak >= CHUNK_PEAK * 0.5, f"{peak / MB:.2f}MB")
 
 
-def check_scylla_manifest_full_range_passthrough(ctx: RunContext, source: str, dest: str, size: int) -> None:
+def check_scylla_manifest_full_range_passthrough(
+    ctx: RunContext, source: str, dest: str, size: int
+) -> None:
     """Scylla sends bytes=0-(size-1) on manifest UploadPartCopy; must passthrough."""
     peak, enc = poll_during(
         ctx,
@@ -322,7 +324,8 @@ def check_scylla_manifest_full_range_passthrough(ctx: RunContext, source: str, d
     )
     ctx.ok("full-range zero bytes_encrypted", enc <= 2 * MB, f"{enc / MB:.2f}MB")
     ctx.ok("full-range low peak memory", peak <= CHUNK_PEAK * 0.5, f"{peak / MB:.2f}MB")
-    ctx.ok("full-range ciphertext identical", raw_ciphertext(ctx, source) == raw_ciphertext(ctx, dest))
+    src_ct, dest_ct = raw_ciphertext(ctx, source), raw_ciphertext(ctx, dest)
+    ctx.ok("full-range ciphertext identical", src_ct == dest_ct)
     ctx.ok(
         "UPLOAD_PART_COPY_PASSTHROUGH logged",
         log_has_passthrough(ctx.log_path),
