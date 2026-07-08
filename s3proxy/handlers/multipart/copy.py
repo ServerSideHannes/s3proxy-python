@@ -57,6 +57,14 @@ class _CiphertextSegment:
     ct_offset: int
 
 
+@dataclass(frozen=True, slots=True)
+class _PlaintextRangeSplit:
+    """Passthrough-safe prefix segments plus optional plaintext tail to re-encrypt."""
+
+    passthrough_segments: tuple[_CiphertextSegment, ...]
+    streaming_tail: tuple[int, int] | None  # inclusive plaintext [start, end]
+
+
 class CopyPartMixin(BaseHandler):
     async def handle_upload_part_copy(self, request: Request, creds: S3Credentials) -> Response:
         bucket, key = self._parse_path(request.url.path)
@@ -263,17 +271,22 @@ class CopyPartMixin(BaseHandler):
             return None
         return copy_source_range
 
-    def _segments_for_plaintext_range(
+    def _split_plaintext_range_on_segments(
         self,
         segments: list[_CiphertextSegment],
         range_start: int,
         range_end: int,
-    ) -> list[_CiphertextSegment] | None:
-        """Segments fully inside [range_start, range_end], or None if range splits a segment."""
+    ) -> _PlaintextRangeSplit | None:
+        """Split a plaintext range into ciphertext-passthrough prefix + optional streaming tail.
+
+        Scylla manifest ranges often end mid internal frame (~8.33MB from 50MB uploads).
+        Copy every fully covered segment server-side and re-encrypt only the trailing suffix.
+        """
         if range_start > range_end:
-            return []
+            return _PlaintextRangeSplit((), None)
         selected: list[_CiphertextSegment] = []
         pt_offset = 0
+        streaming_tail: tuple[int, int] | None = None
         for seg in segments:
             seg_start = pt_offset
             seg_end = pt_offset + seg.plaintext_size - 1
@@ -282,11 +295,30 @@ class CopyPartMixin(BaseHandler):
                 continue
             if seg_start > range_end:
                 break
-            if seg_start < range_start or seg_end > range_end:
+            if seg_start < range_start:
                 return None
+            if seg_end > range_end:
+                streaming_tail = (seg_start, range_end)
+                break
             selected.append(seg)
             pt_offset += seg.plaintext_size
-        return selected
+        if streaming_tail is None and pt_offset <= range_end:
+            return None
+        return _PlaintextRangeSplit(tuple(selected), streaming_tail)
+
+    def _segments_for_plaintext_range(
+        self,
+        segments: list[_CiphertextSegment],
+        range_start: int,
+        range_end: int,
+    ) -> list[_CiphertextSegment] | None:
+        """Segments fully inside [range_start, range_end], or None if range splits a segment."""
+        split = self._split_plaintext_range_on_segments(segments, range_start, range_end)
+        if split is None:
+            return None
+        if split.streaming_tail is not None:
+            return None
+        return list(split.passthrough_segments)
 
     def _passthrough_block_reason(
         self,
@@ -329,11 +361,16 @@ class CopyPartMixin(BaseHandler):
         segments = self._source_ciphertext_segments(
             src_multipart_meta, head_resp, src_wrapped_dek, src_metadata
         )
-        filtered = self._segments_for_plaintext_range(segments, range_start, range_end)
-        if filtered is None:
+        split = self._split_plaintext_range_on_segments(segments, range_start, range_end)
+        if split is None:
             return "ranged_copy_segment_misaligned"
-        if not filtered:
+        if not split.passthrough_segments and not split.streaming_tail:
             return "ranged_copy_empty_segments"
+        if not split.passthrough_segments and split.streaming_tail:
+            tail_bytes = split.streaming_tail[1] - split.streaming_tail[0] + 1
+            if tail_bytes <= crypto.STREAMING_THRESHOLD:
+                return "small_ranged_copy"
+            return "ranged_copy_segment_misaligned"
         return None
 
     def _log_upload_part_copy_route(
@@ -560,12 +597,20 @@ class CopyPartMixin(BaseHandler):
             range_start, range_end = self._parse_copy_source_range(
                 copy_source_range, src_multipart_meta.total_plaintext_size
             )
-            filtered = self._segments_for_plaintext_range(segments, range_start, range_end)
-            if filtered is None:
+            split = self._split_plaintext_range_on_segments(segments, range_start, range_end)
+            if split is None:
                 raise S3Error.invalid_request("Copy range splits an encrypted segment")
-            segments = filtered
+            segments = list(split.passthrough_segments)
+            streaming_tail = split.streaming_tail
+        else:
+            streaming_tail = None
 
         copy_source_path = copy_source or f"/{src_bucket}/{quote(src_key, safe='/')}"
+        tail_mb = (
+            f"{(streaming_tail[1] - streaming_tail[0] + 1) / 1024 / 1024:.2f}MB"
+            if streaming_tail
+            else None
+        )
 
         logger.info(
             "UPLOAD_PART_COPY_PASSTHROUGH",
@@ -576,6 +621,7 @@ class CopyPartMixin(BaseHandler):
             src_key=src_key,
             plaintext_mb=f"{plaintext_size / 1024 / 1024:.2f}MB",
             segments=len(segments),
+            streaming_tail_mb=tail_mb,
             copy_source_range=copy_source_range,
         )
 
@@ -629,7 +675,11 @@ class CopyPartMixin(BaseHandler):
             )
 
         internal_part_start = await self.multipart_manager.allocate_internal_parts(
-            bucket, key, upload_id, len(segments), client_part_number=0
+            bucket,
+            key,
+            upload_id,
+            len(segments) + (1 if streaming_tail else 0),
+            client_part_number=0,
         )
 
         internal_parts: list[InternalPartMetadata] = []
@@ -661,6 +711,35 @@ class CopyPartMixin(BaseHandler):
             )
             total_plaintext += seg.plaintext_size
             total_ciphertext += seg.ciphertext_size
+
+        if streaming_tail and src_multipart_meta:
+            tail_start, tail_end = streaming_tail
+            tail_plaintext = await self._download_encrypted_multipart(
+                client, src_bucket, src_key, src_multipart_meta, tail_start, tail_end
+            )
+            internal_num = internal_part_start + len(segments)
+            tail_ct = crypto.encrypt_frame(tail_plaintext, state.dek, upload_id, internal_num, 0)
+            part_reserve = crypto.copy_chunk_peak(len(tail_plaintext))
+            async with concurrency.reserve_copy_memory(part_reserve):
+                resp = await client.upload_part(bucket, key, upload_id, internal_num, tail_ct)
+            internal_parts.append(
+                InternalPartMetadata(
+                    internal_part_number=internal_num,
+                    plaintext_size=len(tail_plaintext),
+                    ciphertext_size=len(tail_ct),
+                    etag=resp["ETag"].strip('"'),
+                )
+            )
+            total_plaintext += len(tail_plaintext)
+            total_ciphertext += len(tail_ct)
+            logger.info(
+                "UPLOAD_PART_COPY_PASSTHROUGH_TAIL",
+                bucket=bucket,
+                key=key,
+                part_num=part_num,
+                internal_part=internal_num,
+                tail_plaintext_mb=f"{len(tail_plaintext) / 1024 / 1024:.2f}MB",
+            )
 
         md5 = await self._md5_plaintext_from_copy_source(
             client,
