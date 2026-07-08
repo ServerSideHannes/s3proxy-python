@@ -60,8 +60,8 @@ class Settings(BaseSettings):
     max_in_flight: int = Field(
         default=0,
         description="Max concurrent ASGI requests per pod (uvicorn limit_concurrency). "
-        "0=auto from memory_limit_mb (memory_limit_mb // 8, min 4). Bounds httptools "
-        "socket read buffers that sit outside the memory governor.",
+        "0=unlimited (memory governor handles backpressure). Set explicitly (e.g. 6) "
+        "to bound httptools socket buffers outside the governor.",
     )
 
     # Redis settings (for distributed state in HA deployments)
@@ -144,9 +144,7 @@ class Settings(BaseSettings):
         """Uvicorn limit_concurrency, or None for unlimited."""
         if self.max_in_flight > 0:
             return self.max_in_flight
-        if self.memory_limit_mb <= 0:
-            return None
-        return max(4, self.memory_limit_mb // 8)
+        return None
 
     @property
     def request_log_ttl_seconds(self) -> int:

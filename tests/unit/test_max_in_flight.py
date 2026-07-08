@@ -14,15 +14,11 @@ class TestResolvedMaxInFlight:
         s = Settings(max_in_flight=12, memory_limit_mb=192, credentials=[])
         assert s.resolved_max_in_flight() == 12
 
-    def test_auto_from_memory_limit(self):
+    def test_zero_means_unlimited(self):
         s = Settings(memory_limit_mb=192, credentials=[])
-        assert s.resolved_max_in_flight() == 24
+        assert s.resolved_max_in_flight() is None
 
-    def test_auto_minimum_four(self):
-        s = Settings(memory_limit_mb=16, credentials=[])
-        assert s.resolved_max_in_flight() == 4
-
-    def test_unlimited_memory_means_unlimited_in_flight(self):
+    def test_unlimited_memory_still_unlimited_in_flight(self):
         s = Settings(memory_limit_mb=0, credentials=[])
         assert s.resolved_max_in_flight() is None
 

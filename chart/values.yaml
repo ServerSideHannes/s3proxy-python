@@ -17,8 +17,8 @@ server:
 
 performance:
   memoryLimitMb: 64
-  # Max concurrent requests per pod (uvicorn limit_concurrency). 0 = auto
-  # (memoryLimitMb // 8, min 4). Bounds httptools socket buffers outside the governor.
+  # Max concurrent requests per pod (uvicorn limit_concurrency). 0 = unlimited;
+  # memory governor handles backpressure. Set explicitly in prod (e.g. 6).
   maxInFlight: 0
 
 # Redis holds only transient multipart-upload state (TTL'd, deleted on

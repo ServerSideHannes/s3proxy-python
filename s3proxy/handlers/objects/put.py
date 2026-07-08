@@ -39,7 +39,7 @@ async def _iter_request_body(request: Request, decode_chunked: bool) -> AsyncIte
             yield chunk
         return
     preloaded = getattr(request.state, "s3proxy_preloaded_body", None)
-    if isinstance(preloaded, (bytes, bytearray)):
+    if isinstance(preloaded, (bytes, bytearray)) and len(preloaded) > 0:
         for offset in range(0, len(preloaded), _STREAM_CHUNK):
             yield preloaded[offset : offset + _STREAM_CHUNK]
         return
@@ -151,7 +151,7 @@ class PutObjectMixin(BaseHandler):
         )
 
         preloaded = getattr(request.state, "s3proxy_preloaded_body", None)
-        if isinstance(preloaded, (bytes, bytearray)):
+        if isinstance(preloaded, (bytes, bytearray)) and len(preloaded) > 0:
             body = bytes(preloaded)
         else:
             body = await request.body()
