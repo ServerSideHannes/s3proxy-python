@@ -284,9 +284,7 @@ async def test_normalize_copy_source_range_treats_full_object_as_whole(
     total = crypto.STREAMING_THRESHOLD + crypto.MAX_BUFFER_SIZE
     assert handler._normalize_copy_source_range(None, total) is None
     assert handler._normalize_copy_source_range(f"bytes=0-{total - 1}", total) is None
-    assert (
-        handler._normalize_copy_source_range(f"bytes=0-{total + 9999}", total) is None
-    )
+    assert handler._normalize_copy_source_range(f"bytes=0-{total + 9999}", total) is None
     partial = handler._normalize_copy_source_range(f"bytes=0-{crypto.MAX_BUFFER_SIZE - 1}", total)
     assert partial == f"bytes=0-{crypto.MAX_BUFFER_SIZE - 1}"
 
