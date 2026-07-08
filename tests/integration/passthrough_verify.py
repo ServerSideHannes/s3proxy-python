@@ -225,7 +225,7 @@ def verify_session(
     log_path = log_path or Path(tempfile.gettempdir()) / f"s3proxy-passthrough-verify-{port}.log"
     bucket = f"verify-{uuid.uuid4().hex[:8]}"
 
-    with minio_backend() as minio_host, open(log_path, "w") as log_file:
+    with minio_backend(isolated=True) as minio_host, open(log_path, "w") as log_file:
         env = os.environ.copy()
         env.update(
             {

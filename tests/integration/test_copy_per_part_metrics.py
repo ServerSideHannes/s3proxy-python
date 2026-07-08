@@ -46,7 +46,7 @@ def _find_free_port() -> int:
 def metrics_server():
     port = _find_free_port()
     with (
-        minio_backend() as minio_host,
+        minio_backend(isolated=True) as minio_host,
         run_s3proxy(
             port,
             log_output=False,
