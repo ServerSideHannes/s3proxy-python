@@ -14,6 +14,33 @@ class S3Credentials:
 
 
 @dataclass(slots=True)
+class ParsedHeaderAuth:
+    """Parsed SigV4 Authorization header, before signature verification."""
+
+    credentials: S3Credentials | None
+    signed_headers: list[str]
+    signature: str
+    date_stamp: str
+    region: str
+    service: str
+    amz_date: str
+    error: str | None = None
+
+    @classmethod
+    def fail(cls, error: str, *, credentials: S3Credentials | None = None) -> ParsedHeaderAuth:
+        return cls(
+            credentials=credentials,
+            signed_headers=[],
+            signature="",
+            date_stamp="",
+            region="",
+            service="",
+            amz_date="",
+            error=error,
+        )
+
+
+@dataclass(slots=True)
 class ParsedRequest:
     """Parsed S3 request information."""
 
