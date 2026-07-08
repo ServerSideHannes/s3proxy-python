@@ -64,15 +64,6 @@ def main():
             file=sys.stderr,
         )
 
-    max_in_flight = settings.resolved_max_in_flight()
-    if max_in_flight is not None:
-        config["limit_concurrency"] = max_in_flight
-        print(
-            f"In-flight capped: max_in_flight={max_in_flight} "
-            f"(excess connections get 503 before body buffering)",
-            file=sys.stderr,
-        )
-
     if not settings.no_tls:
         cert_path = Path(settings.cert_path)
         cert_file = cert_path / "s3proxy.crt"

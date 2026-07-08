@@ -17,9 +17,6 @@ server:
 
 performance:
   memoryLimitMb: 64
-  # Max concurrent requests per pod (uvicorn limit_concurrency). 0 = unlimited;
-  # memory governor handles backpressure. Set explicitly in prod (e.g. 6).
-  maxInFlight: 0
 
 # Redis holds only transient multipart-upload state (TTL'd, deleted on
 # completion). It is NOT a durable store — losing it only forces in-flight

@@ -36,5 +36,5 @@ ENV S3PROXY_IP=0.0.0.0 \
 
 EXPOSE 4433
 
-# Use the CLI entrypoint so limit_concurrency and TLS settings from Settings apply.
+# Use the CLI entrypoint so TLS settings from Settings apply.
 CMD ["python", "-m", "s3proxy.main"]

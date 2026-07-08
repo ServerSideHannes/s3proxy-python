@@ -57,12 +57,6 @@ class Settings(BaseSettings):
         "Small files use content_length*2, large files use 8MB (streaming). "
         "Excess requests wait up to 30s (backpressure), then get 503.",
     )
-    max_in_flight: int = Field(
-        default=0,
-        description="Max concurrent ASGI requests per pod (uvicorn limit_concurrency). "
-        "0=unlimited (memory governor handles backpressure). Set explicitly (e.g. 6) "
-        "to bound httptools socket buffers outside the governor.",
-    )
 
     # Redis settings (for distributed state in HA deployments)
     redis_url: str = Field(
@@ -139,12 +133,6 @@ class Settings(BaseSettings):
     def redis_upload_ttl_seconds(self) -> int:
         """Get Redis upload TTL in seconds."""
         return self.redis_upload_ttl_hours * 3600
-
-    def resolved_max_in_flight(self) -> int | None:
-        """Uvicorn limit_concurrency, or None for unlimited."""
-        if self.max_in_flight > 0:
-            return self.max_in_flight
-        return None
 
     @property
     def request_log_ttl_seconds(self) -> int:
