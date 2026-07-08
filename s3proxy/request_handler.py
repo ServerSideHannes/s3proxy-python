@@ -86,10 +86,7 @@ def _defer_signature_for_body(
     headers: dict[str, str], content_length: int, query: dict[str, list[str]]
 ) -> bool:
     """Large header-auth bodies without x-amz-content-sha256 are hashed while streaming."""
-    return (
-        _needs_body_for_signature(headers, query)
-        and content_length > crypto.MAX_BUFFER_SIZE
-    )
+    return _needs_body_for_signature(headers, query) and content_length > crypto.MAX_BUFFER_SIZE
 
 
 def _signature_path(request: Request) -> str:
@@ -237,9 +234,7 @@ async def _handle_proxy_request_impl(
         headers, content_length, query
     )
 
-    needs_body = request.method in ("PUT", "POST") and _needs_body_for_signature(
-        headers, query
-    )
+    needs_body = request.method in ("PUT", "POST") and _needs_body_for_signature(headers, query)
     body = b""
     if needs_body and not defer_sig:
         body = await request.body()
