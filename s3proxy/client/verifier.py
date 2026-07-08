@@ -13,7 +13,7 @@ from urllib.parse import quote, unquote
 import structlog
 from structlog.stdlib import BoundLogger
 
-from .types import ParsedRequest, S3Credentials
+from .types import ParsedHeaderAuth, ParsedRequest, S3Credentials
 
 logger: BoundLogger = structlog.get_logger(__name__)
 
@@ -95,18 +95,7 @@ class SigV4Verifier:
 
         return False, None, "No AWS signature found"
 
-    def _parse_header_auth(
-        self, request: ParsedRequest, auth_header: str
-    ) -> tuple[
-        S3Credentials | None,
-        list[str],
-        str,
-        str,
-        str,
-        str,
-        str,
-        str | None,
-    ]:
+    def _parse_header_auth(self, request: ParsedRequest, auth_header: str) -> ParsedHeaderAuth:
         """Parse Authorization header fields without verifying the signature."""
         try:
             parts = auth_header.replace("AWS4-HMAC-SHA256 ", "").split(",")
@@ -121,24 +110,26 @@ class SigV4Verifier:
 
             credentials, date_stamp, region, service, error = self._parse_v4_credential(credential)
             if error:
-                return None, [], "", "", "", "", "", error
+                return ParsedHeaderAuth.fail(error)
 
             amz_date = request.headers.get("x-amz-date", "")
             if not amz_date:
-                return credentials, [], signature, "", "", "", "", "Missing x-amz-date header"
+                return ParsedHeaderAuth.fail(
+                    "Missing x-amz-date header",
+                    credentials=credentials,
+                )
 
-            return (
-                credentials,
-                signed_headers.split(";"),
-                signature,
-                date_stamp,
-                region,
-                service,
-                amz_date,
-                None,
+            return ParsedHeaderAuth(
+                credentials=credentials,
+                signed_headers=signed_headers.split(";"),
+                signature=signature,
+                date_stamp=date_stamp,
+                region=region,
+                service=service,
+                amz_date=amz_date,
             )
         except (KeyError, ValueError, IndexError) as e:
-            return None, [], "", "", "", "", "", f"Invalid Authorization header: {e}"
+            return ParsedHeaderAuth.fail(f"Invalid Authorization header: {e}")
 
     def _check_request_time(self, amz_date: str) -> str | None:
         try:
@@ -153,23 +144,14 @@ class SigV4Verifier:
         self, request: ParsedRequest, auth_header: str
     ) -> tuple[S3Credentials | None, str]:
         """Parse credentials and clock skew. Signature verified separately."""
-        (
-            credentials,
-            _signed_headers,
-            _signature,
-            _date_stamp,
-            _region,
-            _service,
-            amz_date,
-            error,
-        ) = self._parse_header_auth(request, auth_header)
-        if error:
-            return None, error
-        assert credentials is not None
-        time_error = self._check_request_time(amz_date)
+        parsed = self._parse_header_auth(request, auth_header)
+        if parsed.error:
+            return None, parsed.error
+        assert parsed.credentials is not None
+        time_error = self._check_request_time(parsed.amz_date)
         if time_error:
-            return credentials, time_error
-        return credentials, ""
+            return parsed.credentials, time_error
+        return parsed.credentials, ""
 
     def verify_with_payload_hash(
         self,
@@ -179,83 +161,75 @@ class SigV4Verifier:
         payload_hash: str,
     ) -> tuple[bool, S3Credentials | None, str]:
         """Verify SigV4 using an explicit payload hash (stream-computed)."""
-        (
-            credentials,
-            signed_headers,
-            signature,
-            date_stamp,
-            region,
-            service,
-            amz_date,
-            error,
-        ) = self._parse_header_auth(request, auth_header)
-        if error:
-            return False, credentials, error
-        assert credentials is not None
+        auth = self._parse_header_auth(request, auth_header)
+        if auth.error:
+            return False, auth.credentials, auth.error
+        assert auth.credentials is not None
 
-        time_error = self._check_request_time(amz_date)
+        time_error = self._check_request_time(auth.amz_date)
         if time_error:
-            return False, credentials, time_error
+            return False, auth.credentials, time_error
 
         canonical_request = self._build_canonical_request(
-            request, path, signed_headers, payload_hash=payload_hash
+            request, path, auth.signed_headers, payload_hash=payload_hash
         )
         calculated_sig = self._compute_v4_signature(
-            canonical_request, amz_date, date_stamp, region, service, credentials.secret_key
+            canonical_request,
+            auth.amz_date,
+            auth.date_stamp,
+            auth.region,
+            auth.service,
+            auth.credentials.secret_key,
         )
 
-        if hmac.compare_digest(calculated_sig, signature):
-            return True, credentials, ""
+        if hmac.compare_digest(calculated_sig, auth.signature):
+            return True, auth.credentials, ""
 
         logger.debug(
             "Signature verification failed",
             method=request.method,
             path=path,
-            signed_headers=";".join(signed_headers),
-            expected_sig=signature[:16] + "...",
+            signed_headers=";".join(auth.signed_headers),
+            expected_sig=auth.signature[:16] + "...",
             calculated_sig=calculated_sig[:16] + "...",
         )
-        return False, credentials, "Signature mismatch"
+        return False, auth.credentials, "Signature mismatch"
 
     def _verify_header_signature(
         self, request: ParsedRequest, path: str, auth_header: str
     ) -> tuple[bool, S3Credentials | None, str]:
         """Verify Authorization header signature."""
-        (
-            credentials,
-            signed_headers,
-            signature,
-            date_stamp,
-            region,
-            service,
-            amz_date,
-            error,
-        ) = self._parse_header_auth(request, auth_header)
-        if error:
-            return False, credentials, error
-        assert credentials is not None
+        auth = self._parse_header_auth(request, auth_header)
+        if auth.error:
+            return False, auth.credentials, auth.error
+        assert auth.credentials is not None
 
-        time_error = self._check_request_time(amz_date)
+        time_error = self._check_request_time(auth.amz_date)
         if time_error:
-            return False, credentials, time_error
+            return False, auth.credentials, time_error
 
-        canonical_request = self._build_canonical_request(request, path, signed_headers)
+        canonical_request = self._build_canonical_request(request, path, auth.signed_headers)
         calculated_sig = self._compute_v4_signature(
-            canonical_request, amz_date, date_stamp, region, service, credentials.secret_key
+            canonical_request,
+            auth.amz_date,
+            auth.date_stamp,
+            auth.region,
+            auth.service,
+            auth.credentials.secret_key,
         )
 
-        if hmac.compare_digest(calculated_sig, signature):
-            return True, credentials, ""
+        if hmac.compare_digest(calculated_sig, auth.signature):
+            return True, auth.credentials, ""
 
         logger.debug(
             "Signature verification failed",
             method=request.method,
             path=path,
-            signed_headers=";".join(signed_headers),
-            expected_sig=signature[:16] + "...",
+            signed_headers=";".join(auth.signed_headers),
+            expected_sig=auth.signature[:16] + "...",
             calculated_sig=calculated_sig[:16] + "...",
         )
-        return False, credentials, "Signature mismatch"
+        return False, auth.credentials, "Signature mismatch"
 
     def _verify_presigned_v4(
         self, request: ParsedRequest, path: str
