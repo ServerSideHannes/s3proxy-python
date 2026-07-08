@@ -67,7 +67,9 @@ def _make_request(
         "content-type": "application/octet-stream",
     }
     if not presigned:
-        headers["authorization"] = "AWS4-HMAC-SHA256 Credential=x, SignedHeaders=host, Signature=sig"
+        headers["authorization"] = (
+            "AWS4-HMAC-SHA256 Credential=x, SignedHeaders=host, Signature=sig"
+        )
         headers["x-amz-date"] = "20260708T080000Z"
     if content_sha is not None:
         headers["x-amz-content-sha256"] = content_sha
