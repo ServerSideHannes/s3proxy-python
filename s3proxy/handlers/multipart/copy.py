@@ -88,24 +88,44 @@ class CopyPartMixin(BaseHandler):
                 head_resp, None, src_wrapped_dek, src_multipart_meta
             )
             copy_source_range = self._normalize_copy_source_range(
-                raw_copy_source_range, total_plaintext
+                raw_copy_source_range, total_plaintext, head_resp, src_wrapped_dek
             )
             plaintext_size = self._copy_plaintext_size(
                 head_resp, copy_source_range, src_wrapped_dek, src_multipart_meta
+            )
+
+            passthrough_block = self._passthrough_block_reason(
+                copy_source_range,
+                raw_copy_source_range,
+                src_wrapped_dek,
+                src_multipart_meta,
+                src_metadata,
+                creds,
+                plaintext_size,
+                head_resp,
+            )
+            route = (
+                "passthrough"
+                if passthrough_block is None
+                else ("streaming" if plaintext_size > crypto.STREAMING_THRESHOLD else "simple")
+            )
+            self._log_upload_part_copy_route(
+                bucket=bucket,
+                key=key,
+                part_num=part_num,
+                raw_copy_source_range=raw_copy_source_range,
+                normalized_copy_source_range=copy_source_range,
+                metadata_total_plaintext=total_plaintext,
+                range_plaintext_size=plaintext_size,
+                route=route,
+                passthrough_blocked_reason=passthrough_block,
             )
 
             if plaintext_size <= crypto.STREAMING_THRESHOLD:
                 # Small copies buffer the whole object + re-encrypt it; gate them
                 # by the limiter too (they carry no body, so the request-level
                 # reservation was ~nothing and a small-object flood ran unbounded).
-                if self._can_passthrough_part_copy(
-                    copy_source_range,
-                    src_wrapped_dek,
-                    src_multipart_meta,
-                    src_metadata,
-                    creds,
-                    plaintext_size,
-                ):
+                if passthrough_block is None:
                     return await self._gated_passthrough_copy_part(
                         client,
                         bucket,
@@ -121,6 +141,7 @@ class CopyPartMixin(BaseHandler):
                         src_wrapped_dek,
                         src_multipart_meta,
                         plaintext_size,
+                        copy_source_range,
                     )
                 peak = crypto.copy_pipeline_peak(plaintext_size)
                 async with concurrency.reserve_copy_memory(peak):
@@ -139,14 +160,7 @@ class CopyPartMixin(BaseHandler):
                         src_wrapped_dek,
                         src_multipart_meta,
                     )
-            if self._can_passthrough_part_copy(
-                copy_source_range,
-                src_wrapped_dek,
-                src_multipart_meta,
-                src_metadata,
-                creds,
-                plaintext_size,
-            ):
+            if passthrough_block is None:
                 return await self._gated_passthrough_copy_part(
                     client,
                     bucket,
@@ -162,6 +176,7 @@ class CopyPartMixin(BaseHandler):
                     src_wrapped_dek,
                     src_multipart_meta,
                     plaintext_size,
+                    copy_source_range,
                 )
             return await self._streaming_copy_part(
                 client,
@@ -204,21 +219,148 @@ class CopyPartMixin(BaseHandler):
         start, end = self._parse_copy_source_range(copy_source_range, total)
         return end - start + 1
 
+    def _parse_raw_copy_source_range(self, copy_source_range: str) -> tuple[int, int]:
+        """Parse x-amz-copy-source-range without clamping end to object size."""
+        range_str = copy_source_range.replace("bytes=", "")
+        try:
+            start, end = map(int, range_str.split("-"))
+        except (ValueError, TypeError) as err:
+            raise S3Error.invalid_range("Invalid copy source range format") from err
+        if start > end:
+            raise S3Error.invalid_range("Range not satisfiable")
+        return start, end
+
+    def _head_plaintext_size(self, head_resp: dict, src_wrapped_dek: str | None) -> int | None:
+        if not src_wrapped_dek:
+            return None
+        size_str = head_resp.get("Metadata", {}).get("plaintext-size")
+        if not size_str:
+            return None
+        return int(size_str)
+
     def _normalize_copy_source_range(
-        self, copy_source_range: str | None, total_plaintext_size: int
+        self,
+        copy_source_range: str | None,
+        total_plaintext_size: int,
+        head_resp: dict,
+        src_wrapped_dek: str | None,
     ) -> str | None:
         """Treat a range spanning the entire object as 'copy whole object'.
 
-        Scylla Manager often sends ``bytes=0-(size-1)`` on manifest UploadPartCopy
-        even when copying the full SST. That must not force the streaming re-encrypt
-        path (which queues behind the copy pipeline and exceeds the 300s client timeout).
+        Scylla Manager often sends ``bytes=0-(size-1)`` on manifest UploadPartCopy.
+        When that matches metadata or HEAD plaintext-size, clear the range so routing
+        treats it as a whole-object copy. Ranges shorter than metadata total (prod
+        manifest shape) are left intact and handled by range-aware passthrough.
         """
         if not copy_source_range:
             return None
-        start, end = self._parse_copy_source_range(copy_source_range, total_plaintext_size)
-        if start == 0 and end == total_plaintext_size - 1:
+        raw_start, raw_end = self._parse_raw_copy_source_range(copy_source_range)
+        end = self._parse_copy_source_range(copy_source_range, total_plaintext_size)[1]
+        if raw_start == 0 and end == total_plaintext_size - 1:
+            return None
+        head_plaintext = self._head_plaintext_size(head_resp, src_wrapped_dek)
+        if raw_start == 0 and head_plaintext and raw_end >= head_plaintext - 1:
             return None
         return copy_source_range
+
+    def _segments_for_plaintext_range(
+        self,
+        segments: list[_CiphertextSegment],
+        range_start: int,
+        range_end: int,
+    ) -> list[_CiphertextSegment] | None:
+        """Segments fully inside [range_start, range_end], or None if range splits a segment."""
+        if range_start > range_end:
+            return []
+        selected: list[_CiphertextSegment] = []
+        pt_offset = 0
+        for seg in segments:
+            seg_start = pt_offset
+            seg_end = pt_offset + seg.plaintext_size - 1
+            if seg_end < range_start:
+                pt_offset += seg.plaintext_size
+                continue
+            if seg_start > range_end:
+                break
+            if seg_start < range_start or seg_end > range_end:
+                return None
+            selected.append(seg)
+            pt_offset += seg.plaintext_size
+        return selected
+
+    def _passthrough_block_reason(
+        self,
+        copy_source_range: str | None,
+        raw_copy_source_range: str | None,
+        src_wrapped_dek: str | None,
+        src_multipart_meta: MultipartMetadata | None,
+        src_metadata: dict,
+        creds: S3Credentials,
+        plaintext_size: int,
+        head_resp: dict,
+    ) -> str | None:
+        """None when server-side ciphertext copy is allowed; else a short reason code."""
+        if not src_wrapped_dek and not src_multipart_meta:
+            return "unencrypted_source"
+        if not src_multipart_meta and plaintext_size > crypto.STREAMING_THRESHOLD:
+            return "large_put_object_no_sidecar"
+        if src_multipart_meta:
+            src_kid = src_multipart_meta.kid
+        else:
+            src_kid = src_metadata.get(self.settings.kidtag_name, "")
+        if src_kid and src_kid != creds.access_key:
+            return "needs_rekey"
+
+        if not copy_source_range:
+            return None
+
+        # Small ranged copies stay on streaming re-encrypt (tests + partial object copies).
+        if plaintext_size <= crypto.STREAMING_THRESHOLD:
+            return "small_ranged_copy"
+
+        if not src_multipart_meta:
+            return "ranged_copy_no_multipart_meta"
+
+        total = src_multipart_meta.total_plaintext_size
+        range_start, range_end = self._parse_copy_source_range(copy_source_range, total)
+        if range_start != 0:
+            return "ranged_copy_nonzero_start"
+
+        segments = self._source_ciphertext_segments(
+            src_multipart_meta, head_resp, src_wrapped_dek, src_metadata
+        )
+        filtered = self._segments_for_plaintext_range(segments, range_start, range_end)
+        if filtered is None:
+            return "ranged_copy_segment_misaligned"
+        if not filtered:
+            return "ranged_copy_empty_segments"
+        return None
+
+    def _log_upload_part_copy_route(
+        self,
+        *,
+        bucket: str,
+        key: str,
+        part_num: int,
+        raw_copy_source_range: str | None,
+        normalized_copy_source_range: str | None,
+        metadata_total_plaintext: int,
+        range_plaintext_size: int,
+        route: str,
+        passthrough_blocked_reason: str | None,
+    ) -> None:
+        logger.info(
+            "UPLOAD_PART_COPY_ROUTE",
+            bucket=bucket,
+            key=key,
+            part_num=part_num,
+            raw_copy_source_range=raw_copy_source_range,
+            normalized_copy_source_range=normalized_copy_source_range,
+            metadata_total_plaintext_mb=f"{metadata_total_plaintext / 1024 / 1024:.2f}MB",
+            range_plaintext_mb=f"{range_plaintext_size / 1024 / 1024:.2f}MB",
+            route=route,
+            passthrough_blocked_reason=passthrough_blocked_reason,
+        )
 
     def _can_passthrough_part_copy(
         self,
@@ -230,19 +372,19 @@ class CopyPartMixin(BaseHandler):
         plaintext_size: int,
     ) -> bool:
         """True when a native server-side copy preserves decryptability without re-encrypt."""
-        if copy_source_range:
-            return False
-        if not src_wrapped_dek and not src_multipart_meta:
-            return False
-        # Large PutObject blobs have no sidecar part map; streaming re-encrypt frames them.
-        if not src_multipart_meta and plaintext_size > crypto.STREAMING_THRESHOLD:
-            return False
-        if src_multipart_meta:
-            src_kid = src_multipart_meta.kid
-        else:
-            src_kid = src_metadata.get(self.settings.kidtag_name, "")
-        needs_rekey = bool(src_kid) and src_kid != creds.access_key
-        return not needs_rekey
+        return (
+            self._passthrough_block_reason(
+                copy_source_range,
+                copy_source_range,
+                src_wrapped_dek,
+                src_multipart_meta,
+                src_metadata,
+                creds,
+                plaintext_size,
+                {},
+            )
+            is None
+        )
 
     def _resolve_source_dek(
         self,
@@ -361,6 +503,7 @@ class CopyPartMixin(BaseHandler):
         src_wrapped_dek: str | None,
         src_multipart_meta: MultipartMetadata | None,
         plaintext_size: int,
+        copy_source_range: str | None = None,
     ) -> Response:
         """Server-side ciphertext copy; does not use the streaming pipeline semaphore."""
         return await self._passthrough_copy_part(
@@ -378,6 +521,7 @@ class CopyPartMixin(BaseHandler):
             src_wrapped_dek,
             src_multipart_meta,
             plaintext_size,
+            copy_source_range,
         )
 
     async def _passthrough_copy_part(
@@ -396,6 +540,7 @@ class CopyPartMixin(BaseHandler):
         src_wrapped_dek: str | None,
         src_multipart_meta: MultipartMetadata | None,
         plaintext_size: int,
+        copy_source_range: str | None = None,
     ) -> Response:
         """Server-side copy of encrypted ciphertext; destination adopts the source DEK."""
         src_dek, src_kid = self._resolve_source_dek(
@@ -411,6 +556,15 @@ class CopyPartMixin(BaseHandler):
         if not segments:
             raise S3Error.invalid_request("Copy source has no ciphertext segments")
 
+        if copy_source_range and src_multipart_meta:
+            range_start, range_end = self._parse_copy_source_range(
+                copy_source_range, src_multipart_meta.total_plaintext_size
+            )
+            filtered = self._segments_for_plaintext_range(segments, range_start, range_end)
+            if filtered is None:
+                raise S3Error.invalid_request("Copy range splits an encrypted segment")
+            segments = filtered
+
         copy_source_path = copy_source or f"/{src_bucket}/{quote(src_key, safe='/')}"
 
         logger.info(
@@ -422,6 +576,7 @@ class CopyPartMixin(BaseHandler):
             src_key=src_key,
             plaintext_mb=f"{plaintext_size / 1024 / 1024:.2f}MB",
             segments=len(segments),
+            copy_source_range=copy_source_range,
         )
 
         has_internal_layout = bool(
@@ -447,7 +602,7 @@ class CopyPartMixin(BaseHandler):
                 client,
                 src_bucket,
                 src_key,
-                None,
+                copy_source_range,
                 src_wrapped_dek,
                 src_multipart_meta,
                 head_resp,
@@ -511,7 +666,7 @@ class CopyPartMixin(BaseHandler):
             client,
             src_bucket,
             src_key,
-            None,
+            copy_source_range,
             src_wrapped_dek,
             src_multipart_meta,
             head_resp,
@@ -539,6 +694,7 @@ class CopyPartMixin(BaseHandler):
             part_num=part_num,
             internal_parts=len(internal_parts),
             plaintext_mb=f"{total_plaintext / 1024 / 1024:.2f}MB",
+            copy_source_range=copy_source_range,
         )
         return Response(
             content=xml_responses.upload_part_copy_result(etag, format_iso8601(datetime.now(UTC))),
