@@ -333,7 +333,7 @@ class PutObjectMixin(BaseHandler):
             )
             return Response(headers={"ETag": f'"{etag}"'})
 
-        except (ClientDisconnectError, ClientDisconnect):
+        except ClientDisconnectError, ClientDisconnect:
             await self._safe_abort(client, bucket, key, upload_id)
             raise ClientDisconnectError.raised() from None
         except S3Error:
