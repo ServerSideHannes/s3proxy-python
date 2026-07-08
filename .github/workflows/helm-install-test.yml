@@ -107,6 +107,7 @@ jobs:
             --set dashboard.frontend.image.tag=latest \
             --set dashboard.frontend.image.pullPolicy=Always \
             --set frontproxy.enabled=true \
+            --set frontproxy.metrics.serviceMonitor.enabled=false \
             --set replicaCount=3 \
             --set resources.limits.cpu=100m \
             --set resources.requests.cpu=50m \
