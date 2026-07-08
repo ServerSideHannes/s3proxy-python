@@ -101,14 +101,15 @@ test-run:
 		exit $$EXIT_CODE
 
 # OOM proof test: runs s3proxy in a 256MB container and hammers it
+OOM_COMPOSE = -f tests/docker-compose.yml -f tests/docker-compose.oom.yml --profile oom
 test-oom:
-	@docker compose -f tests/docker-compose.yml --profile oom down 2>/dev/null || true
-	@docker compose -f tests/docker-compose.yml --profile oom up -d --build
+	@docker compose $(OOM_COMPOSE) down 2>/dev/null || true
+	@docker compose $(OOM_COMPOSE) up -d --build
 	@sleep 5
 	@AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin \
 		uv run pytest -v tests/integration/test_memory_leak.py; \
 		EXIT_CODE=$$?; \
-		docker compose -f tests/docker-compose.yml --profile oom down; \
+		docker compose $(OOM_COMPOSE) down; \
 		exit $$EXIT_CODE
 
 # E2E cluster commands

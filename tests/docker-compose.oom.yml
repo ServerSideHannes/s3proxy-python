@@ -1,0 +1,6 @@
+# OOM tests upload 5GB+ into MinIO (e.g. 20 concurrent 256MB PUTs).
+# The default compose caps MinIO at 4g tmpfs for integration shards; drop
+# that cap here so MinIO uses disk-backed storage like before #117.
+services:
+  minio:
+    tmpfs: !reset null
