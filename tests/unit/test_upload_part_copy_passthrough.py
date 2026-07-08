@@ -39,13 +39,15 @@ def _patch_client(handler, mock_s3):
     handler._client = _fake_client
 
 
-def _copy_part_request(dest_path, copy_source, upload_id, part_number=1):
+def _copy_part_request(dest_path, copy_source, upload_id, part_number=1, copy_source_range=None):
     req = MagicMock()
     req.url.path = dest_path
     req.url.query = f"uploadId={upload_id}&partNumber={part_number}"
     req.headers = {
         "x-amz-copy-source": copy_source,
     }
+    if copy_source_range is not None:
+        req.headers["x-amz-copy-source-range"] = copy_source_range
     return req
 
 
@@ -272,6 +274,166 @@ async def test_range_copy_still_reencrypts(mock_s3, settings, manager, credentia
 
     assert not any(c[0] == "upload_part_copy" for c in during)
     assert any(c[0] == "upload_part" for c in during)
+
+
+@pytest.mark.asyncio
+async def test_normalize_copy_source_range_treats_full_object_as_whole(
+    settings, manager, credentials
+):
+    handler = _copy_handler(settings, manager)
+    total = crypto.STREAMING_THRESHOLD + crypto.MAX_BUFFER_SIZE
+    assert handler._normalize_copy_source_range(None, total) is None
+    assert handler._normalize_copy_source_range(f"bytes=0-{total - 1}", total) is None
+    assert handler._normalize_copy_source_range(f"bytes=0-{total + 9999}", total) is None
+    partial = handler._normalize_copy_source_range(f"bytes=0-{crypto.MAX_BUFFER_SIZE - 1}", total)
+    assert partial == f"bytes=0-{crypto.MAX_BUFFER_SIZE - 1}"
+
+
+def _build_large_multipart_source(mock_s3, kid, kek, *, num_internal_parts: int):
+    """Encrypted multipart source above STREAMING_THRESHOLD (Scylla manifest shape)."""
+    src_dek = crypto.generate_dek()
+    chunk_size = crypto.MAX_BUFFER_SIZE
+    src_plaintext = b"M" * (chunk_size * num_internal_parts)
+
+    ciphertext_blob = bytearray()
+    internal_parts_meta = []
+    for i, start in enumerate(range(0, len(src_plaintext), chunk_size), 1):
+        chunk = src_plaintext[start : start + chunk_size]
+        ct = crypto.encrypt_frame(chunk, src_dek, "src-upload", i, 0)
+        internal_parts_meta.append(
+            InternalPartMetadata(
+                internal_part_number=i,
+                plaintext_size=len(chunk),
+                ciphertext_size=len(ct),
+                etag=hashlib.md5(ct, usedforsecurity=False).hexdigest(),
+            )
+        )
+        ciphertext_blob.extend(ct)
+
+    src_meta = MultipartMetadata(
+        version=2,
+        part_count=1,
+        total_plaintext_size=len(src_plaintext),
+        parts=[
+            PartMetadata(
+                part_number=1,
+                plaintext_size=len(src_plaintext),
+                ciphertext_size=len(ciphertext_blob),
+                etag="ignored",
+                md5=hashlib.md5(src_plaintext, usedforsecurity=False).hexdigest(),
+                internal_parts=internal_parts_meta,
+            )
+        ],
+        wrapped_dek=crypto.wrap_key(src_dek, kek),
+        kid=kid,
+    )
+    return src_dek, src_plaintext, bytes(ciphertext_blob), src_meta
+
+
+@pytest.mark.asyncio
+async def test_scylla_manifest_full_range_uses_passthrough_not_streaming(
+    mock_s3, settings, manager, credentials, monkeypatch
+):
+    """Full-object CopySourceRange must not fall into UPLOAD_PART_COPY_STREAMING."""
+    monkeypatch.setattr(crypto, "COPY_INTERNAL_PART_SIZE", crypto.MAX_BUFFER_SIZE)
+    handler = _copy_handler(settings, manager)
+    _patch_client(handler, mock_s3)
+    await mock_s3.create_bucket(BUCKET)
+
+    kid, kek = settings.keyring.key_for(credentials.access_key)
+    num_parts = (crypto.STREAMING_THRESHOLD // crypto.MAX_BUFFER_SIZE) + 2
+    src_dek, src_plaintext, ciphertext_blob, src_meta = _build_large_multipart_source(
+        mock_s3, kid, kek, num_internal_parts=num_parts
+    )
+    assert len(src_plaintext) > crypto.STREAMING_THRESHOLD
+
+    await mock_s3.put_object(BUCKET, "sst/big-Data.db", ciphertext_blob)
+    await save_multipart_metadata(mock_s3, BUCKET, "sst/big-Data.db", src_meta)
+
+    resp_create = await mock_s3.create_multipart_upload(BUCKET, "sst/big-Data.db.sm_manifest")
+    upload_id = resp_create["UploadId"]
+    await manager.create_upload(BUCKET, "sst/big-Data.db.sm_manifest", upload_id, src_dek, kid)
+
+    full_range = f"bytes=0-{len(src_plaintext) - 1}"
+    mark = len(mock_s3.call_history)
+    await handler.handle_upload_part_copy(
+        _copy_part_request(
+            f"/{BUCKET}/sst/big-Data.db.sm_manifest",
+            f"/{BUCKET}/sst/big-Data.db",
+            upload_id,
+            copy_source_range=full_range,
+        ),
+        credentials,
+    )
+    during = mock_s3.call_history[mark:]
+
+    assert any(c[0] == "upload_part_copy" for c in during)
+    assert not any(c[0] == "upload_part" for c in during)
+
+    updated = await manager.get_upload(BUCKET, "sst/big-Data.db.sm_manifest", upload_id)
+    assert updated.dek == src_dek
+    part = updated.parts[1]
+    assert part.plaintext_size == len(src_plaintext)
+    assert len(part.internal_parts) == num_parts
+
+
+@pytest.mark.asyncio
+async def test_large_passthrough_not_blocked_by_pipeline_semaphore(
+    mock_s3, settings, manager, credentials, monkeypatch
+):
+    """Passthrough must not queue behind the streaming copy pipeline semaphore."""
+    import asyncio
+
+    from s3proxy.handlers.multipart.copy import reset_copy_pipeline_semaphore
+
+    monkeypatch.setattr(crypto, "COPY_INTERNAL_PART_SIZE", crypto.MAX_BUFFER_SIZE)
+    reset_copy_pipeline_semaphore(1)
+
+    handler = _copy_handler(settings, manager)
+    _patch_client(handler, mock_s3)
+    await mock_s3.create_bucket(BUCKET)
+
+    kid, kek = settings.keyring.key_for(credentials.access_key)
+    num_parts = (crypto.STREAMING_THRESHOLD // crypto.MAX_BUFFER_SIZE) + 2
+    src_dek, src_plaintext, ciphertext_blob, src_meta = _build_large_multipart_source(
+        mock_s3, kid, kek, num_internal_parts=num_parts
+    )
+
+    await mock_s3.put_object(BUCKET, "sst/big-Data.db", ciphertext_blob)
+    await save_multipart_metadata(mock_s3, BUCKET, "sst/big-Data.db", src_meta)
+
+    resp_create = await mock_s3.create_multipart_upload(BUCKET, "sst/big-Data.db.sm_manifest")
+    upload_id = resp_create["UploadId"]
+    await manager.create_upload(BUCKET, "sst/big-Data.db.sm_manifest", upload_id, src_dek, kid)
+
+    gate = asyncio.Event()
+
+    async def blocked_streaming(*args, **kwargs):
+        gate.set()
+        await asyncio.Event().wait()
+
+    handler._streaming_copy_part = blocked_streaming  # type: ignore[method-assign]
+
+    passthrough_task = asyncio.create_task(
+        handler.handle_upload_part_copy(
+            _copy_part_request(
+                f"/{BUCKET}/sst/big-Data.db.sm_manifest",
+                f"/{BUCKET}/sst/big-Data.db",
+                upload_id,
+                copy_source_range=f"bytes=0-{len(src_plaintext) - 1}",
+            ),
+            credentials,
+        )
+    )
+
+    for _ in range(200):
+        if passthrough_task.done():
+            break
+        await asyncio.sleep(0.01)
+
+    assert passthrough_task.done()
+    assert not gate.is_set()
+    await passthrough_task
 
 
 def _extract_upload_id(xml_body: bytes) -> str:

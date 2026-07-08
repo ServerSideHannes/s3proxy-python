@@ -17,6 +17,7 @@ from tests.integration.passthrough_verify import (
     check_concurrent_flood,
     check_dek_adoption,
     check_reencrypt_control,
+    check_scylla_manifest_full_range_passthrough,
     check_scylla_scale,
     log_has_passthrough,
     poll_during,
@@ -78,8 +79,20 @@ class TestUploadPartCopyPassthroughQuick:
         ctx.failures.clear()
         check_reencrypt_control(ctx, "sst/source-96mb.bin", "sst/dest-d.bin", QUICK_SIZE)
         assert proc.poll() is None
-        _assert_check(ctx, "encrypts full object")
+        _assert_check(ctx, "encrypts partial range")
         _assert_check(ctx, "high peak memory")
+
+    def test_scylla_manifest_full_range_passthrough(self, passthrough_env):
+        ctx, proc, _ = passthrough_env
+        ctx.failures.clear()
+        check_scylla_manifest_full_range_passthrough(
+            ctx, "sst/source-1280mb.bin", "sst/dest-1280mb-fullrange.bin", SCYLLA_SSTABLE_SIZE
+        )
+        assert proc.poll() is None
+        _assert_check(ctx, "full-range zero bytes_encrypted")
+        _assert_check(ctx, "full-range low peak memory")
+        _assert_check(ctx, "full-range ciphertext identical")
+        _assert_check(ctx, "UPLOAD_PART_COPY_PASSTHROUGH logged")
 
     def test_passthrough_log_line(self, passthrough_env):
         _, proc, log_path = passthrough_env
@@ -116,17 +129,18 @@ class TestUploadPartCopyPassthroughScylla:
         peak_pt, enc_pt = poll_during(
             ctx, lambda: upload_part_copy(ctx, "sst/dest-compare-pt.bin", "sst/source-96mb.bin")
         )
+        partial_end = min(QUICK_SIZE - 1, 32 * MB - 1)
         peak_re, enc_re = poll_during(
             ctx,
             lambda: upload_part_copy(
                 ctx,
                 "sst/dest-compare-re.bin",
                 "sst/source-96mb.bin",
-                byte_range=f"bytes=0-{QUICK_SIZE - 1}",
+                byte_range=f"bytes=0-{partial_end}",
             ),
         )
         assert proc.poll() is None
         assert enc_pt <= 1 * MB
-        assert enc_re >= QUICK_SIZE * 0.5
+        assert enc_re >= (partial_end + 1) * 0.5
         assert peak_pt <= CHUNK_PEAK * 0.5
         assert peak_re >= CHUNK_PEAK * 0.5
