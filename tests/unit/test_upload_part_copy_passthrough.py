@@ -282,11 +282,202 @@ async def test_normalize_copy_source_range_treats_full_object_as_whole(
 ):
     handler = _copy_handler(settings, manager)
     total = crypto.STREAMING_THRESHOLD + crypto.MAX_BUFFER_SIZE
-    assert handler._normalize_copy_source_range(None, total) is None
-    assert handler._normalize_copy_source_range(f"bytes=0-{total - 1}", total) is None
-    assert handler._normalize_copy_source_range(f"bytes=0-{total + 9999}", total) is None
-    partial = handler._normalize_copy_source_range(f"bytes=0-{crypto.MAX_BUFFER_SIZE - 1}", total)
+    assert handler._normalize_copy_source_range(None, total, {}, None) is None
+    assert handler._normalize_copy_source_range(f"bytes=0-{total - 1}", total, {}, None) is None
+    assert handler._normalize_copy_source_range(f"bytes=0-{total + 9999}", total, {}, None) is None
+    partial = handler._normalize_copy_source_range(
+        f"bytes=0-{crypto.MAX_BUFFER_SIZE - 1}", total, {}, None
+    )
     assert partial == f"bytes=0-{crypto.MAX_BUFFER_SIZE - 1}"
+
+
+def test_segments_for_plaintext_range_selects_aligned_prefix(settings, manager):
+    from s3proxy.handlers.multipart.copy import _CiphertextSegment
+
+    handler = _copy_handler(settings, manager)
+    chunk = crypto.MAX_BUFFER_SIZE
+    ct = chunk + 16
+    segments = [_CiphertextSegment(chunk, ct, i * ct) for i in range(5)]
+    # First two internal parts (64MB).
+    selected = handler._segments_for_plaintext_range(segments, 0, chunk * 2 - 1)
+    assert selected is not None
+    assert len(selected) == 2
+    # Partial segment at the end is not passthrough-safe.
+    assert handler._segments_for_plaintext_range(segments, 0, chunk) is None
+
+
+def _build_scylla_prod_shape_source(
+    kid, kek, *, num_internal_parts: int, metadata_inflate_ratio: float
+):
+    """Prod shape: metadata total_plaintext > Scylla manifest copy range.
+
+      Scylla uploads ~122 client parts (~6GB metadata total) but manifest copies
+    ~149 internal chunks (~4.7GB). Simulate by inflating metadata total while
+      keeping only the first ``num_internal_parts`` segments real.
+    """
+    src_dek = crypto.generate_dek()
+    chunk_size = crypto.MAX_BUFFER_SIZE
+    src_plaintext = b"M" * (chunk_size * num_internal_parts)
+
+    ciphertext_blob = bytearray()
+    internal_parts_meta = []
+    for i, start in enumerate(range(0, len(src_plaintext), chunk_size), 1):
+        chunk = src_plaintext[start : start + chunk_size]
+        ct = crypto.encrypt_frame(chunk, src_dek, "src-upload", i, 0)
+        internal_parts_meta.append(
+            InternalPartMetadata(
+                internal_part_number=i,
+                plaintext_size=len(chunk),
+                ciphertext_size=len(ct),
+                etag=hashlib.md5(ct, usedforsecurity=False).hexdigest(),
+            )
+        )
+        ciphertext_blob.extend(ct)
+
+    inflated_total = int(len(src_plaintext) * metadata_inflate_ratio)
+    src_meta = MultipartMetadata(
+        version=2,
+        part_count=1,
+        total_plaintext_size=inflated_total,
+        parts=[
+            PartMetadata(
+                part_number=1,
+                plaintext_size=len(src_plaintext),
+                ciphertext_size=len(ciphertext_blob),
+                etag="ignored",
+                md5=hashlib.md5(src_plaintext, usedforsecurity=False).hexdigest(),
+                internal_parts=internal_parts_meta,
+            )
+        ],
+        wrapped_dek=crypto.wrap_key(src_dek, kek),
+        kid=kid,
+    )
+    return src_dek, src_plaintext, bytes(ciphertext_blob), src_meta, inflated_total
+
+
+@pytest.mark.asyncio
+async def test_scylla_prod_shape_range_smaller_than_metadata_uses_passthrough(
+    mock_s3, settings, manager, credentials, monkeypatch
+):
+    """Regression: range bytes=0-(N-1) with N < metadata total must passthrough, not stream."""
+    monkeypatch.setattr(crypto, "COPY_INTERNAL_PART_SIZE", crypto.MAX_BUFFER_SIZE)
+    handler = _copy_handler(settings, manager)
+    _patch_client(handler, mock_s3)
+    await mock_s3.create_bucket(BUCKET)
+
+    kid, kek = settings.keyring.key_for(credentials.access_key)
+    num_parts = 149  # prod manifest internal part count
+    src_dek, src_plaintext, ciphertext_blob, src_meta, inflated_total = (
+        _build_scylla_prod_shape_source(
+            kid, kek, num_internal_parts=num_parts, metadata_inflate_ratio=1.27
+        )
+    )
+    assert inflated_total > len(src_plaintext)
+    assert len(src_plaintext) > crypto.STREAMING_THRESHOLD
+
+    await mock_s3.put_object(BUCKET, "sst/big-Data.db", ciphertext_blob)
+    await save_multipart_metadata(mock_s3, BUCKET, "sst/big-Data.db", src_meta)
+
+    resp_create = await mock_s3.create_multipart_upload(BUCKET, "sst/big-Data.db.sm_manifest")
+    upload_id = resp_create["UploadId"]
+    await manager.create_upload(BUCKET, "sst/big-Data.db.sm_manifest", upload_id, src_dek, kid)
+
+    scylla_range = f"bytes=0-{len(src_plaintext) - 1}"
+    mark = len(mock_s3.call_history)
+    await handler.handle_upload_part_copy(
+        _copy_part_request(
+            f"/{BUCKET}/sst/big-Data.db.sm_manifest",
+            f"/{BUCKET}/sst/big-Data.db",
+            upload_id,
+            copy_source_range=scylla_range,
+        ),
+        credentials,
+    )
+    during = mock_s3.call_history[mark:]
+
+    assert any(c[0] == "upload_part_copy" for c in during)
+    assert not any(c[0] == "upload_part" for c in during)
+
+    updated = await manager.get_upload(BUCKET, "sst/big-Data.db.sm_manifest", upload_id)
+    part = updated.parts[1]
+    assert part.plaintext_size == len(src_plaintext)
+    assert len(part.internal_parts) == num_parts
+
+
+def test_prod_shape_passthrough_eligibility_and_route(settings, manager, credentials):
+    """Unit check for prod mismatch: metadata total > range plaintext, still eligible."""
+    handler = _copy_handler(settings, manager)
+    kid, kek = settings.keyring.key_for(credentials.access_key)
+    num_parts = 149
+    _, src_plaintext, _, src_meta, inflated_total = _build_scylla_prod_shape_source(
+        kid, kek, num_internal_parts=num_parts, metadata_inflate_ratio=1.27
+    )
+    scylla_range = f"bytes=0-{len(src_plaintext) - 1}"
+    block = handler._passthrough_block_reason(
+        scylla_range,
+        scylla_range,
+        "wrapped-dek",
+        src_meta,
+        {},
+        credentials,
+        len(src_plaintext),
+        {},
+    )
+    assert block is None
+    assert inflated_total > len(src_plaintext)
+    assert (
+        handler._normalize_copy_source_range(scylla_range, inflated_total, {}, "wrapped-dek")
+        == scylla_range
+    )
+
+
+@pytest.mark.asyncio
+async def test_small_partial_range_blocked_from_passthrough(settings, manager, credentials):
+    handler = _copy_handler(settings, manager)
+    kid, kek = settings.keyring.key_for(credentials.access_key)
+    chunk = crypto.MAX_BUFFER_SIZE
+    src_meta = MultipartMetadata(
+        version=2,
+        part_count=1,
+        total_plaintext_size=chunk * 3,
+        parts=[
+            PartMetadata(
+                part_number=1,
+                plaintext_size=chunk * 3,
+                ciphertext_size=chunk * 3,
+                etag="x",
+                internal_parts=[
+                    InternalPartMetadata(1, chunk, chunk, "e1"),
+                    InternalPartMetadata(2, chunk, chunk, "e2"),
+                    InternalPartMetadata(3, chunk, chunk, "e3"),
+                ],
+            )
+        ],
+        wrapped_dek=crypto.wrap_key(crypto.generate_dek(), kek),
+        kid=kid,
+    )
+    partial_range = f"bytes=0-{chunk - 1}"
+    reason = handler._passthrough_block_reason(
+        partial_range,
+        partial_range,
+        "wrapped",
+        src_meta,
+        {},
+        credentials,
+        chunk,
+        {},
+    )
+    assert reason == "small_ranged_copy"
+
+
+@pytest.mark.asyncio
+async def test_normalize_does_not_clear_scylla_shorter_than_metadata_range(settings, manager):
+    """Shorter-than-metadata range must stay set for range-aware passthrough."""
+    handler = _copy_handler(settings, manager)
+    metadata_total = 6_000_000_000
+    scylla_end = 4_999_741_439  # ~4767MB, prod-shaped
+    raw = f"bytes=0-{scylla_end}"
+    assert handler._normalize_copy_source_range(raw, metadata_total, {}, "dek") == raw
 
 
 def _build_large_multipart_source(mock_s3, kid, kek, *, num_internal_parts: int):
