@@ -7,11 +7,12 @@ from typing import Any
 
 import structlog
 from fastapi import Request, Response
+from starlette.requests import ClientDisconnect
 from structlog.stdlib import BoundLogger
 
 from ... import crypto
 from ...client import S3Client, S3Credentials
-from ...disconnect import ClientDisconnectError, track_chunk
+from ...disconnect import ClientDisconnectError
 from ...errors import S3Error
 from ...signature import verify_deferred_payload_hash
 from ...state import (
@@ -260,10 +261,8 @@ class PutObjectMixin(BaseHandler):
             )
 
             stream_source = _iter_request_body(request, decode_chunked)
-            disconnect_counter = 0
 
             async for chunk in stream_source:
-                disconnect_counter = await track_chunk(request, len(chunk), disconnect_counter)
                 buffer.extend(chunk)
                 md5_hash.update(chunk)
                 if sha256_hash:
@@ -334,9 +333,9 @@ class PutObjectMixin(BaseHandler):
             )
             return Response(headers={"ETag": f'"{etag}"'})
 
-        except ClientDisconnectError:
+        except (ClientDisconnectError, ClientDisconnect):
             await self._safe_abort(client, bucket, key, upload_id)
-            raise
+            raise ClientDisconnectError.raised() from None
         except S3Error:
             raise
         except Exception as e:

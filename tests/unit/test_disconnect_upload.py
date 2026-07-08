@@ -3,8 +3,9 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from starlette.requests import ClientDisconnect
 
-from s3proxy.disconnect import CHECK_INTERVAL_BYTES, ClientDisconnectError
+from s3proxy.disconnect import ClientDisconnectError
 from s3proxy.handlers.objects.put import PutObjectMixin
 
 MB = 1024 * 1024
@@ -29,18 +30,14 @@ class _DisconnectRequest:
         self.app = MagicMock()
         self._total = total
         self._sent = 0
-        self._disconnected = False
 
     async def stream(self):
         chunk = 64 * 1024
         while self._sent < self._total:
             self._sent += chunk
-            if self._sent >= CHECK_INTERVAL_BYTES:
-                self._disconnected = True
+            if self._sent >= 12 * MB:
+                raise ClientDisconnect()
             yield b"x" * min(chunk, self._total - (self._sent - chunk))
-
-    async def is_disconnected(self) -> bool:
-        return self._disconnected
 
 
 def _handler() -> PutObjectMixin:

@@ -1,12 +1,9 @@
 """In-flight request cap bounds httptools buffers outside the memory governor."""
 
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 from s3proxy.config import Settings
-from s3proxy.disconnect import CHECK_INTERVAL_BYTES, ClientDisconnectError, track_chunk
 
 
 class TestResolvedMaxInFlight:
@@ -46,24 +43,3 @@ def test_main_passes_limit_concurrency_to_uvicorn():
 
     run.assert_called_once()
     assert run.call_args.kwargs["limit_concurrency"] == 8
-
-
-@pytest.mark.asyncio
-async def test_track_chunk_raises_when_client_disconnected():
-    request = MagicMock()
-    request.is_disconnected = AsyncMock(return_value=True)
-
-    with pytest.raises(ClientDisconnectError):
-        await track_chunk(request, CHECK_INTERVAL_BYTES, 0)
-
-    request.is_disconnected.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_track_chunk_defers_check_until_interval():
-    request = MagicMock()
-    request.is_disconnected = MagicMock(return_value=False)
-
-    remaining = await track_chunk(request, 1024, 0)
-    assert remaining == 1024
-    request.is_disconnected.assert_not_called()

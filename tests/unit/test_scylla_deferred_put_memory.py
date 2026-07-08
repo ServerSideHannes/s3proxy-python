@@ -54,9 +54,6 @@ class _StreamRequest:
         self.state.s3proxy_deferred_sig = True
         self.app = MagicMock()
 
-    async def is_disconnected(self) -> bool:
-        return False
-
     async def stream(self):
         for i in range(0, self._total, self._chunk):
             yield b"s" * min(self._chunk, self._total - i)

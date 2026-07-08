@@ -16,7 +16,6 @@ from structlog.stdlib import BoundLogger
 
 from ... import crypto
 from ...client import S3Client, S3Credentials
-from ...disconnect import track_chunk
 from ...errors import S3Error, raise_for_client_error, raise_for_exception
 from ...signature import deferred_signature_required, verify_deferred_payload_hash
 from ...state import (
@@ -285,12 +284,10 @@ class UploadPartMixin(BaseHandler):
         upload_semaphore = asyncio.Semaphore(MAX_PARALLEL_INTERNAL_UPLOADS)
 
         # Process stream
-        disconnect_counter = 0
         async for chunk in stream_source:
             if not chunk:
                 continue
 
-            disconnect_counter = await track_chunk(request, len(chunk), disconnect_counter)
             buffer_chunks.append(chunk)
             buffer_size += len(chunk)
             md5_hash.update(chunk)
