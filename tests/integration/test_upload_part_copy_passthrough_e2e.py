@@ -103,7 +103,8 @@ class TestUploadPartCopyPassthroughScylla:
     def test_ten_concurrent_passthrough_copies(self, passthrough_env):
         ctx, proc, _ = passthrough_env
         ctx.failures.clear()
-        check_concurrent_flood(ctx, "sst/source-1280mb.bin", n=10)
+        # 96MB source: flood tests pipeline/memory, not 1280MB scale (saves ~12GB on CI).
+        check_concurrent_flood(ctx, "sst/source-96mb.bin", n=10)
         assert proc.poll() is None
         _assert_check(ctx, "all copies succeeded")
         _assert_check(ctx, "peak memory under prod budget")

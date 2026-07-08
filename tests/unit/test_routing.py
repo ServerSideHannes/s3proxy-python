@@ -45,19 +45,23 @@ class TestNeedsBodyForSignature:
     """Body is buffered for signature only when x-amz-content-sha256 is absent."""
 
     def test_unsigned_payload(self):
-        assert _needs_body_for_signature({"x-amz-content-sha256": "UNSIGNED-PAYLOAD"}) is False
+        assert _needs_body_for_signature({"x-amz-content-sha256": "UNSIGNED-PAYLOAD"}, {}) is False
 
     def test_streaming_payload(self):
         headers = {"x-amz-content-sha256": "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"}
-        assert _needs_body_for_signature(headers) is False
+        assert _needs_body_for_signature(headers, {}) is False
 
     def test_signed_payload_skips_body_regardless_of_size(self):
         headers = {"x-amz-content-sha256": "abc123def456", "content-length": str(16 * 1024 * 1024)}
-        assert _needs_body_for_signature(headers) is False
+        assert _needs_body_for_signature(headers, {}) is False
 
     def test_missing_header_needs_body(self):
-        assert _needs_body_for_signature({}) is True
-        assert _needs_body_for_signature({"x-amz-content-sha256": ""}) is True
+        assert _needs_body_for_signature({}, {}) is True
+        assert _needs_body_for_signature({"x-amz-content-sha256": ""}, {}) is True
+
+    def test_presigned_skips_body(self):
+        query = {"X-Amz-Signature": ["abc123"]}
+        assert _needs_body_for_signature({}, query) is False
 
 
 class TestQueryConstants:

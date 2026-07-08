@@ -30,6 +30,7 @@ INTEGRATION_core_TESTS = \
 	tests/integration/test_handlers.py \
 	tests/integration/test_concurrent_operations.py \
 	tests/integration/test_per_key_encryption.py \
+	tests/integration/test_presigned_put_e2e.py \
 	tests/integration/test_redis_coordination.py
 INTEGRATION_multipart_TESTS = \
 	tests/integration/test_upload_part_copy.py \

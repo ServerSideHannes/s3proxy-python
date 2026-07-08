@@ -42,13 +42,18 @@ def _find_free_port() -> int:
 
 
 @contextlib.contextmanager
-def minio_backend() -> Generator[str]:
-    """Yield a MinIO HTTP endpoint, starting a throwaway container if needed."""
-    for port in (9000, 19000, 19001):
-        endpoint = f"http://localhost:{port}"
-        if _is_minio(endpoint):
-            yield endpoint
-            return
+def minio_backend(*, isolated: bool = False) -> Generator[str]:
+    """Yield a MinIO HTTP endpoint, starting a throwaway container if needed.
+
+    When *isolated* is True, always start a dedicated container (and remove it on
+    exit). Use for heavy e2e shards so tests do not fill the shared compose MinIO.
+    """
+    if not isolated:
+        for port in (9000, 19000, 19001):
+            endpoint = f"http://localhost:{port}"
+            if _is_minio(endpoint):
+                yield endpoint
+                return
 
     port = 19000
     while port < 19100:
