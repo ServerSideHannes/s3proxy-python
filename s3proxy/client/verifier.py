@@ -95,10 +95,19 @@ class SigV4Verifier:
 
         return False, None, "No AWS signature found"
 
-    def _verify_header_signature(
-        self, request: ParsedRequest, path: str, auth_header: str
-    ) -> tuple[bool, S3Credentials | None, str]:
-        """Verify Authorization header signature."""
+    def _parse_header_auth(
+        self, request: ParsedRequest, auth_header: str
+    ) -> tuple[
+        S3Credentials | None,
+        list[str],
+        str,
+        str,
+        str,
+        str,
+        str,
+        str | None,
+    ]:
+        """Parse Authorization header fields without verifying the signature."""
         try:
             parts = auth_header.replace("AWS4-HMAC-SHA256 ", "").split(",")
             auth_parts = {}
@@ -112,41 +121,141 @@ class SigV4Verifier:
 
             credentials, date_stamp, region, service, error = self._parse_v4_credential(credential)
             if error:
-                return False, None, error
+                return None, [], "", "", "", "", "", error
 
             amz_date = request.headers.get("x-amz-date", "")
             if not amz_date:
-                return False, credentials, "Missing x-amz-date header"
+                return credentials, [], signature, "", "", "", "", "Missing x-amz-date header"
 
-            try:
-                request_time = datetime.strptime(amz_date, "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
-                if abs(datetime.now(UTC) - request_time) > CLOCK_SKEW_TOLERANCE:
-                    return False, credentials, "Request time too skewed"
-            except ValueError:
-                return False, credentials, "Invalid x-amz-date format"
-
-            canonical_request = self._build_canonical_request(
-                request, path, signed_headers.split(";")
+            return (
+                credentials,
+                signed_headers.split(";"),
+                signature,
+                date_stamp,
+                region,
+                service,
+                amz_date,
+                None,
             )
-            calculated_sig = self._compute_v4_signature(
-                canonical_request, amz_date, date_stamp, region, service, credentials.secret_key
-            )
-
-            if hmac.compare_digest(calculated_sig, signature):
-                return True, credentials, ""
-
-            logger.debug(
-                "Signature verification failed",
-                method=request.method,
-                path=path,
-                signed_headers=signed_headers,
-                expected_sig=signature[:16] + "...",
-                calculated_sig=calculated_sig[:16] + "...",
-            )
-            return False, credentials, "Signature mismatch"
-
         except (KeyError, ValueError, IndexError) as e:
-            return False, None, f"Invalid Authorization header: {e}"
+            return None, [], "", "", "", "", "", f"Invalid Authorization header: {e}"
+
+    def _check_request_time(self, amz_date: str) -> str | None:
+        try:
+            request_time = datetime.strptime(amz_date, "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
+            if abs(datetime.now(UTC) - request_time) > CLOCK_SKEW_TOLERANCE:
+                return "Request time too skewed"
+        except ValueError:
+            return "Invalid x-amz-date format"
+        return None
+
+    def prepare_header_auth(
+        self, request: ParsedRequest, auth_header: str
+    ) -> tuple[S3Credentials | None, str]:
+        """Parse credentials and clock skew. Signature verified separately."""
+        (
+            credentials,
+            _signed_headers,
+            _signature,
+            _date_stamp,
+            _region,
+            _service,
+            amz_date,
+            error,
+        ) = self._parse_header_auth(request, auth_header)
+        if error:
+            return None, error
+        assert credentials is not None
+        time_error = self._check_request_time(amz_date)
+        if time_error:
+            return credentials, time_error
+        return credentials, ""
+
+    def verify_with_payload_hash(
+        self,
+        request: ParsedRequest,
+        path: str,
+        auth_header: str,
+        payload_hash: str,
+    ) -> tuple[bool, S3Credentials | None, str]:
+        """Verify SigV4 using an explicit payload hash (stream-computed)."""
+        (
+            credentials,
+            signed_headers,
+            signature,
+            date_stamp,
+            region,
+            service,
+            amz_date,
+            error,
+        ) = self._parse_header_auth(request, auth_header)
+        if error:
+            return False, credentials, error
+        assert credentials is not None
+
+        time_error = self._check_request_time(amz_date)
+        if time_error:
+            return False, credentials, time_error
+
+        canonical_request = self._build_canonical_request(
+            request, path, signed_headers, payload_hash=payload_hash
+        )
+        calculated_sig = self._compute_v4_signature(
+            canonical_request, amz_date, date_stamp, region, service, credentials.secret_key
+        )
+
+        if hmac.compare_digest(calculated_sig, signature):
+            return True, credentials, ""
+
+        logger.debug(
+            "Signature verification failed",
+            method=request.method,
+            path=path,
+            signed_headers=";".join(signed_headers),
+            expected_sig=signature[:16] + "...",
+            calculated_sig=calculated_sig[:16] + "...",
+        )
+        return False, credentials, "Signature mismatch"
+
+    def _verify_header_signature(
+        self, request: ParsedRequest, path: str, auth_header: str
+    ) -> tuple[bool, S3Credentials | None, str]:
+        """Verify Authorization header signature."""
+        (
+            credentials,
+            signed_headers,
+            signature,
+            date_stamp,
+            region,
+            service,
+            amz_date,
+            error,
+        ) = self._parse_header_auth(request, auth_header)
+        if error:
+            return False, credentials, error
+        assert credentials is not None
+
+        time_error = self._check_request_time(amz_date)
+        if time_error:
+            return False, credentials, time_error
+
+        canonical_request = self._build_canonical_request(request, path, signed_headers)
+        calculated_sig = self._compute_v4_signature(
+            canonical_request, amz_date, date_stamp, region, service, credentials.secret_key
+        )
+
+        if hmac.compare_digest(calculated_sig, signature):
+            return True, credentials, ""
+
+        logger.debug(
+            "Signature verification failed",
+            method=request.method,
+            path=path,
+            signed_headers=";".join(signed_headers),
+            expected_sig=signature[:16] + "...",
+            calculated_sig=calculated_sig[:16] + "...",
+        )
+        return False, credentials, "Signature mismatch"
 
     def _verify_presigned_v4(
         self, request: ParsedRequest, path: str
@@ -268,7 +377,12 @@ class SigV4Verifier:
             return False, None, f"Invalid V2 presigned URL: {e}"
 
     def _build_canonical_request(
-        self, request: ParsedRequest, path: str, signed_headers: list[str]
+        self,
+        request: ParsedRequest,
+        path: str,
+        signed_headers: list[str],
+        *,
+        payload_hash: str | None = None,
     ) -> str:
         """Build canonical request for signature verification."""
         method = request.method.upper()
@@ -285,9 +399,10 @@ class SigV4Verifier:
 
         signed_headers_str = ";".join(sorted(signed_headers))
 
-        payload_hash = request.headers.get(
-            "x-amz-content-sha256", hashlib.sha256(request.body).hexdigest()
-        )
+        if payload_hash is None:
+            payload_hash = request.headers.get(
+                "x-amz-content-sha256", hashlib.sha256(request.body).hexdigest()
+            )
 
         return "\n".join(
             [

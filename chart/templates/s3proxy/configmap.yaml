@@ -11,6 +11,9 @@ data:
   S3PROXY_PORT: {{ .Values.server.port | quote }}
   S3PROXY_NO_TLS: {{ .Values.server.noTls | quote }}
   S3PROXY_MEMORY_LIMIT_MB: {{ .Values.performance.memoryLimitMb | quote }}
+  {{- if gt (int .Values.performance.maxInFlight) 0 }}
+  S3PROXY_MAX_IN_FLIGHT: {{ .Values.performance.maxInFlight | quote }}
+  {{- end }}
   {{- if .Values.redis.enabled }}
   S3PROXY_REDIS_URL: "redis://{{ .Chart.Name }}-redis:{{ .Values.redis.port }}/0"
   {{- else }}

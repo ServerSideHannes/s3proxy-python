@@ -12,7 +12,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from structlog.stdlib import BoundLogger
 
-from . import concurrency
+from . import concurrency, crypto
 from .client import ParsedRequest, SigV4Verifier
 from .dashboard import record_request
 from .errors import S3Error, raise_for_client_error, raise_for_exception
@@ -66,6 +66,28 @@ def _needs_body_for_signature(headers: dict[str, str]) -> bool:
     the whole part in memory.
     """
     return headers.get("x-amz-content-sha256", "") == ""
+
+
+def _parse_content_length(headers: dict[str, str]) -> int:
+    try:
+        return int(headers.get("content-length", "0"))
+    except ValueError:
+        return 0
+
+
+def _defer_signature_for_body(headers: dict[str, str], content_length: int) -> bool:
+    """Large bodies without x-amz-content-sha256 are hashed while streaming."""
+    return _needs_body_for_signature(headers) and content_length > crypto.MAX_BUFFER_SIZE
+
+
+def _signature_path(request: Request) -> str:
+    raw_path = request.scope.get("raw_path")
+    if raw_path:
+        sig_path = raw_path.decode("utf-8", errors="replace")
+        if "?" in sig_path:
+            sig_path = sig_path.split("?", 1)[0]
+        return sig_path
+    return request.url.path
 
 
 async def handle_proxy_request(
@@ -198,17 +220,24 @@ async def _handle_proxy_request_impl(
     headers = {k.lower(): v for k, v in request.headers.items()}
     query = parse_qs(str(request.url.query), keep_blank_values=True)
 
+    content_length = _parse_content_length(headers)
+    defer_sig = request.method in ("PUT", "POST") and _defer_signature_for_body(
+        headers, content_length
+    )
+
     needs_body = request.method in ("PUT", "POST") and _needs_body_for_signature(headers)
-    content_length = headers.get("content-length", "0")
-    body = await request.body() if needs_body else b""
-    if needs_body and len(body) > 0:
-        logger.debug(
-            "body_loaded",
-            content_length=content_length,
-            body_size=len(body),
-            method=request.method,
-            path=request.url.path,
-        )
+    body = b""
+    if needs_body and not defer_sig:
+        body = await request.body()
+        if body:
+            request.state.s3proxy_preloaded_body = body
+            logger.debug(
+                "body_loaded",
+                content_length=content_length,
+                body_size=len(body),
+                method=request.method,
+                path=request.url.path,
+            )
 
     parsed = ParsedRequest(
         method=request.method,
@@ -219,18 +248,30 @@ async def _handle_proxy_request_impl(
         body=body,
     )
 
-    raw_path = request.scope.get("raw_path")
-    if raw_path:
-        sig_path = raw_path.decode("utf-8", errors="replace")
-        if "?" in sig_path:
-            sig_path = sig_path.split("?", 1)[0]
+    sig_path = _signature_path(request)
+    if defer_sig:
+        auth_header = headers.get("authorization", "")
+        if not auth_header.startswith("AWS4-HMAC-SHA256"):
+            raise S3Error.access_denied("No AWS signature found")
+        verified_creds, error = verifier.prepare_header_auth(parsed, auth_header)
+        if not verified_creds:
+            raise S3Error.access_denied(error or "Access Denied")
+        if error:
+            raise S3Error.access_denied(error)
+        request.state.s3proxy_deferred_sig = True
+        request.state.s3proxy_sig_path = sig_path
+        logger.debug(
+            "signature_deferred",
+            content_length=content_length,
+            method=request.method,
+            path=request.url.path,
+        )
     else:
-        sig_path = request.url.path
-    valid, verified_creds, error = verifier.verify(parsed, sig_path)
-    if not valid or not verified_creds:
-        if error and "signature" in error.lower():
-            raise S3Error.signature_does_not_match(error)
-        raise S3Error.access_denied(error or "No credentials")
+        valid, verified_creds, error = verifier.verify(parsed, sig_path)
+        if not valid or not verified_creds:
+            if error and "signature" in error.lower():
+                raise S3Error.signature_does_not_match(error)
+            raise S3Error.access_denied(error or "No credentials")
 
     dispatcher = RequestDispatcher(handler)
     try:

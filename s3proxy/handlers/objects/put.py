@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+from collections.abc import AsyncIterator
 from typing import Any
 
 import structlog
@@ -10,6 +11,7 @@ from structlog.stdlib import BoundLogger
 
 from ... import crypto
 from ...client import S3Client, S3Credentials
+from ...disconnect import ClientDisconnected, track_chunk
 from ...errors import S3Error
 from ...state import (
     MultipartMetadata,
@@ -17,10 +19,32 @@ from ...state import (
     save_multipart_metadata,
 )
 from ...streaming import decode_aws_chunked, decode_aws_chunked_stream
+from ...signature import verify_deferred_payload_hash
 from ...utils import etag_matches
 from ..base import BaseHandler
 
 logger: BoundLogger = structlog.get_logger(__name__)
+
+_STREAM_CHUNK = 64 * 1024
+
+
+async def _iter_request_body(request: Request, decode_chunked: bool) -> AsyncIterator[bytes]:
+    """Single-pass body iterator: preloaded small body, else live stream.
+
+    Avoids reading request.stream() after request.body() pinned the payload in
+    Starlette's cache (double buffer on large uploads).
+    """
+    if decode_chunked:
+        async for chunk in decode_aws_chunked_stream(request):
+            yield chunk
+        return
+    preloaded = getattr(request.state, "s3proxy_preloaded_body", None)
+    if preloaded is not None:
+        for offset in range(0, len(preloaded), _STREAM_CHUNK):
+            yield preloaded[offset : offset + _STREAM_CHUNK]
+        return
+    async for chunk in request.stream():
+        yield chunk
 
 
 class PutObjectMixin(BaseHandler):
@@ -126,7 +150,9 @@ class PutObjectMixin(BaseHandler):
             content_length_mb=round(content_length / 1024 / 1024, 2),
         )
 
-        body = await request.body()
+        body = getattr(request.state, "s3proxy_preloaded_body", None)
+        if body is None:
+            body = await request.body()
         if needs_chunked_decode:
             body = decode_aws_chunked(body)
 
@@ -191,7 +217,8 @@ class PutObjectMixin(BaseHandler):
         total_plaintext_size = 0
         part_num = 0
         md5_hash = hashlib.md5(usedforsecurity=False)
-        sha256_hash = hashlib.sha256() if expected_sha256 else None
+        deferred_sig = getattr(request.state, "s3proxy_deferred_sig", False)
+        sha256_hash = hashlib.sha256() if (expected_sha256 or deferred_sig) else None
         buffer = bytearray()
 
         async def upload_part(data: bytes) -> None:
@@ -230,12 +257,11 @@ class PutObjectMixin(BaseHandler):
                 verify_sha256=expected_sha256 is not None,
             )
 
-            if decode_chunked:
-                stream_source = decode_aws_chunked_stream(request)
-            else:
-                stream_source = request.stream()
+            stream_source = _iter_request_body(request, decode_chunked)
+            disconnect_counter = 0
 
             async for chunk in stream_source:
+                disconnect_counter = await track_chunk(request, len(chunk), disconnect_counter)
                 buffer.extend(chunk)
                 md5_hash.update(chunk)
                 if sha256_hash:
@@ -254,8 +280,16 @@ class PutObjectMixin(BaseHandler):
                 buffer.clear()
                 await upload_part(part_data)
 
-            # Verify SHA256 if provided
-            if expected_sha256 is not None:
+            # Verify SHA256 if provided, or deferred SigV4 after streaming hash
+            if deferred_sig:
+                try:
+                    verify_deferred_payload_hash(
+                        request, request.app.state.verifier, sha256_hash.hexdigest()
+                    )
+                except S3Error:
+                    await client.abort_multipart_upload(bucket, key, upload_id)
+                    raise
+            elif expected_sha256 is not None:
                 computed_sha256 = sha256_hash.hexdigest()
                 if computed_sha256 != expected_sha256:
                     logger.error(
@@ -298,6 +332,9 @@ class PutObjectMixin(BaseHandler):
             )
             return Response(headers={"ETag": f'"{etag}"'})
 
+        except ClientDisconnected:
+            await self._safe_abort(client, bucket, key, upload_id)
+            raise
         except S3Error:
             raise
         except Exception as e:

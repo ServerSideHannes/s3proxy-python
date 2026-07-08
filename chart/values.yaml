@@ -17,6 +17,9 @@ server:
 
 performance:
   memoryLimitMb: 64
+  # Max concurrent requests per pod (uvicorn limit_concurrency). 0 = auto
+  # (memoryLimitMb // 8, min 4). Bounds httptools socket buffers outside the governor.
+  maxInFlight: 0
 
 # Redis holds only transient multipart-upload state (TTL'd, deleted on
 # completion). It is NOT a durable store — losing it only forces in-flight

@@ -36,4 +36,5 @@ ENV S3PROXY_IP=0.0.0.0 \
 
 EXPOSE 4433
 
-CMD ["uvicorn", "s3proxy.main:app", "--host", "0.0.0.0", "--port", "4433", "--loop", "uvloop"]
+# Use the CLI entrypoint so limit_concurrency and TLS settings from Settings apply.
+CMD ["python", "-m", "s3proxy.main"]
