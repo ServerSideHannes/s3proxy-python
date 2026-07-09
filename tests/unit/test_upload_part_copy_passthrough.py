@@ -381,6 +381,7 @@ def _build_scylla_prod_shape_source(
     )
 
 
+@pytest.mark.slow
 @pytest.mark.asyncio
 async def test_scylla_prod_shape_range_smaller_than_metadata_uses_passthrough(
     mock_s3, settings, manager, credentials, monkeypatch
@@ -618,6 +619,7 @@ async def test_two_part_hybrid_defer_tail_completes_fast(
     await handler.handle_complete_multipart_upload(complete_req, credentials)
 
 
+@pytest.mark.slow
 @pytest.mark.asyncio
 async def test_scylla_two_part_hybrid_passthrough_completes(
     mock_s3, settings, manager, credentials, monkeypatch

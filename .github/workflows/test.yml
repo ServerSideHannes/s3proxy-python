@@ -9,7 +9,7 @@ on:
 jobs:
   unit:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -27,6 +27,9 @@ jobs:
 
       - name: Run unit tests
         run: make test-unit
+
+      - name: Run slow unit tests
+        run: make test-unit-slow
 
   integration:
     runs-on: ubuntu-latest
