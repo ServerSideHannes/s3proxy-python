@@ -146,6 +146,18 @@ class LifecycleMixin(BaseHandler):
                     client, bucket, key, upload_id, context="for complete"
                 )
 
+            if state.deferred_copy_tail:
+                logger.info(
+                    "COMPLETE_MULTIPART_DEFERRED_TAIL_PENDING",
+                    bucket=bucket,
+                    key=key,
+                    upload_id=upload_id[:20] + "...",
+                    tail_bytes=len(state.deferred_copy_tail),
+                )
+                state = await self._flush_deferred_copy_tail_for_complete(
+                    client, bucket, key, upload_id, state
+                )
+
             # Parse client's part list
             body = await request.body()
             client_parts = self._parse_client_parts(body)

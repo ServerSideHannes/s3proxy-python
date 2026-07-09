@@ -28,6 +28,27 @@ jobs:
       - name: Run unit tests
         run: make test-unit
 
+  unit-slow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+          cache: 'pip'
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Run slow unit tests
+        run: make test-unit-slow
+
   integration:
     runs-on: ubuntu-latest
     strategy:

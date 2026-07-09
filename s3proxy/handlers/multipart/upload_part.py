@@ -68,9 +68,9 @@ class _PlaintextReader:
     frames never accumulates the whole part.
     """
 
-    def __init__(self, source: AsyncIterator[bytes]) -> None:
+    def __init__(self, source: AsyncIterator[bytes], *, prefix: bytes = b"") -> None:
         self._it = aiter(source)
-        self._buf = bytearray()
+        self._buf = bytearray(prefix)
         self._eof = False
 
     async def read(self, n: int) -> bytes:

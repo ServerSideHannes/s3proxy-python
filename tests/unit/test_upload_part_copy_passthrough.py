@@ -381,11 +381,17 @@ def _build_scylla_prod_shape_source(
     )
 
 
+@pytest.mark.slow
 @pytest.mark.asyncio
 async def test_scylla_prod_shape_range_smaller_than_metadata_uses_passthrough(
     mock_s3, settings, manager, credentials, monkeypatch
 ):
-    """Regression: prod range ends mid internal frame → hybrid passthrough + tail."""
+    """Regression: prod range ends mid internal frame → hybrid passthrough + deferred tail.
+
+    Two-part complete (part 2 consumes tail, no EntityTooSmall) is covered by
+    test_two_part_hybrid_defer_tail_completes_fast — the full prod-shape two-part
+    path OOMs CI runners (~5GB mock source).
+    """
     monkeypatch.setattr(crypto, "COPY_INTERNAL_PART_SIZE", crypto.MAX_BUFFER_SIZE)
     handler = _copy_handler(settings, manager)
     _patch_client(handler, mock_s3)
@@ -432,12 +438,190 @@ async def test_scylla_prod_shape_range_smaller_than_metadata_uses_passthrough(
     copy_ops = [c for c in during if c[0] == "upload_part_copy"]
     tail_ops = [c for c in during if c[0] == "upload_part"]
     assert len(copy_ops) >= 500
-    assert len(tail_ops) == 1
+    assert len(tail_ops) == 0
 
     updated = await manager.get_upload(BUCKET, "sst/big-Data.db.sm_manifest", upload_id)
     part = updated.parts[1]
     assert part.plaintext_size == prod_range_end + 1
-    assert len(part.internal_parts) == len(copy_ops) + len(tail_ops)
+    assert len(part.internal_parts) == len(copy_ops)
+    assert len(updated.deferred_copy_tail) > 0
+    assert len(updated.deferred_copy_tail) < crypto.MIN_PART_SIZE
+
+
+def test_should_defer_hybrid_tail_when_more_client_parts_follow(settings, manager):
+    from s3proxy.handlers.multipart.copy import _CiphertextSegment
+
+    handler = _copy_handler(settings, manager)
+    chunk = (50 * 1024 * 1024) // 6
+    ct = chunk + 64
+    segments = [_CiphertextSegment(chunk, ct, i * ct) for i in range(600)]
+    range_end = 4_999_341_931
+    split = handler._split_plaintext_range_on_segments(segments, 0, range_end)
+    assert split is not None
+    assert split.streaming_tail is not None
+    assert handler._should_defer_hybrid_tail(
+        split.streaming_tail,
+        range_end,
+        segments,
+        client_part_plaintext_size=range_end + 1,
+        part_num=1,
+    )
+    # Last client part: tail may stay on S3 as the final internal part.
+    source_end = handler._source_plaintext_end(segments)
+    assert not handler._should_defer_hybrid_tail(
+        split.streaming_tail,
+        source_end,
+        segments,
+        client_part_plaintext_size=source_end + 1,
+        part_num=1,
+    )
+
+
+def test_should_not_defer_hybrid_tail_for_small_client_part(settings, manager):
+    """Single-part partial copies must upload the tail immediately (self-contained)."""
+    from s3proxy.handlers.multipart.copy import _CiphertextSegment
+
+    handler = _copy_handler(settings, manager)
+    chunk = 1_048_576
+    ct = chunk + 64
+    segments = [_CiphertextSegment(chunk, ct, i * ct) for i in range(20)]
+    range_end = chunk * 10 - 1 - chunk // 2
+    split = handler._split_plaintext_range_on_segments(segments, 0, range_end)
+    assert split is not None
+    assert split.streaming_tail is not None
+    tail_bytes = split.streaming_tail[1] - split.streaming_tail[0] + 1
+    assert tail_bytes < crypto.MIN_PART_SIZE
+    # 10MB client part 1 — below 1 GiB threshold, tail uploads on part 1.
+    assert not handler._should_defer_hybrid_tail(
+        split.streaming_tail,
+        range_end,
+        segments,
+        client_part_plaintext_size=range_end + 1,
+        part_num=1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_deferred_copy_tail_state_roundtrip(manager):
+    """Deferred tail survives serialize/deserialize between client parts."""
+    bucket, key, upload_id = BUCKET, "defer-key", "upload-defer"
+    dek = crypto.generate_dek()
+    tail = b"T" * (crypto.MIN_PART_SIZE // 2)
+    await manager.create_upload(bucket, key, upload_id, dek, kid="kid")
+    await manager.set_deferred_copy_tail(bucket, key, upload_id, tail)
+
+    loaded = await manager.get_upload(bucket, key, upload_id)
+    assert loaded.deferred_copy_tail == tail
+
+    taken = await manager.take_deferred_copy_tail(bucket, key, upload_id)
+    assert taken == tail
+    after = await manager.get_upload(bucket, key, upload_id)
+    assert not after.deferred_copy_tail
+
+
+@pytest.mark.asyncio
+async def test_two_part_hybrid_defer_tail_completes_fast(
+    mock_s3, settings, manager, credentials, monkeypatch
+):
+    """Fast regression: defer sub-5MB tail on part 1, fold into part 2, complete cleanly."""
+    from s3proxy.handlers.multipart import copy as copy_mod
+
+    monkeypatch.setattr(copy_mod, "HYBRID_TAIL_DEFER_MIN_CLIENT_PART", 5 * 1024 * 1024)
+    monkeypatch.setattr(crypto, "COPY_INTERNAL_PART_SIZE", crypto.MIN_PART_SIZE)
+    handler = _handler(settings, mock_s3, credentials)
+    await mock_s3.create_bucket(BUCKET)
+
+    kid, kek = settings.keyring.key_for(credentials.access_key)
+    chunk = 8 * 1024 * 1024
+    # Part 1 must exceed STREAMING_THRESHOLD (32MB) for hybrid passthrough; part 2
+    # must also exceed it so streaming consumes the deferred tail. Internal frames
+    # must be >= MIN_PART_SIZE so passthrough segments are valid S3 parts.
+    num_segments = 12
+    part1_range_end = chunk * 4 + chunk // 2  # 36MB, ~4MB deferred tail
+    src_dek, src_plaintext, ciphertext_blob, src_meta, inflated_total, _ = (
+        _build_scylla_prod_shape_source(
+            kid,
+            kek,
+            num_internal_parts=num_segments,
+            metadata_inflate_ratio=1.2,
+            chunk_size=chunk,
+            scylla_range_end=part1_range_end,
+        )
+    )
+    assert inflated_total > part1_range_end + 1
+
+    await mock_s3.put_object(BUCKET, "sst/small-Data.db", ciphertext_blob)
+    await save_multipart_metadata(mock_s3, BUCKET, "sst/small-Data.db", src_meta)
+
+    resp_create = await mock_s3.create_multipart_upload(BUCKET, "sst/small-Data.db.sm_manifest")
+    upload_id = resp_create["UploadId"]
+    await handler.multipart_manager.create_upload(
+        BUCKET, "sst/small-Data.db.sm_manifest", upload_id, src_dek, kid
+    )
+
+    mark = len(mock_s3.call_history)
+    resp1 = await handler.handle_upload_part_copy(
+        _copy_part_request(
+            f"/{BUCKET}/sst/small-Data.db.sm_manifest",
+            f"/{BUCKET}/sst/small-Data.db",
+            upload_id,
+            part_number=1,
+            copy_source_range=f"bytes=0-{part1_range_end}",
+        ),
+        credentials,
+    )
+    await _read(resp1)
+    part1_ops = mock_s3.call_history[mark:]
+    assert not [c for c in part1_ops if c[0] == "upload_part"], (
+        "deferred tail must not upload on part 1"
+    )
+
+    after_part1 = await handler.multipart_manager.get_upload(
+        BUCKET, "sst/small-Data.db.sm_manifest", upload_id
+    )
+    deferred = after_part1.deferred_copy_tail
+    assert deferred
+    assert len(deferred) < crypto.MIN_PART_SIZE
+
+    part2_start = part1_range_end + 1
+    resp2 = await handler.handle_upload_part_copy(
+        _copy_part_request(
+            f"/{BUCKET}/sst/small-Data.db.sm_manifest",
+            f"/{BUCKET}/sst/small-Data.db",
+            upload_id,
+            part_number=2,
+            copy_source_range=f"bytes={part2_start}-{inflated_total - 1}",
+        ),
+        credentials,
+    )
+    await _read(resp2)
+
+    after_part2 = await handler.multipart_manager.get_upload(
+        BUCKET, "sst/small-Data.db.sm_manifest", upload_id
+    )
+    assert not after_part2.deferred_copy_tail
+    part2_internal = after_part2.parts[2].internal_parts
+    assert part2_internal[0].plaintext_size >= crypto.MIN_PART_SIZE
+
+    all_internal = []
+    for pn in sorted(after_part2.parts):
+        all_internal.extend(after_part2.parts[pn].internal_parts)
+    all_internal.sort(key=lambda ip: ip.internal_part_number)
+    for ip in all_internal[:-1]:
+        assert ip.plaintext_size >= crypto.MIN_PART_SIZE
+
+    complete_body = (
+        "<CompleteMultipartUpload>"
+        f'<Part><PartNumber>1</PartNumber><ETag>"{after_part2.parts[1].etag}"</ETag></Part>'
+        f'<Part><PartNumber>2</PartNumber><ETag>"{after_part2.parts[2].etag}"</ETag></Part>'
+        "</CompleteMultipartUpload>"
+    ).encode()
+    complete_req = MagicMock()
+    complete_req.url.path = f"/{BUCKET}/sst/small-Data.db.sm_manifest"
+    complete_req.url.query = f"uploadId={upload_id}"
+    complete_req.headers = {}
+    complete_req.body = AsyncMock(return_value=complete_body)
+    await handler.handle_complete_multipart_upload(complete_req, credentials)
 
 
 def test_prod_shape_passthrough_eligibility_and_route(settings, manager, credentials):

@@ -76,6 +76,7 @@ testpaths = ["tests"]
 markers = [
     "e2e: End-to-end integration tests requiring real S3/MinIO (deselect with '-m \"not e2e\"')",
     "ha: HA tests with multiple s3proxy pods and real Redis (deselect with '-m \"not ha\"')",
+    "slow: Large mock-S3 tests (500+ segment passthrough); run serially with '-m slow -n0'",
 ]
 
 [tool.mypy]

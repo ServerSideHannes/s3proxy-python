@@ -1,4 +1,4 @@
-.PHONY: test test-all test-unit test-integration test-integration-shard test-run test-oom verify-copy-memory verify-passthrough e2e cluster lint
+.PHONY: test test-all test-unit test-unit-slow test-integration test-integration-shard test-run test-oom verify-copy-memory verify-passthrough e2e cluster lint
 
 # Lint: ruff check + format check
 lint:
@@ -8,9 +8,13 @@ lint:
 # Default: run unit tests only (no containers needed)
 test: test-unit
 
-# Run unit tests (excludes e2e and ha tests)
+# Run unit tests (excludes e2e, ha, and slow tests)
 test-unit:
-	uv run pytest -m "not e2e and not ha" -v -n auto
+	uv run pytest -m "not e2e and not ha and not slow" -v -n auto
+
+# Prod-scale passthrough tests (~500+ segments); serial to avoid xdist + CI timeouts.
+test-unit-slow:
+	uv run pytest -m "slow" -v -n0
 
 # Pre-merge gate: subprocess Prometheus proof of per-part copy memory release.
 verify-copy-memory:
