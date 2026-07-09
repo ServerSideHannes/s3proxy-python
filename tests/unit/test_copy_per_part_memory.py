@@ -46,6 +46,12 @@ class _TrackingMgr:
     async def add_part(self, *a, **k):
         return None
 
+    async def take_deferred_copy_tail(self, bucket, key, upload_id):
+        return b""
+
+    async def set_deferred_copy_tail(self, bucket, key, upload_id, tail):
+        return None
+
 
 def _streaming_copy_inner(handler, client, plaintext_size: int):
     state = MultipartUploadState(dek=crypto.generate_dek(), bucket="b", key="k", upload_id="u")

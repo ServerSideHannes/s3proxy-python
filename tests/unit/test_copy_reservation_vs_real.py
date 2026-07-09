@@ -33,6 +33,12 @@ class _Mgr:
     async def add_part(self, *a, **k):
         return None
 
+    async def take_deferred_copy_tail(self, bucket, key, upload_id):
+        return b""
+
+    async def set_deferred_copy_tail(self, bucket, key, upload_id, tail):
+        return None
+
 
 class _Body:
     """aiohttp-like streaming body: `async with body`, `body.content.read(n)`."""
