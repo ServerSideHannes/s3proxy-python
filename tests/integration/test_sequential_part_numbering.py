@@ -214,6 +214,64 @@ class TestSequentialPartNumbering:
         assert state.dense_single_internal is True
 
     @pytest.mark.asyncio
+    async def test_legacy_sparse_state_inferred_not_dense(self, manager, settings):
+        """Pre-dense Redis state with sparse singles must not switch to dense mid-upload."""
+        bucket = "legacy"
+        key = "backup.tar"
+        upload_id = "legacy-sparse"
+        dek = crypto.generate_dek()
+        await manager.create_upload(bucket, key, upload_id, dek, kid="AKIAIOSFODNN7EXAMPLE")
+
+        # Simulate parts 1-2 already uploaded under old sparse mapping (client 2 → 21).
+        from s3proxy.state import InternalPartMetadata, PartMetadata
+
+        await manager.add_part(
+            bucket,
+            key,
+            upload_id,
+            PartMetadata(
+                part_number=1,
+                plaintext_size=5 * 1024 * 1024,
+                ciphertext_size=5 * 1024 * 1024,
+                etag="e1",
+                internal_parts=[
+                    InternalPartMetadata(1, 5 * 1024 * 1024, 5 * 1024 * 1024, "i1")
+                ],
+            ),
+        )
+        await manager.add_part(
+            bucket,
+            key,
+            upload_id,
+            PartMetadata(
+                part_number=2,
+                plaintext_size=5 * 1024 * 1024,
+                ciphertext_size=5 * 1024 * 1024,
+                etag="e2",
+                internal_parts=[
+                    InternalPartMetadata(21, 5 * 1024 * 1024, 5 * 1024 * 1024, "i21")
+                ],
+            ),
+        )
+
+        # Strip dense flag as pre-2026.7.18 Redis blobs would have lacked it.
+        from s3proxy.state.serialization import json_dumps, json_loads
+
+        sk = manager._storage_key(bucket, key, upload_id)
+        raw = await manager._store.get(sk)
+        legacy = json_loads(raw)
+        legacy.pop("dense_single_internal", None)
+        await manager._store.set(sk, json_dumps(legacy), manager._ttl)
+
+        state = await manager.get_upload(bucket, key, upload_id)
+        assert state.dense_single_internal is False
+
+        start = await manager.allocate_internal_parts(
+            bucket, key, upload_id, 1, client_part_number=3
+        )
+        assert start == 41
+
+    @pytest.mark.asyncio
     async def test_scylla_multi_internal_clears_dense_mode(self, manager, settings):
         """First multi-internal client part switches back to sparse ranges."""
         bucket = "scylla-backups"

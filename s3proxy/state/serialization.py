@@ -24,6 +24,20 @@ def json_loads(data: bytes) -> dict:
     return orjson.loads(data)
 
 
+def _infer_dense_single_internal(parts: dict[int, PartMetadata]) -> bool:
+    """Infer allocation mode for Redis state written before dense_single_internal existed."""
+    if not parts:
+        return True
+    for part in parts.values():
+        if len(part.internal_parts) > 1:
+            return False
+        if len(part.internal_parts) == 1:
+            ipn = part.internal_parts[0].internal_part_number
+            if ipn != part.part_number:
+                return False
+    return True
+
+
 def serialize_upload_state(state: MultipartUploadState) -> bytes:
     """Serialize upload state to JSON bytes for Redis."""
     part_numbers = sorted(state.parts.keys())
@@ -128,6 +142,18 @@ def deserialize_upload_state(data: bytes) -> MultipartUploadState | None:
             for pn, p in obj.get("parts", {}).items()
         }
 
+        dense_single_internal = obj.get("dense_single_internal")
+        if dense_single_internal is None:
+            dense_single_internal = _infer_dense_single_internal(parts)
+            logger.info(
+                "LEGACY_DENSE_MODE_INFERRED",
+                bucket=obj.get("bucket"),
+                key=obj.get("key"),
+                upload_id=obj.get("upload_id", "")[:20] + "...",
+                dense_single_internal=dense_single_internal,
+                part_count=len(parts),
+            )
+
         return MultipartUploadState(
             dek=base64.b64decode(obj["dek"]),
             bucket=obj["bucket"],
@@ -141,7 +167,7 @@ def deserialize_upload_state(data: bytes) -> MultipartUploadState | None:
             deferred_copy_tail=base64.b64decode(obj["deferred_copy_tail"])
             if obj.get("deferred_copy_tail")
             else b"",
-            dense_single_internal=obj.get("dense_single_internal", True),
+            dense_single_internal=dense_single_internal,
         )
     except (KeyError, TypeError, ValueError) as e:
         logger.error(

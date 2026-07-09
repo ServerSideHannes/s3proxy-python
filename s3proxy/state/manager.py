@@ -7,6 +7,7 @@ from ..crypto import (
     MAX_INTERNAL_PARTS_PER_CLIENT,
     S3_MAX_PART_NUMBER,
     allocate_client_internal_range,
+    internal_part_range,
 )
 from ..errors import S3Error
 from .models import (
@@ -238,15 +239,28 @@ class MultipartStateManager:
             sk = self._storage_key(bucket, key, upload_id)
             start = 1
             end = 1
+            allocation_mode = "sparse"
+            dense_at_alloc = True
 
             def updater(data: bytes) -> bytes:
-                nonlocal start, end
+                nonlocal start, end, allocation_mode, dense_at_alloc
                 state = deserialize_upload_state(data)
                 if state is None:
                     raise StateMissingError(f"Upload state corrupted for {bucket}/{key}")
 
-                if count > 1:
+                sparse_start, sparse_end = internal_part_range(client_part_number, count)
+                dense_at_alloc = state.dense_single_internal
+                if count > 1 and state.dense_single_internal:
                     state.dense_single_internal = False
+                    logger.info(
+                        "DENSE_SINGLE_INTERNAL_DISABLED",
+                        bucket=bucket,
+                        key=key,
+                        upload_id=self._truncate_id(upload_id),
+                        client_part=client_part_number,
+                        requested=count,
+                        sparse_range=f"{sparse_start}-{sparse_end}",
+                    )
 
                 try:
                     start, end = allocate_client_internal_range(
@@ -259,9 +273,14 @@ class MultipartStateManager:
                         "INTERNAL_PART_ALLOCATION_REJECTED",
                         bucket=bucket,
                         key=key,
+                        upload_id=self._truncate_id(upload_id),
                         client_part=client_part_number,
                         requested=count,
-                        dense_single_internal=state.dense_single_internal,
+                        dense_single_internal=dense_at_alloc,
+                        sparse_range=f"{sparse_start}-{sparse_end}",
+                        dense_range=f"{client_part_number}-{client_part_number}"
+                        if count == 1
+                        else None,
                         max_per_client=MAX_INTERNAL_PARTS_PER_CLIENT,
                         error=str(e),
                     )
@@ -276,6 +295,12 @@ class MultipartStateManager:
                         requested=count,
                         max=MAX_INTERNAL_PARTS_PER_CLIENT,
                     )
+
+                allocation_mode = (
+                    "dense"
+                    if dense_at_alloc and count == 1 and start == client_part_number
+                    else "sparse"
+                )
 
                 return serialize_upload_state(state)
 
@@ -292,11 +317,24 @@ class MultipartStateManager:
                 "ALLOCATE_INTERNAL_PARTS",
                 bucket=bucket,
                 key=key,
+                upload_id=self._truncate_id(upload_id),
                 client_part=client_part_number,
                 count=count,
                 start=start,
                 end=end,
+                allocation_mode=allocation_mode,
+                dense_single_internal=dense_at_alloc and count == 1,
             )
+            if client_part_number >= 500:
+                logger.warning(
+                    "HIGH_CLIENT_PART_ALLOCATED",
+                    bucket=bucket,
+                    key=key,
+                    upload_id=self._truncate_id(upload_id),
+                    client_part=client_part_number,
+                    internal_start=start,
+                    allocation_mode=allocation_mode,
+                )
             return start
 
         # Fallback: sequential allocation
