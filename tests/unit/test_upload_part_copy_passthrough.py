@@ -633,17 +633,22 @@ async def test_scylla_two_part_hybrid_passthrough_completes(
     prod_range_end = 4_999_341_931
     chunk_size = (50 * 1024 * 1024) // 6
     num_parts = (prod_range_end // chunk_size) + 2
+    src_plaintext_len = chunk_size * num_parts
+    # Keep part 2 large enough for streaming (>32MB) but not prod-scale (~1.3GB).
+    part2_plaintext = crypto.STREAMING_THRESHOLD + 16 * 1024 * 1024
+    inflate_ratio = (prod_range_end + 1 + part2_plaintext) / src_plaintext_len
     src_dek, src_plaintext, ciphertext_blob, src_meta, inflated_total, _ = (
         _build_scylla_prod_shape_source(
             kid,
             kek,
             num_internal_parts=num_parts,
-            metadata_inflate_ratio=1.27,
+            metadata_inflate_ratio=inflate_ratio,
             chunk_size=chunk_size,
             scylla_range_end=prod_range_end,
         )
     )
     assert inflated_total > prod_range_end
+    assert inflated_total - prod_range_end - 1 >= crypto.STREAMING_THRESHOLD
 
     await mock_s3.put_object(BUCKET, "sst/big-Data.db", ciphertext_blob)
     await save_multipart_metadata(mock_s3, BUCKET, "sst/big-Data.db", src_meta)
