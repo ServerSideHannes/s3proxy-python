@@ -59,6 +59,7 @@ async def _measure_peak(content_length):
     h = _handler()
     state = MultipartUploadState(dek=crypto.generate_dek(), bucket="b", key="k", upload_id="u")
     part_size = crypto.memory_bounded_part_size(content_length)
+    estimated_parts = max(1, -(-content_length // part_size))
     tracemalloc.start()
     base = tracemalloc.get_traced_memory()[0]
     await h._stream_and_upload_framed(
@@ -72,6 +73,7 @@ async def _measure_peak(content_length):
         content_length,
         part_size,
         1,
+        estimated_parts,
     )
     peak = tracemalloc.get_traced_memory()[1]
     tracemalloc.stop()

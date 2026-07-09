@@ -52,6 +52,7 @@ async def test_framed_upload_roundtrips_and_sets_metadata():
             return {"ETag": f'"{part_number:032x}"'}
 
     mgr = _Manager()
+    estimated_parts = max(1, -(-len(plaintext) // optimal))
     result = await _handler(mgr)._stream_and_upload_framed(
         _Request(plaintext),
         _Client(),
@@ -63,6 +64,7 @@ async def test_framed_upload_roundtrips_and_sets_metadata():
         len(plaintext),
         optimal,
         1,
+        estimated_parts,
     )
 
     # Three internal parts of the planned sizes.
@@ -104,6 +106,8 @@ class _ZeroRequest:
 
 async def _measure_framed_peak(client_part_size: int) -> int:
     handler = _handler(_Manager())
+    part_size = crypto.memory_bounded_part_size(client_part_size)
+    estimated_parts = max(1, -(-client_part_size // part_size))
     tracemalloc.start()
     tracemalloc.reset_peak()
     await handler._stream_and_upload_framed(
@@ -115,8 +119,9 @@ async def _measure_framed_peak(client_part_size: int) -> int:
         1,
         types.SimpleNamespace(dek=crypto.generate_dek()),
         client_part_size,
-        crypto.memory_bounded_part_size(client_part_size),  # size the handler picks
+        part_size,
         1,
+        estimated_parts,
     )
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
