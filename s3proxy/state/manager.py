@@ -305,6 +305,68 @@ class MultipartStateManager:
 
         return start
 
+    async def set_deferred_copy_tail(
+        self,
+        bucket: str,
+        key: str,
+        upload_id: str,
+        tail: bytes,
+    ) -> None:
+        """Store a hybrid-passthrough plaintext suffix for the next client part."""
+        sk = self._storage_key(bucket, key, upload_id)
+
+        def updater(data: bytes) -> bytes:
+            state = deserialize_upload_state(data)
+            if state is None:
+                raise StateMissingError(f"Upload state corrupted for {bucket}/{key}")
+            state.deferred_copy_tail = tail
+            return serialize_upload_state(state)
+
+        result = await self._store.update(sk, updater, self._ttl)
+        if result is None:
+            raise StateMissingError(f"Upload state missing for {bucket}/{key}/{upload_id}")
+
+        logger.info(
+            "DEFERRED_COPY_TAIL_SET",
+            bucket=bucket,
+            key=key,
+            upload_id=self._truncate_id(upload_id),
+            tail_bytes=len(tail),
+        )
+
+    async def take_deferred_copy_tail(
+        self,
+        bucket: str,
+        key: str,
+        upload_id: str,
+    ) -> bytes:
+        """Return and clear any deferred hybrid-passthrough plaintext suffix."""
+        sk = self._storage_key(bucket, key, upload_id)
+        taken = b""
+
+        def updater(data: bytes) -> bytes:
+            nonlocal taken
+            state = deserialize_upload_state(data)
+            if state is None:
+                raise StateMissingError(f"Upload state corrupted for {bucket}/{key}")
+            taken = state.deferred_copy_tail
+            state.deferred_copy_tail = b""
+            return serialize_upload_state(state)
+
+        result = await self._store.update(sk, updater, self._ttl)
+        if result is None:
+            raise StateMissingError(f"Upload state missing for {bucket}/{key}/{upload_id}")
+
+        if taken:
+            logger.info(
+                "DEFERRED_COPY_TAIL_TAKEN",
+                bucket=bucket,
+                key=key,
+                upload_id=self._truncate_id(upload_id),
+                tail_bytes=len(taken),
+            )
+        return taken
+
     @staticmethod
     def _truncate_id(upload_id: str, max_len: int = 20) -> str:
         """Truncate upload ID for logging."""

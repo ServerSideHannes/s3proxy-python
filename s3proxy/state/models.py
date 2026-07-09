@@ -52,6 +52,9 @@ class MultipartUploadState:
     total_plaintext_size: int = 0
     next_internal_part_number: int = 1  # Next S3 part number to use
     kid: str = ""  # Key id that wraps this upload's DEK ("" = default key)
+    # Hybrid passthrough may leave a sub-5MB plaintext suffix here when the
+    # client part range ends mid internal frame but more client parts follow.
+    deferred_copy_tail: bytes = b""
 
 
 @dataclass(slots=True)

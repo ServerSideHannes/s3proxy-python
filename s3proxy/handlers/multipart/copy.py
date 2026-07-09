@@ -55,6 +55,10 @@ PASSTHROUGH_SEGMENT_CONCURRENCY = int(
     os.environ.get("S3PROXY_PASSTHROUGH_SEGMENT_CONCURRENCY", "8")
 )
 
+# Scylla/rclone manifest part 1 is ~4.7GB; only defer a sub-5MB hybrid tail when
+# part 1 is large enough that a client part 2 will follow (avoids EntityTooSmall).
+HYBRID_TAIL_DEFER_MIN_CLIENT_PART = 1024 * 1024 * 1024  # 1 GiB
+
 
 def reset_copy_pipeline_semaphore(limit: int | None = None) -> None:
     """Reset the global copy pipeline semaphore (testing only)."""
@@ -421,6 +425,47 @@ class CopyPartMixin(BaseHandler):
             return None
         return _PlaintextRangeSplit(tuple(selected), streaming_tail)
 
+    def _source_plaintext_end(self, segments: list[_CiphertextSegment]) -> int:
+        if not segments:
+            return -1
+        return sum(seg.plaintext_size for seg in segments) - 1
+
+    def _should_defer_hybrid_tail(
+        self,
+        streaming_tail: tuple[int, int] | None,
+        range_end: int,
+        all_segments: list[_CiphertextSegment],
+        *,
+        client_part_plaintext_size: int,
+        part_num: int,
+    ) -> bool:
+        """Defer a sub-5MB hybrid tail when a large client part 1 precedes part 2.
+
+        S3 requires every internal part except the last to be >= 5MB. Scylla
+        manifest part 1 (~4.7GB) often ends mid internal frame (~1MB tail)
+        before part 2. Small single-part partial copies still upload the tail
+        immediately so the client part is self-contained.
+        """
+        if streaming_tail is None or part_num != 1:
+            return False
+        if range_end >= self._source_plaintext_end(all_segments):
+            return False
+        tail_bytes = streaming_tail[1] - streaming_tail[0] + 1
+        if tail_bytes >= crypto.MIN_PART_SIZE:
+            return False
+        defer = client_part_plaintext_size >= HYBRID_TAIL_DEFER_MIN_CLIENT_PART
+        logger.info(
+            "HYBRID_TAIL_DEFER_DECISION",
+            defer=defer,
+            part_num=part_num,
+            tail_bytes=tail_bytes,
+            client_part_plaintext_mb=f"{client_part_plaintext_size / 1024 / 1024:.2f}MB",
+            range_end=range_end,
+            source_end=self._source_plaintext_end(all_segments),
+            min_client_part_mb=f"{HYBRID_TAIL_DEFER_MIN_CLIENT_PART / 1024 / 1024:.0f}MB",
+        )
+        return defer
+
     def _segments_for_plaintext_range(
         self,
         segments: list[_CiphertextSegment],
@@ -708,6 +753,8 @@ class CopyPartMixin(BaseHandler):
         if not segments:
             raise S3Error.invalid_request("Copy source has no ciphertext segments")
 
+        all_segments = segments
+        range_end = 0
         if copy_source_range and src_multipart_meta:
             range_start, range_end = self._parse_copy_source_range(
                 copy_source_range, src_multipart_meta.total_plaintext_size
@@ -717,8 +764,16 @@ class CopyPartMixin(BaseHandler):
                 raise S3Error.invalid_request("Copy range splits an encrypted segment")
             segments = list(split.passthrough_segments)
             streaming_tail = split.streaming_tail
+            defer_tail = self._should_defer_hybrid_tail(
+                streaming_tail,
+                range_end,
+                all_segments,
+                client_part_plaintext_size=plaintext_size,
+                part_num=part_num,
+            )
         else:
             streaming_tail = None
+            defer_tail = False
 
         copy_source_path = copy_source or f"/{src_bucket}/{quote(src_key, safe='/')}"
         tail_mb = (
@@ -737,6 +792,7 @@ class CopyPartMixin(BaseHandler):
             plaintext_mb=f"{plaintext_size / 1024 / 1024:.2f}MB",
             segments=len(segments),
             streaming_tail_mb=tail_mb,
+            defer_tail=defer_tail,
             copy_source_range=copy_source_range,
         )
 
@@ -792,16 +848,27 @@ class CopyPartMixin(BaseHandler):
                 media_type="application/xml",
             )
 
+        tail_internal_slots = 0 if defer_tail else (1 if streaming_tail else 0)
         internal_part_start = await self.multipart_manager.allocate_internal_parts(
             bucket,
             key,
             upload_id,
-            len(segments) + (1 if streaming_tail else 0),
+            len(segments) + tail_internal_slots,
             client_part_number=0,
+        )
+        logger.info(
+            "UPLOAD_PART_COPY_PASSTHROUGH_ALLOC",
+            bucket=bucket,
+            key=key,
+            part_num=part_num,
+            passthrough_segments=len(segments),
+            tail_internal_slots=tail_internal_slots,
+            internal_part_start=internal_part_start,
         )
 
         start = time.monotonic()
         segment_sem = asyncio.Semaphore(PASSTHROUGH_SEGMENT_CONCURRENCY)
+        deferred_tail_bytes: bytes | None = None
 
         async def copy_segment(idx: int, seg: _CiphertextSegment) -> InternalPartMetadata:
             internal_num = internal_part_start + idx
@@ -825,12 +892,23 @@ class CopyPartMixin(BaseHandler):
             )
 
         async def upload_tail() -> InternalPartMetadata | None:
+            nonlocal deferred_tail_bytes
             if not (streaming_tail and src_multipart_meta):
                 return None
             tail_start, tail_end = streaming_tail
             tail_plaintext = await self._download_encrypted_multipart(
                 client, src_bucket, src_key, src_multipart_meta, tail_start, tail_end
             )
+            if defer_tail:
+                deferred_tail_bytes = tail_plaintext
+                logger.info(
+                    "UPLOAD_PART_COPY_PASSTHROUGH_TAIL_DEFERRED",
+                    bucket=bucket,
+                    key=key,
+                    part_num=part_num,
+                    tail_plaintext_mb=f"{len(tail_plaintext) / 1024 / 1024:.2f}MB",
+                )
+                return None
             internal_num = internal_part_start + len(segments)
             tail_ct = crypto.encrypt_frame(tail_plaintext, state.dek, upload_id, internal_num, 0)
             part_reserve = crypto.copy_chunk_peak(len(tail_plaintext))
@@ -880,7 +958,13 @@ class CopyPartMixin(BaseHandler):
         internal_parts = [t.result() for t in seg_tasks]
         if (tail_part := tail_task.result()) is not None:
             internal_parts.append(tail_part)
+        if deferred_tail_bytes:
+            await self.multipart_manager.set_deferred_copy_tail(
+                bucket, key, upload_id, deferred_tail_bytes
+            )
         total_plaintext = sum(p.plaintext_size for p in internal_parts)
+        if deferred_tail_bytes:
+            total_plaintext += len(deferred_tail_bytes)
         total_ciphertext = sum(p.ciphertext_size for p in internal_parts)
         etag = md5_task.result().hexdigest()
         await self.multipart_manager.add_part(
@@ -903,6 +987,7 @@ class CopyPartMixin(BaseHandler):
             key=key,
             part_num=part_num,
             internal_parts=len(internal_parts),
+            deferred_tail_bytes=len(deferred_tail_bytes) if deferred_tail_bytes else 0,
             plaintext_mb=f"{total_plaintext / 1024 / 1024:.2f}MB",
             copy_source_range=copy_source_range,
             elapsed_sec=f"{time.monotonic() - start:.2f}s",
@@ -911,6 +996,46 @@ class CopyPartMixin(BaseHandler):
             content=xml_responses.upload_part_copy_result(etag, format_iso8601(datetime.now(UTC))),
             media_type="application/xml",
         )
+
+    async def _flush_deferred_copy_tail_for_complete(
+        self,
+        client: S3Client,
+        bucket: str,
+        key: str,
+        upload_id: str,
+        state: MultipartUploadState,
+    ) -> MultipartUploadState:
+        """Upload a leftover deferred hybrid tail as the final internal S3 part."""
+        tail = state.deferred_copy_tail
+        if not tail:
+            return state
+
+        internal_num = state.next_internal_part_number
+        tail_ct = crypto.encrypt_frame(tail, state.dek, upload_id, internal_num, 0)
+        resp = await client.upload_part(bucket, key, upload_id, internal_num, tail_ct)
+        ip = InternalPartMetadata(
+            internal_part_number=internal_num,
+            plaintext_size=len(tail),
+            ciphertext_size=len(tail_ct),
+            etag=resp["ETag"].strip('"'),
+        )
+        last_pn = max(state.parts)
+        last_part = state.parts[last_pn]
+        last_part.internal_parts.append(ip)
+        last_part.ciphertext_size += len(tail_ct)
+        state.deferred_copy_tail = b""
+        state.next_internal_part_number = internal_num + 1
+
+        logger.info(
+            "DEFERRED_COPY_TAIL_FLUSHED_ON_COMPLETE",
+            bucket=bucket,
+            key=key,
+            upload_id=upload_id[:20] + "...",
+            client_part=last_pn,
+            internal_part=internal_num,
+            tail_plaintext_mb=f"{len(tail) / 1024 / 1024:.2f}MB",
+        )
+        return state
 
     async def _simple_copy_part(
         self,
@@ -1058,6 +1183,17 @@ class CopyPartMixin(BaseHandler):
         chunk_size = crypto.copy_internal_part_size(plaintext_size)
         estimated_parts = max(1, math.ceil(plaintext_size / chunk_size))
 
+        deferred_tail = await self.multipart_manager.take_deferred_copy_tail(bucket, key, upload_id)
+        if deferred_tail:
+            logger.info(
+                "UPLOAD_PART_COPY_CONSUME_DEFERRED_TAIL",
+                bucket=bucket,
+                key=key,
+                part_num=part_num,
+                tail_plaintext_mb=f"{len(deferred_tail) / 1024 / 1024:.2f}MB",
+            )
+            estimated_parts = max(1, math.ceil((plaintext_size + len(deferred_tail)) / chunk_size))
+
         internal_part_start = await self.multipart_manager.allocate_internal_parts(
             bucket, key, upload_id, estimated_parts, client_part_number=0
         )
@@ -1068,8 +1204,10 @@ class CopyPartMixin(BaseHandler):
             key=key,
             part_num=part_num,
             plaintext_mb=f"{plaintext_size / 1024 / 1024:.2f}MB",
+            deferred_tail_bytes=len(deferred_tail),
             chunk_size_mb=f"{chunk_size / 1024 / 1024:.2f}MB",
             estimated_parts=estimated_parts,
+            internal_part_start=internal_part_start,
         )
 
         src_iter = self._iter_copy_source(
@@ -1093,6 +1231,7 @@ class CopyPartMixin(BaseHandler):
             src_iter,
             chunk_size,
             internal_part_start,
+            leading_plaintext=deferred_tail or b"",
         )
 
         etag = md5.hexdigest()
@@ -1117,6 +1256,11 @@ class CopyPartMixin(BaseHandler):
             part_num=part_num,
             plaintext_mb=f"{total_plaintext / 1024 / 1024:.2f}MB",
             internal_parts=len(internal_parts),
+            first_internal_plaintext_mb=(
+                f"{internal_parts[0].plaintext_size / 1024 / 1024:.2f}MB"
+                if internal_parts
+                else None
+            ),
         )
         return Response(
             content=xml_responses.upload_part_copy_result(etag, format_iso8601(datetime.now(UTC))),
@@ -1181,6 +1325,8 @@ class CopyPartMixin(BaseHandler):
         src_iter: AsyncIterator[bytes],
         chunk_size: int,
         internal_part_start: int,
+        *,
+        leading_plaintext: bytes = b"",
     ) -> tuple[list[InternalPartMetadata], int, int, object]:
         """Frame-encrypt the copy source into internal S3 parts, one at a time.
 
@@ -1192,7 +1338,7 @@ class CopyPartMixin(BaseHandler):
         matches what the limiter tracks and a multi-GB copy does not hold one
         reservation for its entire duration.
         """
-        reader = _PlaintextReader(src_iter)
+        reader = _PlaintextReader(src_iter, prefix=leading_plaintext)
         md5 = hashlib.md5(usedforsecurity=False)
         internal_parts: list[InternalPartMetadata] = []
         total_plaintext = 0

@@ -37,6 +37,9 @@ def serialize_upload_state(state: MultipartUploadState) -> bytes:
         "total_plaintext_size": state.total_plaintext_size,
         "next_internal_part_number": state.next_internal_part_number,
         "kid": state.kid,
+        "deferred_copy_tail": base64.b64encode(state.deferred_copy_tail).decode()
+        if state.deferred_copy_tail
+        else "",
         "parts": {
             str(pn): {
                 "part_number": p.part_number,
@@ -134,6 +137,9 @@ def deserialize_upload_state(data: bytes) -> MultipartUploadState | None:
             total_plaintext_size=obj.get("total_plaintext_size", 0),
             next_internal_part_number=obj.get("next_internal_part_number", 1),
             kid=obj.get("kid", ""),
+            deferred_copy_tail=base64.b64decode(obj["deferred_copy_tail"])
+            if obj.get("deferred_copy_tail")
+            else b"",
         )
     except (KeyError, TypeError, ValueError) as e:
         logger.error(
