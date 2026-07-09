@@ -15,6 +15,7 @@ from s3proxy.routing.dispatcher import (
     QUERY_TAGGING,
     QUERY_UPLOAD_ID,
     QUERY_UPLOADS,
+    QUERY_VERSIONING,
     RequestDispatcher,
 )
 
@@ -249,15 +250,10 @@ class TestPathParsing:
 class TestQueryStringRouting:
     """Test routing based on query string parameters."""
 
-    def test_versioning_query_forwarded(self):
-        """Test ?versioning is forwarded to backend."""
+    def test_versioning_query_handled_locally(self):
+        """Test ?versioning is answered locally (backend returns 400)."""
         query = "versioning"
-        # This should not match any special handlers
-        assert QUERY_UPLOADS not in query
-        assert QUERY_UPLOAD_ID not in query
-        assert QUERY_LIST_TYPE not in query
-        assert QUERY_LOCATION not in query
-        assert QUERY_DELETE not in query
+        assert QUERY_VERSIONING in query
 
     def test_acl_query_forwarded(self):
         """Test ?acl is forwarded to backend."""

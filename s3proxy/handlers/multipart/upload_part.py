@@ -142,13 +142,16 @@ class UploadPartMixin(BaseHandler):
                 upload_path="framed" if use_framed else "buffered",
             )
 
-            # Allocate internal part numbers
+            # Sequential internal part numbers (client_part_number=0). The sparse
+            # per-client range caps uploads at ~500 client parts (part 501 →
+            # internal 10001 > S3's 10k limit); ClickHouse backups commonly
+            # exceed that. Copy already allocates sequentially for the same reason.
             internal_part_start = await self.multipart_manager.allocate_internal_parts(
                 bucket,
                 key,
                 upload_id,
                 estimated_parts,
-                client_part_number=part_num,
+                client_part_number=0,
             )
             internal_part_end = internal_part_start + estimated_parts - 1
             logger.info(

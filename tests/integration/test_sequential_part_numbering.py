@@ -189,6 +189,29 @@ class TestSequentialPartNumbering:
         assert state.parts[8].plaintext_size == 356864  # 0.34MB, last part OK
 
     @pytest.mark.asyncio
+    async def test_clickhouse_600_part_upload_sequential_internal_numbers(self, manager, settings):
+        """Regression: sparse range allocation fails at client part 501 (internal 10001).
+
+        ClickHouse shadow backups commonly exceed 500 x 5MB parts per tar.
+        Sequential allocation must reach part 600 as internal part 600.
+        """
+        bucket = "clickhouse-backups"
+        key = "huge-backup.tar"
+        upload_id = "test-600-part"
+
+        dek = crypto.generate_dek()
+        await manager.create_upload(bucket, key, upload_id, dek, kid="AKIAIOSFODNN7EXAMPLE")
+
+        for part_num in range(1, 601):
+            start = await manager.allocate_internal_parts(bucket, key, upload_id, 1)
+            assert start == part_num, (
+                f"part {part_num} should map to internal {part_num}, got {start}"
+            )
+
+        state = await manager.get_upload(bucket, key, upload_id)
+        assert state.next_internal_part_number == 601
+
+    @pytest.mark.asyncio
     async def test_old_behavior_with_buffer_would_fail(self, manager, settings):
         """
         Demonstrate that the OLD behavior (with +5 buffer) would create gaps.

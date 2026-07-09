@@ -282,6 +282,26 @@ class BucketHandlerMixin(BaseHandler):
             except ClientError as e:
                 self._raise_bucket_error(e, bucket)
 
+    async def handle_get_bucket_versioning(
+        self, request: Request, creds: S3Credentials
+    ) -> Response:
+        """Return versioning status without forwarding to backend.
+
+        Hetzner/object-storage backends reject GetBucketVersioning with HTTP 400.
+        ClickHouse backup agents probe ?versioning= on startup; answering locally
+        avoids noisy 400s while keeping uploads unversioned (Suspended).
+        """
+        bucket = self._parse_bucket(request.url.path)
+        async with self._client(creds) as client:
+            try:
+                await client.head_bucket(bucket)
+            except ClientError as e:
+                self._raise_bucket_error(e, bucket)
+        return Response(
+            content=xml_responses.bucket_versioning("Suspended"),
+            media_type="application/xml",
+        )
+
     async def handle_list_multipart_uploads(
         self, request: Request, creds: S3Credentials
     ) -> Response:

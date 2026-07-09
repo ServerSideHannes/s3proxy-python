@@ -3,7 +3,11 @@
 import structlog
 from structlog.stdlib import BoundLogger
 
-from ..crypto import MAX_INTERNAL_PARTS_PER_CLIENT, validate_internal_part_allocation
+from ..crypto import (
+    MAX_INTERNAL_PARTS_PER_CLIENT,
+    S3_MAX_PART_NUMBER,
+    validate_internal_part_allocation,
+)
 from ..errors import S3Error
 from .models import (
     MultipartUploadState,
@@ -267,7 +271,7 @@ class MultipartStateManager:
             return start
 
         # Fallback: sequential allocation
-        return await self._allocate_sequential(bucket, key, upload_id, count)
+        return await self._allocate_sequential_checked(bucket, key, upload_id, count)
 
     async def _allocate_sequential(self, bucket: str, key: str, upload_id: str, count: int) -> int:
         """Allocate internal parts sequentially (fallback when no client part)."""
@@ -281,6 +285,12 @@ class MultipartStateManager:
                 return data
 
             start = state.next_internal_part_number
+            end = start + count - 1
+            if end > S3_MAX_PART_NUMBER:
+                raise ValueError(
+                    f"upload needs internal parts {start}-{end} "
+                    f"but S3 allows at most {S3_MAX_PART_NUMBER}"
+                )
             state.next_internal_part_number = start + count
 
             logger.debug(
@@ -304,6 +314,23 @@ class MultipartStateManager:
             return 1
 
         return start
+
+    async def _allocate_sequential_checked(
+        self, bucket: str, key: str, upload_id: str, count: int
+    ) -> int:
+        """Sequential allocation with S3 part-number ceiling enforcement."""
+        try:
+            return await self._allocate_sequential(bucket, key, upload_id, count)
+        except ValueError as e:
+            logger.error(
+                "INTERNAL_PART_ALLOCATION_REJECTED",
+                bucket=bucket,
+                key=key,
+                upload_id=self._truncate_id(upload_id),
+                requested=count,
+                error=str(e),
+            )
+            raise S3Error.invalid_part(str(e)) from e
 
     async def set_deferred_copy_tail(
         self,
