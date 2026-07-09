@@ -234,9 +234,7 @@ class TestSequentialPartNumbering:
                 plaintext_size=5 * 1024 * 1024,
                 ciphertext_size=5 * 1024 * 1024,
                 etag="e1",
-                internal_parts=[
-                    InternalPartMetadata(1, 5 * 1024 * 1024, 5 * 1024 * 1024, "i1")
-                ],
+                internal_parts=[InternalPartMetadata(1, 5 * 1024 * 1024, 5 * 1024 * 1024, "i1")],
             ),
         )
         await manager.add_part(
@@ -248,9 +246,7 @@ class TestSequentialPartNumbering:
                 plaintext_size=5 * 1024 * 1024,
                 ciphertext_size=5 * 1024 * 1024,
                 etag="e2",
-                internal_parts=[
-                    InternalPartMetadata(21, 5 * 1024 * 1024, 5 * 1024 * 1024, "i21")
-                ],
+                internal_parts=[InternalPartMetadata(21, 5 * 1024 * 1024, 5 * 1024 * 1024, "i21")],
             ),
         )
 
