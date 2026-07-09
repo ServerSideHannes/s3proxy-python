@@ -282,22 +282,21 @@ def _register_exception_handlers(app: FastAPI) -> None:
             "x-amz-request-id": request_id,
             "x-amz-id-2": request_id,
         }
-        # A request rejected before its body was read leaves the body bytes on
-        # the keep-alive connection, and the client's next request on it gets a
-        # raw uvicorn 400. Drain small bodies; tell the client to reconnect
-        # rather than slurping multi-GB ones.
+        # A small request rejected before its body was read can leave the body
+        # bytes unconsumed on the keep-alive connection, and the client's next
+        # request on it gets a raw uvicorn 400 (e.g. AbortMultipartUpload after
+        # a rejected UploadPart). Drain small bodies so the connection stays
+        # clean. Large bodies are left alone: uvicorn discards them after the
+        # response, and closing the connection instead resets clients that
+        # finish sending before they read (presigned PUT uploaders).
         if request.method in ("PUT", "POST"):
             try:
                 content_length = int(request.headers.get("content-length", "0"))
             except ValueError:
                 content_length = 0
-            if content_length > concurrency.MAX_BUFFER_SIZE:
-                headers["connection"] = "close"
-            elif content_length > 0:
-                try:
+            if 0 < content_length <= concurrency.MAX_BUFFER_SIZE:
+                with contextlib.suppress(Exception):
                     await request.body()
-                except Exception:
-                    headers["connection"] = "close"
         return Response(
             content=error_xml,
             status_code=exc.status_code,
