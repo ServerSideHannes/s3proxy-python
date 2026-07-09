@@ -3,7 +3,12 @@
 import structlog
 from structlog.stdlib import BoundLogger
 
-from ..crypto import MAX_INTERNAL_PARTS_PER_CLIENT, validate_internal_part_allocation
+from ..crypto import (
+    MAX_INTERNAL_PARTS_PER_CLIENT,
+    S3_MAX_PART_NUMBER,
+    allocate_client_internal_range,
+    internal_part_range,
+)
 from ..errors import S3Error
 from .models import (
     MultipartUploadState,
@@ -231,43 +236,109 @@ class MultipartStateManager:
         internal part numbers to avoid conflicts.
         """
         if client_part_number > 0:
-            try:
-                start, end = validate_internal_part_allocation(client_part_number, count)
-            except ValueError as e:
-                logger.error(
-                    "INTERNAL_PART_ALLOCATION_REJECTED",
-                    bucket=bucket,
-                    key=key,
-                    client_part=client_part_number,
-                    requested=count,
-                    max_per_client=MAX_INTERNAL_PARTS_PER_CLIENT,
-                    error=str(e),
-                )
-                raise S3Error.invalid_part(str(e)) from e
+            sk = self._storage_key(bucket, key, upload_id)
+            start = 1
+            end = 1
+            allocation_mode = "sparse"
+            dense_at_alloc = True
 
-            if count > MAX_INTERNAL_PARTS_PER_CLIENT:
-                logger.warning(
-                    "INTERNAL_PARTS_EXCEED_RANGE",
-                    bucket=bucket,
-                    key=key,
-                    client_part=client_part_number,
-                    requested=count,
-                    max=MAX_INTERNAL_PARTS_PER_CLIENT,
+            def updater(data: bytes) -> bytes:
+                nonlocal start, end, allocation_mode, dense_at_alloc
+                state = deserialize_upload_state(data)
+                if state is None:
+                    raise StateMissingError(f"Upload state corrupted for {bucket}/{key}")
+
+                sparse_start, sparse_end = internal_part_range(client_part_number, count)
+                dense_at_alloc = state.dense_single_internal
+                if count > 1 and state.dense_single_internal:
+                    state.dense_single_internal = False
+                    logger.info(
+                        "DENSE_SINGLE_INTERNAL_DISABLED",
+                        bucket=bucket,
+                        key=key,
+                        upload_id=self._truncate_id(upload_id),
+                        client_part=client_part_number,
+                        requested=count,
+                        sparse_range=f"{sparse_start}-{sparse_end}",
+                    )
+
+                try:
+                    start, end = allocate_client_internal_range(
+                        client_part_number,
+                        count,
+                        dense_single_internal=state.dense_single_internal,
+                    )
+                except ValueError as e:
+                    logger.error(
+                        "INTERNAL_PART_ALLOCATION_REJECTED",
+                        bucket=bucket,
+                        key=key,
+                        upload_id=self._truncate_id(upload_id),
+                        client_part=client_part_number,
+                        requested=count,
+                        dense_single_internal=dense_at_alloc,
+                        sparse_range=f"{sparse_start}-{sparse_end}",
+                        dense_range=f"{client_part_number}-{client_part_number}"
+                        if count == 1
+                        else None,
+                        max_per_client=MAX_INTERNAL_PARTS_PER_CLIENT,
+                        error=str(e),
+                    )
+                    raise
+
+                if count > MAX_INTERNAL_PARTS_PER_CLIENT and not state.dense_single_internal:
+                    logger.warning(
+                        "INTERNAL_PARTS_EXCEED_RANGE",
+                        bucket=bucket,
+                        key=key,
+                        client_part=client_part_number,
+                        requested=count,
+                        max=MAX_INTERNAL_PARTS_PER_CLIENT,
+                    )
+
+                allocation_mode = (
+                    "dense"
+                    if dense_at_alloc and count == 1 and start == client_part_number
+                    else "sparse"
                 )
+
+                return serialize_upload_state(state)
+
+            try:
+                result = await self._store.update(sk, updater, self._ttl)
+            except ValueError as e:
+                raise S3Error.invalid_part(str(e)) from e
+            except StateMissingError as e:
+                raise S3Error.invalid_part(str(e)) from e
+            if result is None:
+                raise StateMissingError(f"Upload state missing for {bucket}/{key}/{upload_id}")
 
             logger.info(
                 "ALLOCATE_INTERNAL_PARTS",
                 bucket=bucket,
                 key=key,
+                upload_id=self._truncate_id(upload_id),
                 client_part=client_part_number,
                 count=count,
                 start=start,
                 end=end,
+                allocation_mode=allocation_mode,
+                dense_single_internal=dense_at_alloc and count == 1,
             )
+            if client_part_number >= 500:
+                logger.warning(
+                    "HIGH_CLIENT_PART_ALLOCATED",
+                    bucket=bucket,
+                    key=key,
+                    upload_id=self._truncate_id(upload_id),
+                    client_part=client_part_number,
+                    internal_start=start,
+                    allocation_mode=allocation_mode,
+                )
             return start
 
         # Fallback: sequential allocation
-        return await self._allocate_sequential(bucket, key, upload_id, count)
+        return await self._allocate_sequential_checked(bucket, key, upload_id, count)
 
     async def _allocate_sequential(self, bucket: str, key: str, upload_id: str, count: int) -> int:
         """Allocate internal parts sequentially (fallback when no client part)."""
@@ -281,6 +352,12 @@ class MultipartStateManager:
                 return data
 
             start = state.next_internal_part_number
+            end = start + count - 1
+            if end > S3_MAX_PART_NUMBER:
+                raise ValueError(
+                    f"upload needs internal parts {start}-{end} "
+                    f"but S3 allows at most {S3_MAX_PART_NUMBER}"
+                )
             state.next_internal_part_number = start + count
 
             logger.debug(
@@ -304,6 +381,23 @@ class MultipartStateManager:
             return 1
 
         return start
+
+    async def _allocate_sequential_checked(
+        self, bucket: str, key: str, upload_id: str, count: int
+    ) -> int:
+        """Sequential allocation with S3 part-number ceiling enforcement."""
+        try:
+            return await self._allocate_sequential(bucket, key, upload_id, count)
+        except ValueError as e:
+            logger.error(
+                "INTERNAL_PART_ALLOCATION_REJECTED",
+                bucket=bucket,
+                key=key,
+                upload_id=self._truncate_id(upload_id),
+                requested=count,
+                error=str(e),
+            )
+            raise S3Error.invalid_part(str(e)) from e
 
     async def set_deferred_copy_tail(
         self,

@@ -41,6 +41,7 @@ class _RecordingHandler:
     handle_list_objects = _record("v2")
     forward_request = _record("forward")
     handle_get_bucket_location = _record("location")
+    handle_get_bucket_versioning = _record("versioning")
     handle_list_buckets = _record("list_buckets")
 
 
@@ -68,7 +69,7 @@ def test_v2_list_still_routes_to_v2():
 
 def test_subresource_get_still_forwards():
     assert _route("GET", "/bkt", "acl") == "forward"
-    assert _route("GET", "/bkt", "versioning") == "forward"
+    assert _route("GET", "/bkt", "versioning") == "versioning"
     assert _route("GET", "/bkt", "location") == "location"
 
 

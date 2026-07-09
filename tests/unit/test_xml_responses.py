@@ -151,6 +151,16 @@ class TestLocationConstraint:
         assert root.text == "ap-northeast-1"
 
 
+class TestBucketVersioning:
+    """Test GetBucketVersioning XML."""
+
+    def test_suspended_status(self):
+        xml = xml_responses.bucket_versioning("Suspended")
+        root = ET.fromstring(xml)
+        assert root.tag.endswith("VersioningConfiguration")
+        assert root.findtext("{http://s3.amazonaws.com/doc/2006-03-01/}Status") == "Suspended"
+
+
 class TestCopyObjectResult:
     """Test CopyObjectResult XML."""
 

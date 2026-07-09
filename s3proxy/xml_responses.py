@@ -126,6 +126,14 @@ def location_constraint(location: str | None) -> str:
     return f"{_XML_HEADER}\n<LocationConstraint {_S3_NS}>{escape(location)}</LocationConstraint>"
 
 
+def bucket_versioning(status: str = "Suspended") -> str:
+    """Build VersioningConfiguration XML for GetBucketVersioning."""
+    return f"""{_XML_HEADER}
+<VersioningConfiguration {_S3_NS}>
+    <Status>{escape(status)}</Status>
+</VersioningConfiguration>"""
+
+
 def copy_result(etag: str, last_modified: str, is_part: bool = False) -> str:
     """Build CopyObjectResult or CopyPartResult XML."""
     tag = "CopyPartResult" if is_part else "CopyObjectResult"

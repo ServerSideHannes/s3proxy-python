@@ -16,6 +16,7 @@ QUERY_UPLOAD_ID = "uploadId"
 QUERY_PART_NUMBER = "partNumber"
 QUERY_LIST_TYPE = "list-type"
 QUERY_LOCATION = "location"
+QUERY_VERSIONING = "versioning"
 QUERY_DELETE = "delete"
 QUERY_TAGGING = "tagging"
 
@@ -153,7 +154,16 @@ class RequestDispatcher:
         if QUERY_LOCATION in query and method == METHOD_GET:
             return await self.handler.handle_get_bucket_location(request, creds)
 
-        skip_queries = (QUERY_LIST_TYPE, QUERY_DELETE, QUERY_UPLOADS, QUERY_LOCATION)
+        if QUERY_VERSIONING in query and method == METHOD_GET:
+            return await self.handler.handle_get_bucket_versioning(request, creds)
+
+        skip_queries = (
+            QUERY_LIST_TYPE,
+            QUERY_DELETE,
+            QUERY_UPLOADS,
+            QUERY_LOCATION,
+            QUERY_VERSIONING,
+        )
         if query and not any(q in query for q in skip_queries):
             # A GET whose query is only listing params is ListObjects V1 (it lacks
             # list-type=2), not a bucket sub-resource. Fall through to the list

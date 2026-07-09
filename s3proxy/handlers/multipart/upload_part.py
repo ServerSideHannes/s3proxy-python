@@ -142,7 +142,8 @@ class UploadPartMixin(BaseHandler):
                 upload_path="framed" if use_framed else "buffered",
             )
 
-            # Allocate internal part numbers
+            # Per-client allocation: dense 1:1 for all-5MB uploads (ClickHouse 600+
+            # parts), sparse ranges once a client part needs multiple internals (Scylla).
             internal_part_start = await self.multipart_manager.allocate_internal_parts(
                 bucket,
                 key,
