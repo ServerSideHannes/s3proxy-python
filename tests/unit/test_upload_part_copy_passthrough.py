@@ -386,7 +386,12 @@ def _build_scylla_prod_shape_source(
 async def test_scylla_prod_shape_range_smaller_than_metadata_uses_passthrough(
     mock_s3, settings, manager, credentials, monkeypatch
 ):
-    """Regression: prod range ends mid internal frame → hybrid passthrough + tail."""
+    """Regression: prod range ends mid internal frame → hybrid passthrough + deferred tail.
+
+    Two-part complete (part 2 consumes tail, no EntityTooSmall) is covered by
+    test_two_part_hybrid_defer_tail_completes_fast — the full prod-shape two-part
+    path OOMs CI runners (~5GB mock source).
+    """
     monkeypatch.setattr(crypto, "COPY_INTERNAL_PART_SIZE", crypto.MAX_BUFFER_SIZE)
     handler = _copy_handler(settings, manager)
     _patch_client(handler, mock_s3)
@@ -613,107 +618,6 @@ async def test_two_part_hybrid_defer_tail_completes_fast(
     ).encode()
     complete_req = MagicMock()
     complete_req.url.path = f"/{BUCKET}/sst/small-Data.db.sm_manifest"
-    complete_req.url.query = f"uploadId={upload_id}"
-    complete_req.headers = {}
-    complete_req.body = AsyncMock(return_value=complete_body)
-    await handler.handle_complete_multipart_upload(complete_req, credentials)
-
-
-@pytest.mark.slow
-@pytest.mark.asyncio
-async def test_scylla_two_part_hybrid_passthrough_completes(
-    mock_s3, settings, manager, credentials, monkeypatch
-):
-    """Part 1 hybrid passthrough defers sub-5MB tail; part 2 completes without EntityTooSmall."""
-    monkeypatch.setattr(crypto, "COPY_INTERNAL_PART_SIZE", crypto.MAX_BUFFER_SIZE)
-    handler = _handler(settings, mock_s3, credentials)
-    await mock_s3.create_bucket(BUCKET)
-
-    kid, kek = settings.keyring.key_for(credentials.access_key)
-    prod_range_end = 4_999_341_931
-    chunk_size = (50 * 1024 * 1024) // 6
-    num_parts = (prod_range_end // chunk_size) + 2
-    src_plaintext_len = chunk_size * num_parts
-    # Keep part 2 large enough for streaming (>32MB) but not prod-scale (~1.3GB).
-    part2_plaintext = crypto.STREAMING_THRESHOLD + 16 * 1024 * 1024
-    inflate_ratio = (prod_range_end + 1 + part2_plaintext) / src_plaintext_len
-    src_dek, src_plaintext, ciphertext_blob, src_meta, inflated_total, _ = (
-        _build_scylla_prod_shape_source(
-            kid,
-            kek,
-            num_internal_parts=num_parts,
-            metadata_inflate_ratio=inflate_ratio,
-            chunk_size=chunk_size,
-            scylla_range_end=prod_range_end,
-        )
-    )
-    assert inflated_total > prod_range_end
-    assert inflated_total - prod_range_end - 1 >= crypto.STREAMING_THRESHOLD
-
-    await mock_s3.put_object(BUCKET, "sst/big-Data.db", ciphertext_blob)
-    await save_multipart_metadata(mock_s3, BUCKET, "sst/big-Data.db", src_meta)
-
-    resp_create = await mock_s3.create_multipart_upload(BUCKET, "sst/big-Data.db.sm_manifest")
-    upload_id = resp_create["UploadId"]
-    await handler.multipart_manager.create_upload(
-        BUCKET, "sst/big-Data.db.sm_manifest", upload_id, src_dek, kid
-    )
-
-    part1_range = f"bytes=0-{prod_range_end}"
-    resp1 = await handler.handle_upload_part_copy(
-        _copy_part_request(
-            f"/{BUCKET}/sst/big-Data.db.sm_manifest",
-            f"/{BUCKET}/sst/big-Data.db",
-            upload_id,
-            part_number=1,
-            copy_source_range=part1_range,
-        ),
-        credentials,
-    )
-    await _read(resp1)
-
-    after_part1 = await handler.multipart_manager.get_upload(
-        BUCKET, "sst/big-Data.db.sm_manifest", upload_id
-    )
-    assert after_part1.deferred_copy_tail
-    assert len(after_part1.deferred_copy_tail) < crypto.MIN_PART_SIZE
-
-    part2_start = prod_range_end + 1
-    part2_range = f"bytes={part2_start}-{inflated_total - 1}"
-    resp2 = await handler.handle_upload_part_copy(
-        _copy_part_request(
-            f"/{BUCKET}/sst/big-Data.db.sm_manifest",
-            f"/{BUCKET}/sst/big-Data.db",
-            upload_id,
-            part_number=2,
-            copy_source_range=part2_range,
-        ),
-        credentials,
-    )
-    await _read(resp2)
-
-    after_part2 = await handler.multipart_manager.get_upload(
-        BUCKET, "sst/big-Data.db.sm_manifest", upload_id
-    )
-    assert not after_part2.deferred_copy_tail
-    assert 1 in after_part2.parts and 2 in after_part2.parts
-
-    all_internal = []
-    for pn in sorted(after_part2.parts):
-        all_internal.extend(after_part2.parts[pn].internal_parts)
-    all_internal.sort(key=lambda ip: ip.internal_part_number)
-    assert len(all_internal) >= 2
-    for ip in all_internal[:-1]:
-        assert ip.plaintext_size >= crypto.MIN_PART_SIZE
-
-    complete_body = (
-        "<CompleteMultipartUpload>"
-        f'<Part><PartNumber>1</PartNumber><ETag>"{after_part2.parts[1].etag}"</ETag></Part>'
-        f'<Part><PartNumber>2</PartNumber><ETag>"{after_part2.parts[2].etag}"</ETag></Part>'
-        "</CompleteMultipartUpload>"
-    ).encode()
-    complete_req = MagicMock()
-    complete_req.url.path = f"/{BUCKET}/sst/big-Data.db.sm_manifest"
     complete_req.url.query = f"uploadId={upload_id}"
     complete_req.headers = {}
     complete_req.body = AsyncMock(return_value=complete_body)
