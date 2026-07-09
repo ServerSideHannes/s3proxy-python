@@ -6,7 +6,7 @@ from contextvars import ContextVar
 from typing import Any
 from urllib.parse import parse_qs
 
-_request_ctx: ContextVar[dict[str, Any]] = ContextVar("s3proxy_request_ctx", default={})
+_request_ctx: ContextVar[dict[str, Any] | None] = ContextVar("s3proxy_request_ctx", default=None)
 
 
 def bind_request(
@@ -39,4 +39,4 @@ def clear_request() -> None:
 
 
 def get_request_context() -> dict[str, Any]:
-    return dict(_request_ctx.get())
+    return dict(_request_ctx.get() or {})

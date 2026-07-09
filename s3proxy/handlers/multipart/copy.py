@@ -2,22 +2,25 @@
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import math
 import os
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import quote
 
 import structlog
+from botocore.exceptions import ClientError
 from fastapi import Request, Response
+from fastapi.responses import StreamingResponse
 from structlog.stdlib import BoundLogger
 
 from ... import concurrency, crypto, xml_responses
 from ...client import S3Client, S3Credentials
-from ...errors import S3Error
+from ...errors import S3Error, raise_for_client_error, raise_for_exception
 from ...state import (
     InternalPartMetadata,
     MultipartMetadata,
@@ -38,6 +41,19 @@ logger: BoundLogger = structlog.get_logger(__name__)
 # read buffers outside the governor if reservation is released before upload.
 MAX_PARALLEL_COPY_PIPELINES = int(os.environ.get("S3PROXY_MAX_PARALLEL_COPIES", "2"))
 _copy_pipeline_semaphore = asyncio.Semaphore(MAX_PARALLEL_COPY_PIPELINES)
+
+# A multi-GB UploadPartCopy can take longer than the client's idle timeout
+# (rclone in scylla-manager-agent gives up after 5 minutes with no response
+# bytes). Like AWS S3, commit to 200 OK and trickle whitespace while the copy
+# runs, then send CopyPartResult -- or an <Error> document -- as the body.
+COPY_KEEPALIVE_INTERVAL = float(os.environ.get("S3PROXY_COPY_KEEPALIVE_INTERVAL", "5"))
+
+# Backend UploadPartCopy calls per passthrough copy run concurrently; a 4.7GB
+# Scylla part is ~570 x 8.33MB segments and sequential calls alone can exceed
+# the client timeout.
+PASSTHROUGH_SEGMENT_CONCURRENCY = int(
+    os.environ.get("S3PROXY_PASSTHROUGH_SEGMENT_CONCURRENCY", "8")
+)
 
 
 def reset_copy_pipeline_semaphore(limit: int | None = None) -> None:
@@ -139,13 +155,56 @@ class CopyPartMixin(BaseHandler):
                 passthrough_blocked_reason=passthrough_block,
             )
 
-            if plaintext_size <= crypto.STREAMING_THRESHOLD:
-                # Small copies buffer the whole object + re-encrypt it; gate them
-                # by the limiter too (they carry no body, so the request-level
-                # reservation was ~nothing and a small-object flood ran unbounded).
+        # Validation and routing are done with real HTTP status semantics; the
+        # copy work itself runs while the response streams keepalive whitespace,
+        # so a copy that outlives the client's idle timeout still succeeds.
+        async def run_copy() -> bytes:
+            async with self._client(creds) as work_client:
+                if plaintext_size <= crypto.STREAMING_THRESHOLD:
+                    # Small copies buffer the whole object + re-encrypt it; gate
+                    # them by the limiter too (they carry no body, so the
+                    # request-level reservation was ~nothing and a small-object
+                    # flood ran unbounded).
+                    if passthrough_block is None:
+                        resp = await self._gated_passthrough_copy_part(
+                            work_client,
+                            bucket,
+                            key,
+                            upload_id,
+                            part_num,
+                            state,
+                            src_bucket,
+                            src_key,
+                            copy_source,
+                            head_resp,
+                            src_metadata,
+                            src_wrapped_dek,
+                            src_multipart_meta,
+                            plaintext_size,
+                            copy_source_range,
+                        )
+                        return resp.body
+                    peak = crypto.copy_pipeline_peak(plaintext_size)
+                    async with concurrency.reserve_copy_memory(peak):
+                        resp = await self._simple_copy_part(
+                            work_client,
+                            bucket,
+                            key,
+                            upload_id,
+                            part_num,
+                            state,
+                            src_bucket,
+                            src_key,
+                            copy_source_range,
+                            head_resp,
+                            src_metadata,
+                            src_wrapped_dek,
+                            src_multipart_meta,
+                        )
+                        return resp.body
                 if passthrough_block is None:
-                    return await self._gated_passthrough_copy_part(
-                        client,
+                    resp = await self._gated_passthrough_copy_part(
+                        work_client,
                         bucket,
                         key,
                         upload_id,
@@ -161,26 +220,9 @@ class CopyPartMixin(BaseHandler):
                         plaintext_size,
                         copy_source_range,
                     )
-                peak = crypto.copy_pipeline_peak(plaintext_size)
-                async with concurrency.reserve_copy_memory(peak):
-                    return await self._simple_copy_part(
-                        client,
-                        bucket,
-                        key,
-                        upload_id,
-                        part_num,
-                        state,
-                        src_bucket,
-                        src_key,
-                        copy_source_range,
-                        head_resp,
-                        src_metadata,
-                        src_wrapped_dek,
-                        src_multipart_meta,
-                    )
-            if passthrough_block is None:
-                return await self._gated_passthrough_copy_part(
-                    client,
+                    return resp.body
+                resp = await self._streaming_copy_part(
+                    work_client,
                     bucket,
                     key,
                     upload_id,
@@ -188,30 +230,93 @@ class CopyPartMixin(BaseHandler):
                     state,
                     src_bucket,
                     src_key,
-                    copy_source,
-                    head_resp,
-                    src_metadata,
+                    copy_source_range,
                     src_wrapped_dek,
                     src_multipart_meta,
+                    head_resp,
+                    src_metadata,
                     plaintext_size,
-                    copy_source_range,
                 )
-            return await self._streaming_copy_part(
-                client,
-                bucket,
-                key,
-                upload_id,
-                part_num,
-                state,
-                src_bucket,
-                src_key,
-                copy_source_range,
-                src_wrapped_dek,
-                src_multipart_meta,
-                head_resp,
-                src_metadata,
-                plaintext_size,
-            )
+                return resp.body
+
+        return StreamingResponse(
+            self._keepalive_copy_stream(run_copy(), bucket=bucket, key=key, part_num=part_num),
+            media_type="application/xml",
+        )
+
+    async def _keepalive_copy_stream(
+        self,
+        work: Coroutine[None, None, bytes],
+        *,
+        bucket: str,
+        key: str,
+        part_num: int,
+    ) -> AsyncIterator[bytes]:
+        """Run the copy while trickling whitespace, then emit the result XML.
+
+        Cancels the copy if the client disconnects, so an abandoned request does
+        not keep burning memory budget and backend bandwidth as a zombie.
+        """
+        task = asyncio.create_task(work)
+        start = time.monotonic()
+        keepalives = 0
+        try:
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=COPY_KEEPALIVE_INTERVAL)
+                if done:
+                    break
+                keepalives += 1
+                yield b" "
+            try:
+                body = task.result()
+            except Exception as e:
+                code, message = self._copy_failure_code_message(e, bucket, key)
+                logger.error(
+                    "UPLOAD_PART_COPY_FAILED_AFTER_200",
+                    bucket=bucket,
+                    key=key,
+                    part_num=part_num,
+                    error_code=code,
+                    error=message,
+                    keepalives=keepalives,
+                    elapsed_sec=f"{time.monotonic() - start:.2f}s",
+                )
+                yield xml_responses.error_document(code, message).encode()
+                return
+            if keepalives:
+                logger.info(
+                    "UPLOAD_PART_COPY_KEEPALIVE",
+                    bucket=bucket,
+                    key=key,
+                    part_num=part_num,
+                    keepalives=keepalives,
+                    elapsed_sec=f"{time.monotonic() - start:.2f}s",
+                )
+            yield xml_responses.without_xml_declaration(body.decode()).encode()
+        finally:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(BaseException):
+                    await task
+                logger.warning(
+                    "UPLOAD_PART_COPY_CLIENT_GONE",
+                    bucket=bucket,
+                    key=key,
+                    part_num=part_num,
+                    keepalives=keepalives,
+                    elapsed_sec=f"{time.monotonic() - start:.2f}s",
+                )
+
+    def _copy_failure_code_message(self, exc: Exception, bucket: str, key: str) -> tuple[str, str]:
+        """Map a copy failure to an S3 error code/message for the 200-body Error."""
+        if isinstance(exc, S3Error):
+            return exc.code, exc.message
+        try:
+            if isinstance(exc, ClientError):
+                raise_for_client_error(exc, bucket, key)
+            raise_for_exception(exc)
+        except S3Error as mapped:
+            return mapped.code, mapped.message
 
     def _copy_plaintext_size(
         self,
@@ -646,7 +751,7 @@ class CopyPartMixin(BaseHandler):
             copy_range = f"bytes={seg.ct_offset}-{ct_end}"
             part_reserve = crypto.copy_passthrough_segment_peak(seg.plaintext_size)
             async with concurrency.reserve_copy_memory(part_reserve):
-                resp = await client.upload_part_copy(
+                await client.upload_part_copy(
                     bucket,
                     key,
                     upload_id,
@@ -692,16 +797,15 @@ class CopyPartMixin(BaseHandler):
             client_part_number=0,
         )
 
-        internal_parts: list[InternalPartMetadata] = []
-        total_plaintext = 0
-        total_ciphertext = 0
+        start = time.monotonic()
+        segment_sem = asyncio.Semaphore(PASSTHROUGH_SEGMENT_CONCURRENCY)
 
-        for i, seg in enumerate(segments):
-            internal_num = internal_part_start + i
+        async def copy_segment(idx: int, seg: _CiphertextSegment) -> InternalPartMetadata:
+            internal_num = internal_part_start + idx
             ct_end = seg.ct_offset + seg.ciphertext_size - 1
             copy_range = f"bytes={seg.ct_offset}-{ct_end}"
             part_reserve = crypto.copy_passthrough_segment_peak(seg.plaintext_size)
-            async with concurrency.reserve_copy_memory(part_reserve):
+            async with segment_sem, concurrency.reserve_copy_memory(part_reserve):
                 resp = await client.upload_part_copy(
                     bucket,
                     key,
@@ -710,19 +814,16 @@ class CopyPartMixin(BaseHandler):
                     copy_source_path,
                     copy_source_range=copy_range,
                 )
-            etag_part = resp["CopyPartResult"]["ETag"].strip('"')
-            internal_parts.append(
-                InternalPartMetadata(
-                    internal_part_number=internal_num,
-                    plaintext_size=seg.plaintext_size,
-                    ciphertext_size=seg.ciphertext_size,
-                    etag=etag_part,
-                )
+            return InternalPartMetadata(
+                internal_part_number=internal_num,
+                plaintext_size=seg.plaintext_size,
+                ciphertext_size=seg.ciphertext_size,
+                etag=resp["CopyPartResult"]["ETag"].strip('"'),
             )
-            total_plaintext += seg.plaintext_size
-            total_ciphertext += seg.ciphertext_size
 
-        if streaming_tail and src_multipart_meta:
+        async def upload_tail() -> InternalPartMetadata | None:
+            if not (streaming_tail and src_multipart_meta):
+                return None
             tail_start, tail_end = streaming_tail
             tail_plaintext = await self._download_encrypted_multipart(
                 client, src_bucket, src_key, src_multipart_meta, tail_start, tail_end
@@ -732,16 +833,6 @@ class CopyPartMixin(BaseHandler):
             part_reserve = crypto.copy_chunk_peak(len(tail_plaintext))
             async with concurrency.reserve_copy_memory(part_reserve):
                 resp = await client.upload_part(bucket, key, upload_id, internal_num, tail_ct)
-            internal_parts.append(
-                InternalPartMetadata(
-                    internal_part_number=internal_num,
-                    plaintext_size=len(tail_plaintext),
-                    ciphertext_size=len(tail_ct),
-                    etag=resp["ETag"].strip('"'),
-                )
-            )
-            total_plaintext += len(tail_plaintext)
-            total_ciphertext += len(tail_ct)
             logger.info(
                 "UPLOAD_PART_COPY_PASSTHROUGH_TAIL",
                 bucket=bucket,
@@ -750,18 +841,45 @@ class CopyPartMixin(BaseHandler):
                 internal_part=internal_num,
                 tail_plaintext_mb=f"{len(tail_plaintext) / 1024 / 1024:.2f}MB",
             )
+            return InternalPartMetadata(
+                internal_part_number=internal_num,
+                plaintext_size=len(tail_plaintext),
+                ciphertext_size=len(tail_ct),
+                etag=resp["ETag"].strip('"'),
+            )
 
-        md5 = await self._md5_plaintext_from_copy_source(
-            client,
-            src_bucket,
-            src_key,
-            copy_source_range,
-            src_wrapped_dek,
-            src_multipart_meta,
-            head_resp,
-            src_metadata,
-        )
-        etag = md5.hexdigest()
+        # The synthetic-ETag MD5 pass reads the whole source; run it alongside
+        # the segment copies and the tail instead of serially after them --
+        # sequential, the three phases pushed a 4.7GB part past the client's
+        # idle timeout.
+        try:
+            async with asyncio.TaskGroup() as tg:
+                seg_tasks = [tg.create_task(copy_segment(i, seg)) for i, seg in enumerate(segments)]
+                tail_task = tg.create_task(upload_tail())
+                md5_task = tg.create_task(
+                    self._md5_plaintext_from_copy_source(
+                        client,
+                        src_bucket,
+                        src_key,
+                        copy_source_range,
+                        src_wrapped_dek,
+                        src_multipart_meta,
+                        head_resp,
+                        src_metadata,
+                    )
+                )
+        except BaseExceptionGroup as eg:
+            exc: BaseException = eg
+            while isinstance(exc, BaseExceptionGroup):
+                exc = exc.exceptions[0]
+            raise exc from eg
+
+        internal_parts = [t.result() for t in seg_tasks]
+        if (tail_part := tail_task.result()) is not None:
+            internal_parts.append(tail_part)
+        total_plaintext = sum(p.plaintext_size for p in internal_parts)
+        total_ciphertext = sum(p.ciphertext_size for p in internal_parts)
+        etag = md5_task.result().hexdigest()
         await self.multipart_manager.add_part(
             bucket,
             key,
@@ -784,6 +902,7 @@ class CopyPartMixin(BaseHandler):
             internal_parts=len(internal_parts),
             plaintext_mb=f"{total_plaintext / 1024 / 1024:.2f}MB",
             copy_source_range=copy_source_range,
+            elapsed_sec=f"{time.monotonic() - start:.2f}s",
         )
         return Response(
             content=xml_responses.upload_part_copy_result(etag, format_iso8601(datetime.now(UTC))),

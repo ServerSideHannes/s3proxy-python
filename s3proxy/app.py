@@ -25,9 +25,9 @@ from . import concurrency
 from .client import SigV4Verifier
 from .config import Settings
 from .errors import S3Error, get_s3_error_code
-from .request_context import get_request_context
 from .handlers import S3ProxyHandler
 from .handlers.base import close_http_client
+from .request_context import get_request_context
 from .request_handler import handle_proxy_request
 from .state import MultipartStateManager, close_redis, create_state_store, init_redis
 

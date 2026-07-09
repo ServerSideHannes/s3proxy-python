@@ -370,3 +370,21 @@ def get_tagging(tags: list[dict]) -> str:
 
 def upload_part_copy_result(etag: str, last_modified: str) -> str:
     return copy_result(etag, last_modified, is_part=True)
+
+
+def without_xml_declaration(xml: str) -> str:
+    """Strip the <?xml?> declaration so the document stays well-formed when
+    keepalive whitespace has already been sent before it (a declaration is only
+    legal at byte 0 of the entity)."""
+    if xml.startswith("<?xml"):
+        return xml.split("?>", 1)[1].lstrip("\n")
+    return xml
+
+
+def error_document(code: str, message: str) -> str:
+    """Error body emitted after a 200 OK was already committed (AWS S3 pattern
+    for long-running copies); no declaration for the same reason as above."""
+    return f"""<Error>
+    <Code>{escape(code)}</Code>
+    <Message>{escape(message)}</Message>
+</Error>"""

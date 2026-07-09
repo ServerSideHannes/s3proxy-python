@@ -123,7 +123,7 @@ async def test_multipart_encrypted_upload_part_copy_is_server_side_passthrough(
     await manager.create_upload(BUCKET, "sst/big.db.snap", upload_id, dst_dek, kid)
 
     mark = len(mock_s3.call_history)
-    await handler.handle_upload_part_copy(
+    resp = await handler.handle_upload_part_copy(
         _copy_part_request(
             f"/{BUCKET}/sst/big.db.snap",
             f"/{BUCKET}/sst/big.db",
@@ -131,6 +131,7 @@ async def test_multipart_encrypted_upload_part_copy_is_server_side_passthrough(
         ),
         credentials,
     )
+    await _read(resp)
     during = mock_s3.call_history[mark:]
 
     assert any(c[0] == "upload_part_copy" for c in during)
@@ -204,10 +205,11 @@ async def test_upload_part_copy_passthrough_roundtrips_via_get(
     )
     upload_id = _extract_upload_id(create_resp.body)
 
-    await handler.handle_upload_part_copy(
+    copy_resp = await handler.handle_upload_part_copy(
         _copy_part_request(f"/{BUCKET}/sst/dest.db", f"/{BUCKET}/sst/source.db", upload_id),
         credentials,
     )
+    await _read(copy_resp)
 
     part_state = await handler.multipart_manager.get_upload(BUCKET, "sst/dest.db", upload_id)
     complete_body = (
@@ -269,7 +271,7 @@ async def test_range_copy_still_reencrypts(mock_s3, settings, manager, credentia
     req.headers["x-amz-copy-source-range"] = f"bytes=0-{crypto.MAX_BUFFER_SIZE - 1}"
 
     mark = len(mock_s3.call_history)
-    await handler.handle_upload_part_copy(req, credentials)
+    await _read(await handler.handle_upload_part_copy(req, credentials))
     during = mock_s3.call_history[mark:]
 
     assert not any(c[0] == "upload_part_copy" for c in during)
@@ -415,7 +417,7 @@ async def test_scylla_prod_shape_range_smaller_than_metadata_uses_passthrough(
 
     scylla_range = f"bytes=0-{range_end}"
     mark = len(mock_s3.call_history)
-    await handler.handle_upload_part_copy(
+    resp = await handler.handle_upload_part_copy(
         _copy_part_request(
             f"/{BUCKET}/sst/big-Data.db.sm_manifest",
             f"/{BUCKET}/sst/big-Data.db",
@@ -424,6 +426,7 @@ async def test_scylla_prod_shape_range_smaller_than_metadata_uses_passthrough(
         ),
         credentials,
     )
+    await _read(resp)
     during = mock_s3.call_history[mark:]
 
     copy_ops = [c for c in during if c[0] == "upload_part_copy"]
@@ -587,7 +590,7 @@ async def test_scylla_manifest_full_range_uses_passthrough_not_streaming(
 
     full_range = f"bytes=0-{len(src_plaintext) - 1}"
     mark = len(mock_s3.call_history)
-    await handler.handle_upload_part_copy(
+    resp = await handler.handle_upload_part_copy(
         _copy_part_request(
             f"/{BUCKET}/sst/big-Data.db.sm_manifest",
             f"/{BUCKET}/sst/big-Data.db",
@@ -596,6 +599,7 @@ async def test_scylla_manifest_full_range_uses_passthrough_not_streaming(
         ),
         credentials,
     )
+    await _read(resp)
     during = mock_s3.call_history[mark:]
 
     assert any(c[0] == "upload_part_copy" for c in during)
@@ -645,8 +649,8 @@ async def test_large_passthrough_not_blocked_by_pipeline_semaphore(
 
     handler._streaming_copy_part = blocked_streaming  # type: ignore[method-assign]
 
-    passthrough_task = asyncio.create_task(
-        handler.handle_upload_part_copy(
+    async def run_passthrough():
+        resp = await handler.handle_upload_part_copy(
             _copy_part_request(
                 f"/{BUCKET}/sst/big-Data.db.sm_manifest",
                 f"/{BUCKET}/sst/big-Data.db",
@@ -655,7 +659,9 @@ async def test_large_passthrough_not_blocked_by_pipeline_semaphore(
             ),
             credentials,
         )
-    )
+        return await _read(resp)
+
+    passthrough_task = asyncio.create_task(run_passthrough())
 
     for _ in range(200):
         if passthrough_task.done():
