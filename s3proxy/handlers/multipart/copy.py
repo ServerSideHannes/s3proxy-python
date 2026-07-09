@@ -751,7 +751,7 @@ class CopyPartMixin(BaseHandler):
             copy_range = f"bytes={seg.ct_offset}-{ct_end}"
             part_reserve = crypto.copy_passthrough_segment_peak(seg.plaintext_size)
             async with concurrency.reserve_copy_memory(part_reserve):
-                await client.upload_part_copy(
+                resp = await client.upload_part_copy(
                     bucket,
                     key,
                     upload_id,
