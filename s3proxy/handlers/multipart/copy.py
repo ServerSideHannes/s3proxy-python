@@ -751,7 +751,7 @@ class CopyPartMixin(BaseHandler):
             copy_range = f"bytes={seg.ct_offset}-{ct_end}"
             part_reserve = crypto.copy_passthrough_segment_peak(seg.plaintext_size)
             async with concurrency.reserve_copy_memory(part_reserve):
-                await client.upload_part_copy(
+                resp = await client.upload_part_copy(
                     bucket,
                     key,
                     upload_id,
@@ -770,6 +770,9 @@ class CopyPartMixin(BaseHandler):
                 src_metadata,
             )
             etag = md5.hexdigest()
+            # Store the BACKEND part etag; CompleteMultipartUpload must present
+            # it to S3, and the synthetic plaintext etag returned to the client
+            # would be rejected there (InvalidPart).
             await self.multipart_manager.add_part(
                 bucket,
                 key,
@@ -778,7 +781,7 @@ class CopyPartMixin(BaseHandler):
                     part_number=part_num,
                     plaintext_size=seg.plaintext_size,
                     ciphertext_size=seg.ciphertext_size,
-                    etag=etag,
+                    etag=resp["CopyPartResult"]["ETag"].strip('"'),
                     md5=etag,
                 ),
             )

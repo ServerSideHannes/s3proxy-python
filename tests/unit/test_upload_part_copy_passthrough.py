@@ -673,6 +673,80 @@ async def test_large_passthrough_not_blocked_by_pipeline_semaphore(
     await passthrough_task
 
 
+@pytest.mark.asyncio
+async def test_single_segment_passthrough_complete_presents_backend_etag(
+    mock_s3, settings, credentials
+):
+    """Regression: CompleteMultipartUpload must send the BACKEND part etag to S3.
+
+    The single-segment passthrough copy returns a synthetic plaintext etag to
+    the client; forwarding that echoed etag to the backend gets InvalidPart
+    from real S3/MinIO (masked in CI for a while because the resulting 500 was
+    retried by boto3 and recovered via state reconstruction).
+    """
+    import base64
+
+    handler = _handler(settings, mock_s3, credentials)
+    await mock_s3.create_bucket(BUCKET)
+
+    kid, kek = settings.keyring.key_for(credentials.access_key)
+    plaintext = b"E" * (2 * 1024 * 1024)
+    enc = crypto.encrypt_object(plaintext, kek)
+    await mock_s3.put_object(
+        BUCKET,
+        "single/src.bin",
+        enc.ciphertext,
+        metadata={
+            settings.dektag_name: base64.b64encode(enc.wrapped_dek).decode(),
+            settings.kidtag_name: kid,
+            "plaintext-size": str(len(plaintext)),
+        },
+    )
+
+    create_resp = await handler.handle_create_multipart_upload(
+        MagicMock(url=MagicMock(path=f"/{BUCKET}/single/dst.bin"), headers={}),
+        credentials,
+    )
+    upload_id = _extract_upload_id(create_resp.body)
+
+    copy_resp = await handler.handle_upload_part_copy(
+        _copy_part_request(f"/{BUCKET}/single/dst.bin", f"/{BUCKET}/single/src.bin", upload_id),
+        credentials,
+    )
+    import xml.etree.ElementTree as ET
+
+    client_etag = ET.fromstring(await _read(copy_resp)).find("{*}ETag").text.strip('"')
+    backend_etag = mock_s3.multipart_uploads[upload_id]["Parts"][1]["ETag"]
+    assert client_etag == hashlib.md5(plaintext, usedforsecurity=False).hexdigest()
+    assert client_etag != backend_etag
+
+    sent_parts = []
+    orig_complete = mock_s3.complete_multipart_upload
+
+    async def capturing_complete(bucket, key, upload_id_, parts):
+        sent_parts.extend(parts)
+        return await orig_complete(bucket, key, upload_id_, parts)
+
+    mock_s3.complete_multipart_upload = capturing_complete
+
+    complete_req = MagicMock()
+    complete_req.url.path = f"/{BUCKET}/single/dst.bin"
+    complete_req.url.query = f"uploadId={upload_id}"
+    complete_req.headers = {}
+    complete_req.body = AsyncMock(
+        return_value=(
+            f"<CompleteMultipartUpload><Part><PartNumber>1</PartNumber>"
+            f'<ETag>"{client_etag}"</ETag></Part></CompleteMultipartUpload>'
+        ).encode()
+    )
+    await handler.handle_complete_multipart_upload(complete_req, credentials)
+
+    assert sent_parts == [{"PartNumber": 1, "ETag": f'"{backend_etag}"'}]
+
+    resp = await handler.handle_get_object(_get_request(f"/{BUCKET}/single/dst.bin"), credentials)
+    assert await _read(resp) == plaintext
+
+
 def _extract_upload_id(xml_body: bytes) -> str:
     import xml.etree.ElementTree as ET
 
