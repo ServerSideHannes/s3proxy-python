@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
-from typing import NoReturn
+from typing import Any, NoReturn
 
+import structlog
 from botocore.exceptions import ClientError
 from fastapi import HTTPException
+
+from .request_context import get_request_context
+
+logger = structlog.get_logger(__name__)
 
 # S3 Error Code mappings
 # https://docs.aws.amazon.com/AmazonS3/latest/API/ErrorResponses.html
@@ -206,6 +211,35 @@ def get_s3_error_code(status_code: int, detail: str | None = None) -> str:
     return S3_ERROR_CODES.get(status_code, "InternalError")
 
 
+def _log_upstream_failure(
+    *,
+    source: str,
+    exc: Exception,
+    bucket: str | None = None,
+    key: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    fields: dict[str, Any] = {
+        "event": "UPSTREAM_FAILURE",
+        "source": source,
+        "error_type": type(exc).__name__,
+        "error": str(exc),
+        **get_request_context(),
+    }
+    if bucket is not None:
+        fields["bucket"] = bucket
+    if key is not None:
+        fields["key"] = key
+    if extra:
+        fields.update(extra)
+    if isinstance(exc, ClientError):
+        err = exc.response.get("Error", {})
+        fields["aws_error_code"] = err.get("Code", "")
+        fields["aws_error_message"] = err.get("Message", "")
+        fields["http_status"] = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    logger.error(**fields)
+
+
 def raise_for_client_error(
     e: ClientError,
     bucket: str | None = None,
@@ -214,6 +248,7 @@ def raise_for_client_error(
     """Convert botocore ClientError to S3Error. Always raises."""
     code = e.response.get("Error", {}).get("Code", "")
     msg = e.response.get("Error", {}).get("Message", str(e))
+    _log_upstream_failure(source="client_error", exc=e, bucket=bucket, key=key)
 
     if code == "NoSuchUpload":
         raise S3Error.no_such_upload(msg) from e
@@ -227,6 +262,18 @@ def raise_for_client_error(
         raise S3Error.bucket_already_exists(bucket) from e
     if code == "BucketAlreadyOwnedByYou":
         raise S3Error.bucket_already_owned_by_you(bucket) from e
+    if code in ("InvalidPart", "InvalidPartNumber"):
+        raise S3Error.invalid_part(msg or code) from e
+    if code == "EntityTooSmall":
+        raise S3Error.entity_too_small(msg or code) from e
+    if code == "EntityTooLarge":
+        raise S3Error.entity_too_large(512) from e
+    if code in ("InvalidArgument", "MalformedXML"):
+        raise S3Error.invalid_argument(msg or code) from e
+    if code in ("RequestTimeout", "RequestTimeTooSkewed"):
+        raise S3Error.bad_request(msg or code) from e
+    if code in ("ServiceUnavailable", "SlowDown", "Throttling", "ThrottlingException"):
+        raise S3Error.slow_down(msg or code) from e
     raise S3Error.internal_error(msg) from e
 
 
@@ -234,6 +281,7 @@ def raise_for_exception(e: Exception) -> NoReturn:
     """Convert generic exception to S3Error. Always raises."""
     exc_name = type(e).__name__
     error_str = str(e)
+    _log_upstream_failure(source="exception", exc=e)
 
     # Handle NoSuchUpload that may come as a non-ClientError
     if exc_name == "NoSuchUpload" or "NoSuchUpload" in error_str:

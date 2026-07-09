@@ -262,10 +262,18 @@ class LifecycleMixin(BaseHandler):
                             }
                         )
                 else:
+                    # Use the stored backend etag, not the client-echoed one:
+                    # single-segment passthrough copies return a synthetic
+                    # plaintext etag to the client that S3 would reject.
+                    etag = (
+                        f'"{part_meta.etag}"'
+                        if not part_meta.etag.startswith('"')
+                        else part_meta.etag
+                    )
                     s3_parts.append(
                         {
                             "PartNumber": client_part_num,
-                            "ETag": cp["ETag"],
+                            "ETag": etag,
                         }
                     )
             else:

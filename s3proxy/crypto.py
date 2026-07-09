@@ -41,6 +41,8 @@ MAX_BUFFER_SIZE = 8 * 1024 * 1024  # 8 MB per internal part
 # part (see state.manager), so a single client part may not expand into more
 # than this many internal parts without colliding into the next part's range.
 MAX_INTERNAL_PARTS_PER_CLIENT = 20
+# S3 multipart uploads allow at most 10,000 parts (AWS API limit).
+S3_MAX_PART_NUMBER = 10_000
 
 # Server-side copies use a FIXED internal part size instead of object_size/20.
 # A large single-part copy (Scylla dedup copies a 4.7GB SSTable as one
@@ -160,6 +162,28 @@ def calculate_optimal_part_size(content_length: int) -> int:
         decision="use_default",
     )
     return PART_SIZE
+
+
+def internal_part_range(client_part_number: int, count: int) -> tuple[int, int]:
+    """Inclusive internal part number range reserved for one client part."""
+    start = (client_part_number - 1) * MAX_INTERNAL_PARTS_PER_CLIENT + 1
+    return start, start + count - 1
+
+
+def validate_internal_part_allocation(client_part_number: int, count: int) -> tuple[int, int]:
+    """Return (start, end) or raise if the range exceeds S3's part-number ceiling."""
+    start, end = internal_part_range(client_part_number, count)
+    if end > S3_MAX_PART_NUMBER:
+        raise ValueError(
+            f"client part {client_part_number} needs internal parts {start}-{end} "
+            f"but S3 allows at most {S3_MAX_PART_NUMBER}"
+        )
+    if count > MAX_INTERNAL_PARTS_PER_CLIENT:
+        raise ValueError(
+            f"client part {client_part_number} needs {count} internal parts "
+            f"but at most {MAX_INTERNAL_PARTS_PER_CLIENT} are allowed per client part"
+        )
+    return start, end
 
 
 def memory_bounded_part_size(

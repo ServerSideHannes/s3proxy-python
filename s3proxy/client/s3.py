@@ -57,7 +57,7 @@ class S3Client:
             retries={"max_attempts": 3, "mode": "adaptive"},
             max_pool_connections=100,
             connect_timeout=10,
-            read_timeout=60,
+            read_timeout=300,
         )
         self._cached_client = None
         self._client_context = None

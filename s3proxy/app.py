@@ -27,6 +27,7 @@ from .config import Settings
 from .errors import S3Error, get_s3_error_code
 from .handlers import S3ProxyHandler
 from .handlers.base import close_http_client
+from .request_context import get_request_context
 from .request_handler import handle_proxy_request
 from .state import MultipartStateManager, close_redis, create_state_store, init_redis
 
@@ -263,20 +264,44 @@ def _register_exception_handlers(app: FastAPI) -> None:
             error_code = get_s3_error_code(exc.status_code, exc.detail)
             message = exc.detail or "Unknown error"
 
+        logger.warning(
+            "S3_ERROR_RESPONSE",
+            status_code=exc.status_code,
+            error_code=error_code,
+            message=str(message),
+            **get_request_context(),
+        )
+
         error_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Error>
     <Code>{xml_escape(error_code)}</Code>
     <Message>{xml_escape(str(message))}</Message>
     <RequestId>{request_id}</RequestId>
 </Error>"""
+        headers = {
+            "x-amz-request-id": request_id,
+            "x-amz-id-2": request_id,
+        }
+        # A small request rejected before its body was read can leave the body
+        # bytes unconsumed on the keep-alive connection, and the client's next
+        # request on it gets a raw uvicorn 400 (e.g. AbortMultipartUpload after
+        # a rejected UploadPart). Drain small bodies so the connection stays
+        # clean. Large bodies are left alone: uvicorn discards them after the
+        # response, and closing the connection instead resets clients that
+        # finish sending before they read (presigned PUT uploaders).
+        if request.method in ("PUT", "POST"):
+            try:
+                content_length = int(request.headers.get("content-length", "0"))
+            except ValueError:
+                content_length = 0
+            if 0 < content_length <= concurrency.MAX_BUFFER_SIZE:
+                with contextlib.suppress(Exception):
+                    await request.body()
         return Response(
             content=error_xml,
             status_code=exc.status_code,
             media_type="application/xml",
-            headers={
-                "x-amz-request-id": request_id,
-                "x-amz-id-2": request_id,
-            },
+            headers=headers,
         )
 
 

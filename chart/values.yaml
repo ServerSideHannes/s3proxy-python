@@ -16,7 +16,9 @@ server:
   noTls: true
 
 performance:
-  memoryLimitMb: 64
+  # Governor budget per pod. Prod runs 192MB on 1Gi pods; raise if MEMORY_REJECTED
+  # appears under backup load (Scylla manifest copies + barman multipart).
+  memoryLimitMb: 128
 
 # Redis holds only transient multipart-upload state (TTL'd, deleted on
 # completion). It is NOT a durable store — losing it only forces in-flight

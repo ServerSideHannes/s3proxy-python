@@ -123,7 +123,7 @@ async def test_multipart_encrypted_upload_part_copy_is_server_side_passthrough(
     await manager.create_upload(BUCKET, "sst/big.db.snap", upload_id, dst_dek, kid)
 
     mark = len(mock_s3.call_history)
-    await handler.handle_upload_part_copy(
+    resp = await handler.handle_upload_part_copy(
         _copy_part_request(
             f"/{BUCKET}/sst/big.db.snap",
             f"/{BUCKET}/sst/big.db",
@@ -131,6 +131,7 @@ async def test_multipart_encrypted_upload_part_copy_is_server_side_passthrough(
         ),
         credentials,
     )
+    await _read(resp)
     during = mock_s3.call_history[mark:]
 
     assert any(c[0] == "upload_part_copy" for c in during)
@@ -204,10 +205,11 @@ async def test_upload_part_copy_passthrough_roundtrips_via_get(
     )
     upload_id = _extract_upload_id(create_resp.body)
 
-    await handler.handle_upload_part_copy(
+    copy_resp = await handler.handle_upload_part_copy(
         _copy_part_request(f"/{BUCKET}/sst/dest.db", f"/{BUCKET}/sst/source.db", upload_id),
         credentials,
     )
+    await _read(copy_resp)
 
     part_state = await handler.multipart_manager.get_upload(BUCKET, "sst/dest.db", upload_id)
     complete_body = (
@@ -269,7 +271,7 @@ async def test_range_copy_still_reencrypts(mock_s3, settings, manager, credentia
     req.headers["x-amz-copy-source-range"] = f"bytes=0-{crypto.MAX_BUFFER_SIZE - 1}"
 
     mark = len(mock_s3.call_history)
-    await handler.handle_upload_part_copy(req, credentials)
+    await _read(await handler.handle_upload_part_copy(req, credentials))
     during = mock_s3.call_history[mark:]
 
     assert not any(c[0] == "upload_part_copy" for c in during)
@@ -306,17 +308,34 @@ def test_segments_for_plaintext_range_selects_aligned_prefix(settings, manager):
     assert handler._segments_for_plaintext_range(segments, 0, chunk) is None
 
 
-def _build_scylla_prod_shape_source(
-    kid, kek, *, num_internal_parts: int, metadata_inflate_ratio: float
-):
-    """Prod shape: metadata total_plaintext > Scylla manifest copy range.
+def test_split_plaintext_range_allows_hybrid_tail(settings, manager):
+    from s3proxy.handlers.multipart.copy import _CiphertextSegment
 
-      Scylla uploads ~122 client parts (~6GB metadata total) but manifest copies
-    ~149 internal chunks (~4.7GB). Simulate by inflating metadata total while
-      keeping only the first ``num_internal_parts`` segments real.
-    """
+    handler = _copy_handler(settings, manager)
+    chunk = 1_048_576  # 1MB internal frames (prod uses ~8.33MB; same logic)
+    ct = chunk + 64
+    segments = [_CiphertextSegment(chunk, ct, i * ct) for i in range(10)]
+    # 9.5MB range ends mid 10th segment → 9 passthrough + tail.
+    split = handler._split_plaintext_range_on_segments(segments, 0, chunk * 10 - 1 - chunk // 2)
+    assert split is not None
+    assert len(split.passthrough_segments) == 9
+    assert split.streaming_tail == (chunk * 9, chunk * 10 - 1 - chunk // 2)
+
+
+def _build_scylla_prod_shape_source(
+    kid,
+    kek,
+    *,
+    num_internal_parts: int,
+    metadata_inflate_ratio: float,
+    chunk_size: int | None = None,
+    scylla_range_end: int | None = None,
+):
+    """Prod shape: 8.33MB internal frames, metadata total > Scylla manifest range."""
+    if chunk_size is None:
+        # 50MB client parts / 6 internal frames (prod INTERNAL_PART_UPLOADED ~8.33MB).
+        chunk_size = (50 * 1024 * 1024) // 6
     src_dek = crypto.generate_dek()
-    chunk_size = crypto.MAX_BUFFER_SIZE
     src_plaintext = b"M" * (chunk_size * num_internal_parts)
 
     ciphertext_blob = bytearray()
@@ -352,28 +371,42 @@ def _build_scylla_prod_shape_source(
         wrapped_dek=crypto.wrap_key(src_dek, kek),
         kid=kid,
     )
-    return src_dek, src_plaintext, bytes(ciphertext_blob), src_meta, inflated_total
+    return (
+        src_dek,
+        src_plaintext,
+        bytes(ciphertext_blob),
+        src_meta,
+        inflated_total,
+        scylla_range_end if scylla_range_end is not None else len(src_plaintext) - 1,
+    )
 
 
 @pytest.mark.asyncio
 async def test_scylla_prod_shape_range_smaller_than_metadata_uses_passthrough(
     mock_s3, settings, manager, credentials, monkeypatch
 ):
-    """Regression: range bytes=0-(N-1) with N < metadata total must passthrough, not stream."""
+    """Regression: prod range ends mid internal frame → hybrid passthrough + tail."""
     monkeypatch.setattr(crypto, "COPY_INTERNAL_PART_SIZE", crypto.MAX_BUFFER_SIZE)
     handler = _copy_handler(settings, manager)
     _patch_client(handler, mock_s3)
     await mock_s3.create_bucket(BUCKET)
 
     kid, kek = settings.keyring.key_for(credentials.access_key)
-    num_parts = 149  # prod manifest internal part count
-    src_dek, src_plaintext, ciphertext_blob, src_meta, inflated_total = (
+    prod_range_end = 4_999_341_931
+    chunk_size = (50 * 1024 * 1024) // 6
+    num_parts = (prod_range_end // chunk_size) + 2
+    src_dek, _, ciphertext_blob, src_meta, inflated_total, range_end = (
         _build_scylla_prod_shape_source(
-            kid, kek, num_internal_parts=num_parts, metadata_inflate_ratio=1.27
+            kid,
+            kek,
+            num_internal_parts=num_parts,
+            metadata_inflate_ratio=1.27,
+            chunk_size=chunk_size,
+            scylla_range_end=prod_range_end,
         )
     )
-    assert inflated_total > len(src_plaintext)
-    assert len(src_plaintext) > crypto.STREAMING_THRESHOLD
+    assert inflated_total > prod_range_end
+    assert prod_range_end + 1 > crypto.STREAMING_THRESHOLD
 
     await mock_s3.put_object(BUCKET, "sst/big-Data.db", ciphertext_blob)
     await save_multipart_metadata(mock_s3, BUCKET, "sst/big-Data.db", src_meta)
@@ -382,9 +415,9 @@ async def test_scylla_prod_shape_range_smaller_than_metadata_uses_passthrough(
     upload_id = resp_create["UploadId"]
     await manager.create_upload(BUCKET, "sst/big-Data.db.sm_manifest", upload_id, src_dek, kid)
 
-    scylla_range = f"bytes=0-{len(src_plaintext) - 1}"
+    scylla_range = f"bytes=0-{range_end}"
     mark = len(mock_s3.call_history)
-    await handler.handle_upload_part_copy(
+    resp = await handler.handle_upload_part_copy(
         _copy_part_request(
             f"/{BUCKET}/sst/big-Data.db.sm_manifest",
             f"/{BUCKET}/sst/big-Data.db",
@@ -393,26 +426,36 @@ async def test_scylla_prod_shape_range_smaller_than_metadata_uses_passthrough(
         ),
         credentials,
     )
+    await _read(resp)
     during = mock_s3.call_history[mark:]
 
-    assert any(c[0] == "upload_part_copy" for c in during)
-    assert not any(c[0] == "upload_part" for c in during)
+    copy_ops = [c for c in during if c[0] == "upload_part_copy"]
+    tail_ops = [c for c in during if c[0] == "upload_part"]
+    assert len(copy_ops) >= 500
+    assert len(tail_ops) == 1
 
     updated = await manager.get_upload(BUCKET, "sst/big-Data.db.sm_manifest", upload_id)
     part = updated.parts[1]
-    assert part.plaintext_size == len(src_plaintext)
-    assert len(part.internal_parts) == num_parts
+    assert part.plaintext_size == prod_range_end + 1
+    assert len(part.internal_parts) == len(copy_ops) + len(tail_ops)
 
 
 def test_prod_shape_passthrough_eligibility_and_route(settings, manager, credentials):
-    """Unit check for prod mismatch: metadata total > range plaintext, still eligible."""
+    """Unit check for prod mismatch: metadata total > range, mid-frame tail still eligible."""
     handler = _copy_handler(settings, manager)
     kid, kek = settings.keyring.key_for(credentials.access_key)
-    num_parts = 149
-    _, src_plaintext, _, src_meta, inflated_total = _build_scylla_prod_shape_source(
-        kid, kek, num_internal_parts=num_parts, metadata_inflate_ratio=1.27
+    prod_range_end = 4_999_341_931
+    chunk_size = (50 * 1024 * 1024) // 6
+    num_parts = (prod_range_end // chunk_size) + 2
+    _, _, _, src_meta, inflated_total, range_end = _build_scylla_prod_shape_source(
+        kid,
+        kek,
+        num_internal_parts=num_parts,
+        metadata_inflate_ratio=1.27,
+        chunk_size=chunk_size,
+        scylla_range_end=prod_range_end,
     )
-    scylla_range = f"bytes=0-{len(src_plaintext) - 1}"
+    scylla_range = f"bytes=0-{range_end}"
     block = handler._passthrough_block_reason(
         scylla_range,
         scylla_range,
@@ -420,11 +463,11 @@ def test_prod_shape_passthrough_eligibility_and_route(settings, manager, credent
         src_meta,
         {},
         credentials,
-        len(src_plaintext),
+        prod_range_end + 1,
         {},
     )
     assert block is None
-    assert inflated_total > len(src_plaintext)
+    assert inflated_total > prod_range_end
     assert (
         handler._normalize_copy_source_range(scylla_range, inflated_total, {}, "wrapped-dek")
         == scylla_range
@@ -547,7 +590,7 @@ async def test_scylla_manifest_full_range_uses_passthrough_not_streaming(
 
     full_range = f"bytes=0-{len(src_plaintext) - 1}"
     mark = len(mock_s3.call_history)
-    await handler.handle_upload_part_copy(
+    resp = await handler.handle_upload_part_copy(
         _copy_part_request(
             f"/{BUCKET}/sst/big-Data.db.sm_manifest",
             f"/{BUCKET}/sst/big-Data.db",
@@ -556,6 +599,7 @@ async def test_scylla_manifest_full_range_uses_passthrough_not_streaming(
         ),
         credentials,
     )
+    await _read(resp)
     during = mock_s3.call_history[mark:]
 
     assert any(c[0] == "upload_part_copy" for c in during)
@@ -605,8 +649,8 @@ async def test_large_passthrough_not_blocked_by_pipeline_semaphore(
 
     handler._streaming_copy_part = blocked_streaming  # type: ignore[method-assign]
 
-    passthrough_task = asyncio.create_task(
-        handler.handle_upload_part_copy(
+    async def run_passthrough():
+        resp = await handler.handle_upload_part_copy(
             _copy_part_request(
                 f"/{BUCKET}/sst/big-Data.db.sm_manifest",
                 f"/{BUCKET}/sst/big-Data.db",
@@ -615,7 +659,9 @@ async def test_large_passthrough_not_blocked_by_pipeline_semaphore(
             ),
             credentials,
         )
-    )
+        return await _read(resp)
+
+    passthrough_task = asyncio.create_task(run_passthrough())
 
     for _ in range(200):
         if passthrough_task.done():
@@ -625,6 +671,80 @@ async def test_large_passthrough_not_blocked_by_pipeline_semaphore(
     assert passthrough_task.done()
     assert not gate.is_set()
     await passthrough_task
+
+
+@pytest.mark.asyncio
+async def test_single_segment_passthrough_complete_presents_backend_etag(
+    mock_s3, settings, credentials
+):
+    """Regression: CompleteMultipartUpload must send the BACKEND part etag to S3.
+
+    The single-segment passthrough copy returns a synthetic plaintext etag to
+    the client; forwarding that echoed etag to the backend gets InvalidPart
+    from real S3/MinIO (masked in CI for a while because the resulting 500 was
+    retried by boto3 and recovered via state reconstruction).
+    """
+    import base64
+
+    handler = _handler(settings, mock_s3, credentials)
+    await mock_s3.create_bucket(BUCKET)
+
+    kid, kek = settings.keyring.key_for(credentials.access_key)
+    plaintext = b"E" * (2 * 1024 * 1024)
+    enc = crypto.encrypt_object(plaintext, kek)
+    await mock_s3.put_object(
+        BUCKET,
+        "single/src.bin",
+        enc.ciphertext,
+        metadata={
+            settings.dektag_name: base64.b64encode(enc.wrapped_dek).decode(),
+            settings.kidtag_name: kid,
+            "plaintext-size": str(len(plaintext)),
+        },
+    )
+
+    create_resp = await handler.handle_create_multipart_upload(
+        MagicMock(url=MagicMock(path=f"/{BUCKET}/single/dst.bin"), headers={}),
+        credentials,
+    )
+    upload_id = _extract_upload_id(create_resp.body)
+
+    copy_resp = await handler.handle_upload_part_copy(
+        _copy_part_request(f"/{BUCKET}/single/dst.bin", f"/{BUCKET}/single/src.bin", upload_id),
+        credentials,
+    )
+    import xml.etree.ElementTree as ET
+
+    client_etag = ET.fromstring(await _read(copy_resp)).find("{*}ETag").text.strip('"')
+    backend_etag = mock_s3.multipart_uploads[upload_id]["Parts"][1]["ETag"]
+    assert client_etag == hashlib.md5(plaintext, usedforsecurity=False).hexdigest()
+    assert client_etag != backend_etag
+
+    sent_parts = []
+    orig_complete = mock_s3.complete_multipart_upload
+
+    async def capturing_complete(bucket, key, upload_id_, parts):
+        sent_parts.extend(parts)
+        return await orig_complete(bucket, key, upload_id_, parts)
+
+    mock_s3.complete_multipart_upload = capturing_complete
+
+    complete_req = MagicMock()
+    complete_req.url.path = f"/{BUCKET}/single/dst.bin"
+    complete_req.url.query = f"uploadId={upload_id}"
+    complete_req.headers = {}
+    complete_req.body = AsyncMock(
+        return_value=(
+            f"<CompleteMultipartUpload><Part><PartNumber>1</PartNumber>"
+            f'<ETag>"{client_etag}"</ETag></Part></CompleteMultipartUpload>'
+        ).encode()
+    )
+    await handler.handle_complete_multipart_upload(complete_req, credentials)
+
+    assert sent_parts == [{"PartNumber": 1, "ETag": f'"{backend_etag}"'}]
+
+    resp = await handler.handle_get_object(_get_request(f"/{BUCKET}/single/dst.bin"), credentials)
+    assert await _read(resp) == plaintext
 
 
 def _extract_upload_id(xml_body: bytes) -> str:
