@@ -521,14 +521,17 @@ async def test_two_part_hybrid_defer_tail_completes_fast(
     from s3proxy.handlers.multipart import copy as copy_mod
 
     monkeypatch.setattr(copy_mod, "HYBRID_TAIL_DEFER_MIN_CLIENT_PART", 5 * 1024 * 1024)
-    monkeypatch.setattr(crypto, "COPY_INTERNAL_PART_SIZE", 2 * 1024 * 1024)
+    monkeypatch.setattr(crypto, "COPY_INTERNAL_PART_SIZE", crypto.MIN_PART_SIZE)
     handler = _handler(settings, mock_s3, credentials)
     await mock_s3.create_bucket(BUCKET)
 
     kid, kek = settings.keyring.key_for(credentials.access_key)
-    chunk = 1 * 1024 * 1024
+    chunk = 8 * 1024 * 1024
+    # Part 1 must exceed STREAMING_THRESHOLD (32MB) for hybrid passthrough; part 2
+    # must also exceed it so streaming consumes the deferred tail. Internal frames
+    # must be >= MIN_PART_SIZE so passthrough segments are valid S3 parts.
     num_segments = 12
-    part1_range_end = chunk * 8 + chunk // 2  # 8.5MB, ~0.5MB deferred tail
+    part1_range_end = chunk * 4 + chunk // 2  # 36MB, ~4MB deferred tail
     src_dek, src_plaintext, ciphertext_blob, src_meta, inflated_total, _ = (
         _build_scylla_prod_shape_source(
             kid,
