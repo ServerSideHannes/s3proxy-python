@@ -40,6 +40,7 @@ def serialize_upload_state(state: MultipartUploadState) -> bytes:
         "deferred_copy_tail": base64.b64encode(state.deferred_copy_tail).decode()
         if state.deferred_copy_tail
         else "",
+        "dense_single_internal": state.dense_single_internal,
         "parts": {
             str(pn): {
                 "part_number": p.part_number,
@@ -140,6 +141,7 @@ def deserialize_upload_state(data: bytes) -> MultipartUploadState | None:
             deferred_copy_tail=base64.b64decode(obj["deferred_copy_tail"])
             if obj.get("deferred_copy_tail")
             else b"",
+            dense_single_internal=obj.get("dense_single_internal", True),
         )
     except (KeyError, TypeError, ValueError) as e:
         logger.error(

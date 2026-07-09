@@ -6,7 +6,7 @@ from structlog.stdlib import BoundLogger
 from ..crypto import (
     MAX_INTERNAL_PARTS_PER_CLIENT,
     S3_MAX_PART_NUMBER,
-    validate_internal_part_allocation,
+    allocate_client_internal_range,
 )
 from ..errors import S3Error
 from .models import (
@@ -235,29 +235,58 @@ class MultipartStateManager:
         internal part numbers to avoid conflicts.
         """
         if client_part_number > 0:
-            try:
-                start, end = validate_internal_part_allocation(client_part_number, count)
-            except ValueError as e:
-                logger.error(
-                    "INTERNAL_PART_ALLOCATION_REJECTED",
-                    bucket=bucket,
-                    key=key,
-                    client_part=client_part_number,
-                    requested=count,
-                    max_per_client=MAX_INTERNAL_PARTS_PER_CLIENT,
-                    error=str(e),
-                )
-                raise S3Error.invalid_part(str(e)) from e
+            sk = self._storage_key(bucket, key, upload_id)
+            start = 1
+            end = 1
 
-            if count > MAX_INTERNAL_PARTS_PER_CLIENT:
-                logger.warning(
-                    "INTERNAL_PARTS_EXCEED_RANGE",
-                    bucket=bucket,
-                    key=key,
-                    client_part=client_part_number,
-                    requested=count,
-                    max=MAX_INTERNAL_PARTS_PER_CLIENT,
-                )
+            def updater(data: bytes) -> bytes:
+                nonlocal start, end
+                state = deserialize_upload_state(data)
+                if state is None:
+                    raise StateMissingError(f"Upload state corrupted for {bucket}/{key}")
+
+                if count > 1:
+                    state.dense_single_internal = False
+
+                try:
+                    start, end = allocate_client_internal_range(
+                        client_part_number,
+                        count,
+                        dense_single_internal=state.dense_single_internal,
+                    )
+                except ValueError as e:
+                    logger.error(
+                        "INTERNAL_PART_ALLOCATION_REJECTED",
+                        bucket=bucket,
+                        key=key,
+                        client_part=client_part_number,
+                        requested=count,
+                        dense_single_internal=state.dense_single_internal,
+                        max_per_client=MAX_INTERNAL_PARTS_PER_CLIENT,
+                        error=str(e),
+                    )
+                    raise
+
+                if count > MAX_INTERNAL_PARTS_PER_CLIENT and not state.dense_single_internal:
+                    logger.warning(
+                        "INTERNAL_PARTS_EXCEED_RANGE",
+                        bucket=bucket,
+                        key=key,
+                        client_part=client_part_number,
+                        requested=count,
+                        max=MAX_INTERNAL_PARTS_PER_CLIENT,
+                    )
+
+                return serialize_upload_state(state)
+
+            try:
+                result = await self._store.update(sk, updater, self._ttl)
+            except ValueError as e:
+                raise S3Error.invalid_part(str(e)) from e
+            except StateMissingError as e:
+                raise S3Error.invalid_part(str(e)) from e
+            if result is None:
+                raise StateMissingError(f"Upload state missing for {bucket}/{key}/{upload_id}")
 
             logger.info(
                 "ALLOCATE_INTERNAL_PARTS",

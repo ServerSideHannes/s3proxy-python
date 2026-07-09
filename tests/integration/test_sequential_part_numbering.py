@@ -189,11 +189,11 @@ class TestSequentialPartNumbering:
         assert state.parts[8].plaintext_size == 356864  # 0.34MB, last part OK
 
     @pytest.mark.asyncio
-    async def test_clickhouse_600_part_upload_sequential_internal_numbers(self, manager, settings):
+    async def test_clickhouse_600_part_upload_dense_internal_numbers(self, manager, settings):
         """Regression: sparse range allocation fails at client part 501 (internal 10001).
 
         ClickHouse shadow backups commonly exceed 500 x 5MB parts per tar.
-        Sequential allocation must reach part 600 as internal part 600.
+        Dense single-internal mode maps client part N → internal N.
         """
         bucket = "clickhouse-backups"
         key = "huge-backup.tar"
@@ -203,13 +203,38 @@ class TestSequentialPartNumbering:
         await manager.create_upload(bucket, key, upload_id, dek, kid="AKIAIOSFODNN7EXAMPLE")
 
         for part_num in range(1, 601):
-            start = await manager.allocate_internal_parts(bucket, key, upload_id, 1)
+            start = await manager.allocate_internal_parts(
+                bucket, key, upload_id, 1, client_part_number=part_num
+            )
             assert start == part_num, (
                 f"part {part_num} should map to internal {part_num}, got {start}"
             )
 
         state = await manager.get_upload(bucket, key, upload_id)
-        assert state.next_internal_part_number == 601
+        assert state.dense_single_internal is True
+
+    @pytest.mark.asyncio
+    async def test_scylla_multi_internal_clears_dense_mode(self, manager, settings):
+        """First multi-internal client part switches back to sparse ranges."""
+        bucket = "scylla-backups"
+        key = "big-Data.db"
+        upload_id = "test-scylla"
+
+        dek = crypto.generate_dek()
+        await manager.create_upload(bucket, key, upload_id, dek, kid="AKIAIOSFODNN7EXAMPLE")
+
+        start = await manager.allocate_internal_parts(
+            bucket, key, upload_id, 8, client_part_number=1
+        )
+        assert start == 1
+
+        state = await manager.get_upload(bucket, key, upload_id)
+        assert state.dense_single_internal is False
+
+        start2 = await manager.allocate_internal_parts(
+            bucket, key, upload_id, 1, client_part_number=2
+        )
+        assert start2 == 21
 
     @pytest.mark.asyncio
     async def test_old_behavior_with_buffer_would_fail(self, manager, settings):

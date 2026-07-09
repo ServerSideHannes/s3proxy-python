@@ -170,6 +170,22 @@ def internal_part_range(client_part_number: int, count: int) -> tuple[int, int]:
     return start, start + count - 1
 
 
+def allocate_client_internal_range(
+    client_part_number: int,
+    count: int,
+    *,
+    dense_single_internal: bool,
+) -> tuple[int, int]:
+    """Return (start, end) internal part numbers for one client part."""
+    if dense_single_internal and count == 1:
+        if client_part_number > S3_MAX_PART_NUMBER:
+            raise ValueError(
+                f"client part {client_part_number} exceeds S3 part limit {S3_MAX_PART_NUMBER}"
+            )
+        return client_part_number, client_part_number
+    return validate_internal_part_allocation(client_part_number, count)
+
+
 def validate_internal_part_allocation(client_part_number: int, count: int) -> tuple[int, int]:
     """Return (start, end) or raise if the range exceeds S3's part-number ceiling."""
     start, end = internal_part_range(client_part_number, count)

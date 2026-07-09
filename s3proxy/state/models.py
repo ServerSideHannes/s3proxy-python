@@ -52,6 +52,10 @@ class MultipartUploadState:
     total_plaintext_size: int = 0
     next_internal_part_number: int = 1  # Next S3 part number to use
     kid: str = ""  # Key id that wraps this upload's DEK ("" = default key)
+    # True while every client part uses a single internal part (e.g. 5MB ClickHouse
+    # shadow tars). Maps client part N → internal N so 600-part uploads stay under
+    # S3's 10k part limit. Cleared on the first multi-internal client part (Scylla).
+    dense_single_internal: bool = True
     # Hybrid passthrough may leave a sub-5MB plaintext suffix here when the
     # client part range ends mid internal frame but more client parts follow.
     deferred_copy_tail: bytes = b""
