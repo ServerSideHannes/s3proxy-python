@@ -33,10 +33,16 @@ class _Mgr:
 
 class _Client:
     async def upload_part(self, bucket, key, upload_id, part_number, body):
-        # aiobotocore copies the body to sign and send it; mirror that so the
+        # The backend hop is UNSIGNED-PAYLOAD with streaming bodies: the
+        # transport consumes frames without retaining them. Mirror that so the
         # measured peak reflects what the real transport holds.
-        sent = bytes(body)
-        return {"ETag": hashlib.md5(sent).hexdigest()}
+        md5 = hashlib.md5(usedforsecurity=False)
+        if isinstance(body, (bytes, bytearray)):
+            md5.update(body)
+        else:
+            async for chunk in body:
+                md5.update(chunk)
+        return {"ETag": md5.hexdigest()}
 
 
 class _Request:
@@ -87,14 +93,17 @@ async def test_reservation_bounds_real_framed_peak(mb):
     real_peak = await _measure_peak(content_length)
     reserved = estimate_memory_footprint("PUT", content_length)
 
-    # The whole point: the reservation must cover the REAL peak, not the bare
-    # part size. A bare-part-size reservation (the old behaviour) fails here.
+    # The whole point: the reservation must cover the REAL peak.
     assert reserved >= real_peak, (
         f"{mb}MB part: reserved {reserved / MB:.1f}MB < real peak "
         f"{real_peak / MB:.1f}MB -- governor under-counts, will OOM"
     )
-    # And the old under-count must be demonstrably insufficient.
-    assert crypto.memory_bounded_part_size(content_length) < real_peak
+    # Frame streaming: the real peak must stay O(frame), never O(part).
+    if crypto.memory_bounded_part_size(content_length) > crypto.FRAME_PLAINTEXT_SIZE:
+        assert real_peak <= 4 * crypto.FRAME_PLAINTEXT_SIZE, (
+            f"{mb}MB part: real peak {real_peak / MB:.1f}MB scales with part size "
+            f"-- frame streaming regressed to whole-part buffering"
+        )
 
 
 # Deployed governor budget (chart/values.yaml performance.memoryLimitMb).
@@ -119,21 +128,22 @@ def test_es_part_fits_deploy_budget_with_concurrency():
 
 
 @pytest.mark.asyncio
-async def test_scylla_50mb_signed_part_reservation_covers_transport_copy():
-    """Prod Scylla SST parts are ~50MB signed uploads with aiobotocore body copy."""
+async def test_scylla_50mb_part_peak_is_o_frame_and_covered():
+    """Prod Scylla SST parts are ~50MB uploads; frame streaming keeps the real
+    peak at a few frames and the reservation must still cover it."""
     content_length = 50 * MB
     real_peak = await _measure_peak(content_length)
     reserved = estimate_memory_footprint("PUT", content_length)
-    assert 24 * MB <= real_peak <= 40 * MB
+    assert real_peak <= 36 * MB
     assert reserved >= real_peak
     assert reserved < 40 * MB
 
 
-def test_multi_gb_content_length_capped_not_honest_peak():
-    """6.6GB Content-Length must not reserve the honest ~600MB+ signed peak."""
+def test_multi_gb_content_length_reserves_o_frame_not_o_part():
+    """6.6GB Content-Length reserves the same flat O(frame) peak as a 512MB part."""
     cl = 6_597_946_546
     honest = crypto.streaming_upload_peak(cl)
     reserved = estimate_memory_footprint("PUT", cl)
-    assert honest > 500 * MB
+    assert honest == crypto.streaming_upload_peak(512 * MB)
+    assert reserved == honest
     assert reserved < 80 * MB
-    assert reserved < honest

@@ -1,17 +1,16 @@
 """The copy reservation must bound the streaming UploadPartCopy path's REAL peak.
 
 Analogue of test_upload_reservation_vs_real.py, for the copy path. This is the
-test that would have caught the ScyllaDB backup OOM: copy_pipeline_peak()
-reserved a size-independent 32MB (4*MAX_BUFFER_SIZE) on the false premise that
-the copy "streams in MAX_BUFFER_SIZE chunks", while _pump_copy_chunks actually
-buffers a full internal part and _upload_internal_part_with_semaphore holds
-plaintext + ciphertext of that part at once, times MAX_PARALLEL_INTERNAL_UPLOADS.
-The governor therefore admitted ~6x too many concurrent copies -> OOMKilled.
+test that would have caught the ScyllaDB backup OOM: an earlier
+copy_pipeline_peak() reserved a size-independent value on a false premise about
+what the pump buffered, so the governor admitted ~6x too many concurrent
+copies -> OOMKilled. The pump now streams each internal part as sealed frames
+(FramedStreamBody), so the honest peak really is O(frame); this test keeps the
+reservation honest against the real allocation profile.
 
 It drives the ACTUAL handler method (not a re-implementation) under tracemalloc,
 so it fails if the reservation drifts below reality OR the copy path starts
-allocating more. The mock client copies the uploaded body the way aiobotocore
-does for the signed HTTP request, which is part of the real peak.
+allocating more.
 """
 
 import hashlib
@@ -71,10 +70,16 @@ class _Client:
         return {"Body": _Body(self._total, crypto.MAX_BUFFER_SIZE)}
 
     async def upload_part(self, bucket, key, upload_id, part_number, body):
-        # aiobotocore copies the body to sign and send it; mirror that so the
+        # The backend hop is UNSIGNED-PAYLOAD with streaming bodies: the
+        # transport consumes frames without retaining them. Mirror that so the
         # measured peak reflects what the real transport holds.
-        sent = bytes(body)
-        return {"ETag": hashlib.md5(sent).hexdigest()}
+        md5 = hashlib.md5(usedforsecurity=False)
+        if isinstance(body, (bytes, bytearray)):
+            md5.update(body)
+        else:
+            async for chunk in body:
+                md5.update(chunk)
+        return {"ETag": md5.hexdigest()}
 
 
 def _handler():

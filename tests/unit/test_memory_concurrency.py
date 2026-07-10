@@ -50,10 +50,9 @@ class TestMemoryFootprintEstimation:
         assert footprint == crypto.streaming_upload_peak(100 * 1024) == 400 * 1024
 
     def test_large_file_reserves_framed_peak_not_part_size(self):
-        """Large PUTs must reserve the framed path's true peak, NOT the bare
-        internal-part size -- reserving the part size under-counted ~3x and let
-        the limiter admit too many concurrent uploads (the OOM). The peak must
-        strictly exceed the part size."""
+        """Large PUTs must reserve the framed path's true peak. With frame
+        streaming that peak is O(frame) regardless of Content-Length, so every
+        multi-frame upload reserves the same flat 4*FRAME_PLAINTEXT_SIZE."""
         import s3proxy.concurrency as concurrency_module
         from s3proxy import crypto
 
@@ -63,7 +62,7 @@ class TestMemoryFootprintEstimation:
             assert footprint == crypto.governor_memory_footprint(cl)
             if mb <= 512:
                 assert footprint == crypto.streaming_upload_peak(cl)
-            assert footprint >= crypto.memory_bounded_part_size(cl)
+            assert footprint == 4 * crypto.FRAME_PLAINTEXT_SIZE
 
     def test_minimum_reservation_enforced(self):
         """0-byte file should still reserve MIN_RESERVATION (64KB)."""

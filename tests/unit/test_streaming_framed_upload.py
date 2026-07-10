@@ -48,7 +48,9 @@ async def test_framed_upload_roundtrips_and_sets_metadata():
 
     class _Client:
         async def upload_part(self, bucket, key, upload_id, part_number, body):
-            captured[part_number] = body
+            if not isinstance(body, (bytes, bytearray)):
+                body = b"".join([chunk async for chunk in body])
+            captured[part_number] = bytes(body)
             return {"ETag": f'"{part_number:032x}"'}
 
     mgr = _Manager()
@@ -85,6 +87,11 @@ async def test_framed_upload_roundtrips_and_sets_metadata():
 
 class _DiscardingClient:
     async def upload_part(self, bucket, key, upload_id, part_number, body):
+        # Consume streaming bodies chunk-by-chunk, retaining nothing, like the
+        # real (unsigned, streaming) transport.
+        if not isinstance(body, (bytes, bytearray)):
+            async for _chunk in body:
+                pass
         del body
         return {"ETag": f'"{part_number:032x}"'}
 
@@ -126,6 +133,75 @@ async def _measure_framed_peak(client_part_size: int) -> int:
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     return peak
+
+
+@pytest.mark.asyncio
+async def test_mid_part_backend_failure_surfaces_to_client():
+    """A streamed body can't be replayed by botocore: a mid-part backend
+    failure must propagate (the client re-sends the part) and must not record
+    the part in upload state."""
+
+    class _FailingClient:
+        async def upload_part(self, bucket, key, upload_id, part_number, body):
+            declared = len(body)
+            consumed = 0
+            async for chunk in body:
+                consumed += len(chunk)
+                if part_number >= 2 and consumed > declared // 2:
+                    raise ConnectionError("backend reset mid-part")
+            return {"ETag": f'"{part_number:032x}"'}
+
+    mgr = _Manager()
+    plaintext = os.urandom(30 * 1024 * 1024)
+    optimal = 12 * 1024 * 1024
+    with pytest.raises(ConnectionError):
+        await _handler(mgr)._stream_and_upload_framed(
+            _Request(plaintext),
+            _FailingClient(),
+            "b",
+            "k",
+            UPLOAD_ID,
+            1,
+            types.SimpleNamespace(dek=crypto.generate_dek()),
+            len(plaintext),
+            optimal,
+            1,
+            3,
+        )
+    assert mgr.part_meta is None
+
+
+@pytest.mark.asyncio
+async def test_body_shorter_than_content_length_is_bad_request():
+    from s3proxy.errors import S3Error
+
+    class _ConsumingClient:
+        async def upload_part(self, bucket, key, upload_id, part_number, body):
+            if not isinstance(body, (bytes, bytearray)):
+                async for _ in body:
+                    pass
+            return {"ETag": f'"{part_number:032x}"'}
+
+    mgr = _Manager()
+    plaintext = os.urandom(10 * 1024 * 1024)
+    declared = 30 * 1024 * 1024  # stream ends 20MB early
+    with pytest.raises(S3Error) as exc_info:
+        await _handler(mgr)._stream_and_upload_framed(
+            _Request(plaintext),
+            _ConsumingClient(),
+            "b",
+            "k",
+            UPLOAD_ID,
+            1,
+            types.SimpleNamespace(dek=crypto.generate_dek()),
+            declared,
+            12 * 1024 * 1024,
+            1,
+            3,
+        )
+    assert exc_info.value.status_code == 400
+    assert "ended early" in exc_info.value.message
+    assert mgr.part_meta is None
 
 
 @pytest.mark.asyncio

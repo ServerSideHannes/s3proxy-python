@@ -298,7 +298,8 @@ async def test_per_part_reserve_uses_chunk_peak_not_whole_object():
 def test_copy_chunk_peak_32mb_uses_framed_formula_not_small_buffer():
     """32MB internal parts must not hit the small-buffer 3x formula (96MB bug)."""
     peak = crypto.copy_chunk_peak(32 * MB)
-    assert peak == 88 * MB, f"32MB chunk peak should be 88MB, got {peak / MB}MB"
+    expected = 4 * crypto.FRAME_PLAINTEXT_SIZE + 2 * crypto.MAX_BUFFER_SIZE
+    assert peak == expected, f"32MB chunk peak should be {expected / MB}MB, got {peak / MB}MB"
     assert peak < 96 * MB
 
 

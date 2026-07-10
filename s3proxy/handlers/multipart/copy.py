@@ -7,7 +7,7 @@ import hashlib
 import math
 import os
 import time
-from collections.abc import AsyncIterator, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import quote
@@ -30,6 +30,7 @@ from ...state import (
     load_upload_state,
     persist_upload_state,
 )
+from ...streaming import FramedStreamBody
 from ...utils import format_iso8601
 from ..base import BaseHandler
 from .upload_part import _PlaintextReader
@@ -58,6 +59,11 @@ PASSTHROUGH_SEGMENT_CONCURRENCY = int(
 # Scylla/rclone manifest part 1 is ~4.7GB; only defer a sub-5MB hybrid tail when
 # part 1 is large enough that a client part 2 will follow (avoids EntityTooSmall).
 HYBRID_TAIL_DEFER_MIN_CLIENT_PART = 1024 * 1024 * 1024  # 1 GiB
+
+# Streamed internal-part bodies cannot be replayed by botocore's retry layer,
+# so the copy pump retries them itself by reopening the source at the failed
+# part's offset.
+COPY_INTERNAL_PART_ATTEMPTS = 3
 
 
 def reset_copy_pipeline_semaphore(limit: int | None = None) -> None:
@@ -1215,16 +1221,18 @@ class CopyPartMixin(BaseHandler):
             internal_part_start=internal_part_start,
         )
 
-        src_iter = self._iter_copy_source(
-            client,
-            src_bucket,
-            src_key,
-            copy_source_range,
-            src_wrapped_dek,
-            src_multipart_meta,
-            head_resp,
-            src_metadata,
-        )
+        def open_source(skip_bytes: int) -> AsyncIterator[bytes]:
+            return self._iter_copy_source(
+                client,
+                src_bucket,
+                src_key,
+                copy_source_range,
+                src_wrapped_dek,
+                src_multipart_meta,
+                head_resp,
+                src_metadata,
+                skip_bytes=skip_bytes,
+            )
 
         internal_parts, total_plaintext, total_ciphertext, md5 = await self._pump_copy_chunks(
             client,
@@ -1233,10 +1241,12 @@ class CopyPartMixin(BaseHandler):
             upload_id,
             part_num,
             state,
-            src_iter,
+            open_source(0),
             chunk_size,
             internal_part_start,
             leading_plaintext=deferred_tail or b"",
+            expected_plaintext=plaintext_size + len(deferred_tail),
+            reopen_source=open_source,
         )
 
         etag = md5.hexdigest()
@@ -1282,14 +1292,26 @@ class CopyPartMixin(BaseHandler):
         src_multipart_meta,
         head_resp: dict,
         src_metadata: dict,
+        skip_bytes: int = 0,
     ) -> AsyncIterator[bytes]:
-        """Yield raw plaintext bytes from the copy source, one part/chunk at a time."""
+        """Yield raw plaintext bytes from the copy source, one part/chunk at a time.
+
+        skip_bytes skips that many plaintext bytes from the start of the
+        (possibly ranged) source — used to rebuild the stream at an internal
+        part boundary when the copy pump retries a failed part.
+        """
         if src_multipart_meta:
             total = src_multipart_meta.total_plaintext_size
             if copy_source_range:
                 range_start, range_end = self._parse_copy_source_range(copy_source_range, total)
+            elif skip_bytes:
+                range_start, range_end = 0, total - 1
             else:
                 range_start, range_end = None, None
+            if skip_bytes:
+                range_start += skip_bytes
+                if range_start > range_end:
+                    return
             dek = crypto.unwrap_key(
                 src_multipart_meta.wrapped_dek,
                 self.keyring.key_by_id(src_multipart_meta.kid),
@@ -1306,9 +1328,20 @@ class CopyPartMixin(BaseHandler):
             if copy_source_range:
                 start, end = self._parse_copy_source_range(copy_source_range, len(plaintext))
                 plaintext = plaintext[start : end + 1]
-            yield plaintext
+            if skip_bytes:
+                plaintext = plaintext[skip_bytes:]
+            if plaintext:
+                yield plaintext
+            return
         else:
-            resp = await client.get_object(src_bucket, src_key, range_header=copy_source_range)
+            range_header = copy_source_range
+            if skip_bytes:
+                if copy_source_range:
+                    raw_start, raw_end = self._parse_raw_copy_source_range(copy_source_range)
+                    range_header = f"bytes={raw_start + skip_bytes}-{raw_end}"
+                else:
+                    range_header = f"bytes={skip_bytes}-"
+            resp = await client.get_object(src_bucket, src_key, range_header=range_header)
             async with resp["Body"] as body:
                 # resp["Body"] enters as an aiohttp ClientResponse, whose read()
                 # takes no size arg; stream via its StreamReader in bounded chunks
@@ -1332,65 +1365,76 @@ class CopyPartMixin(BaseHandler):
         internal_part_start: int,
         *,
         leading_plaintext: bytes = b"",
+        expected_plaintext: int,
+        reopen_source: Callable[[int], AsyncIterator[bytes]] | None = None,
     ) -> tuple[list[InternalPartMetadata], int, int, object]:
         """Frame-encrypt the copy source into internal S3 parts, one at a time.
 
-        Mirrors UploadPartMixin._stream_and_upload_framed: reads FRAME_PLAINTEXT_SIZE
-        plaintext frames from the source, encrypts each with encrypt_frame,
-        accumulates one internal part's ciphertext, then uploads it before starting
-        the next. Memory governor reservation is per internal part (acquire before
-        encrypt, hold through upload, release after ciphertext is freed) so RSS
-        matches what the limiter tracks and a multi-GB copy does not hold one
-        reservation for its entire duration.
+        Each internal part is uploaded as a FramedStreamBody that yields sealed
+        frames while the source is being read, so peak memory is O(frame)
+        instead of O(chunk_size). The part sizes are derived up front from
+        expected_plaintext (source metadata is authoritative); a source that
+        ends early fails loudly instead of writing an object with wrong sizes.
+
+        A streamed body cannot be replayed by botocore, so failed internal
+        parts are retried here: reopen_source(offset) rebuilds the plaintext
+        stream at the failed part's offset (relative to the source, after
+        leading_plaintext). The client-part MD5 is committed per attempt from a
+        copy() snapshot so retried bytes are never hashed twice.
         """
         reader = _PlaintextReader(src_iter, prefix=leading_plaintext)
         md5 = hashlib.md5(usedforsecurity=False)
         internal_parts: list[InternalPartMetadata] = []
-        total_plaintext = 0
         total_ciphertext = 0
-        internal_part_num = internal_part_start
+        offset = 0
+        index = 0
 
-        prefetch: bytes | None = None
-        while True:
-            if prefetch is None:
-                prefetch = await reader.read(min(crypto.FRAME_PLAINTEXT_SIZE, chunk_size))
-                if not prefetch:
-                    break
-
-            part_reserve = crypto.copy_chunk_peak(chunk_size)
-            ciphertext = bytearray()
-            part_plaintext = 0
-            frame_idx = 0
-            async with concurrency.reserve_copy_memory(part_reserve):
-                frame_pt = prefetch
-                prefetch = None
-                while True:
-                    md5.update(frame_pt)
-                    part_plaintext += len(frame_pt)
-                    ciphertext.extend(
-                        crypto.encrypt_frame(
-                            frame_pt, state.dek, upload_id, internal_part_num, frame_idx
-                        )
-                    )
-                    frame_idx += 1
-                    if part_plaintext >= chunk_size:
-                        break
-                    frame_pt = await reader.read(
-                        min(crypto.FRAME_PLAINTEXT_SIZE, chunk_size - part_plaintext)
-                    )
-                    if not frame_pt:
-                        break
-
-                upload_start = time.monotonic()
-                resp = await client.upload_part(
-                    bucket, key, upload_id, internal_part_num, ciphertext
-                )
-                del ciphertext
-
+        while offset < expected_plaintext:
+            part_plaintext = min(chunk_size, expected_plaintext - offset)
+            ipn = internal_part_start + index
             ct_size = crypto.framed_ciphertext_size(part_plaintext)
+            part_reserve = crypto.copy_chunk_peak(part_plaintext)
+
+            for attempt in range(1, COPY_INTERNAL_PART_ATTEMPTS + 1):
+                md5_attempt = md5.copy()
+                body = FramedStreamBody(
+                    reader,
+                    part_plaintext,
+                    state.dek,
+                    upload_id,
+                    ipn,
+                    plaintext_hashes=(md5_attempt,),
+                )
+                upload_start = time.monotonic()
+                try:
+                    async with concurrency.reserve_copy_memory(part_reserve):
+                        resp = await client.upload_part(bucket, key, upload_id, ipn, body)
+                    md5 = md5_attempt
+                    break
+                except Exception as e:
+                    if attempt == COPY_INTERNAL_PART_ATTEMPTS or reopen_source is None:
+                        raise
+                    logger.warning(
+                        "COPY_INTERNAL_PART_RETRY",
+                        bucket=bucket,
+                        key=key,
+                        client_part=part_num,
+                        internal_part=ipn,
+                        attempt=attempt,
+                        plaintext_offset=offset,
+                        error_type=type(e).__name__,
+                        error=str(e),
+                    )
+                    if offset < len(leading_plaintext):
+                        reader = _PlaintextReader(
+                            reopen_source(0), prefix=leading_plaintext[offset:]
+                        )
+                    else:
+                        reader = _PlaintextReader(reopen_source(offset - len(leading_plaintext)))
+
             internal_parts.append(
                 InternalPartMetadata(
-                    internal_part_number=internal_part_num,
+                    internal_part_number=ipn,
                     plaintext_size=part_plaintext,
                     ciphertext_size=ct_size,
                     etag=resp["ETag"].strip('"'),
@@ -1401,12 +1445,12 @@ class CopyPartMixin(BaseHandler):
                 bucket=bucket,
                 key=key,
                 client_part=part_num,
-                internal_part=internal_part_num,
+                internal_part=ipn,
                 plaintext_mb=f"{part_plaintext / 1024 / 1024:.2f}MB",
                 elapsed_sec=f"{time.monotonic() - upload_start:.2f}s",
             )
-            total_plaintext += part_plaintext
+            offset += part_plaintext
             total_ciphertext += ct_size
-            internal_part_num += 1
+            index += 1
 
-        return internal_parts, total_plaintext, total_ciphertext, md5
+        return internal_parts, offset, total_ciphertext, md5

@@ -24,7 +24,7 @@ from ...state import (
     PartMetadata,
     StateMissingError,
 )
-from ...streaming import decode_aws_chunked_stream
+from ...streaming import FramedStreamBody, decode_aws_chunked_stream
 from ..base import BaseHandler
 
 logger: BoundLogger = structlog.get_logger(__name__)
@@ -411,10 +411,13 @@ class UploadPartMixin(BaseHandler):
         Used for unsigned and large signed uploads (e.g. barman backups) where
         Content-Length is known and the body is read directly (not aws-chunked).
         Reads the body once, splitting it into internal S3 parts of
-        optimal_part_size. Each internal part is encrypted frame-by-frame
-        (see crypto.encrypt_frame) into a ciphertext buffer, then uploaded as
-        bytes. Peak memory is O(part ciphertext + FRAME_PLAINTEXT_SIZE) — one
-        frame of plaintext at a time, not plaintext + ciphertext together.
+        optimal_part_size. Multi-frame internal parts stream sealed frames to
+        the backend as encryption produces them (FramedStreamBody), so peak
+        memory is O(frame) regardless of part size. Single-frame parts are
+        buffered as bytes so botocore can replay them on its internal retries.
+
+        A streamed body cannot be replayed: a mid-part backend failure fails
+        the whole client part and the client (rclone/barman) re-sends it.
         """
         md5_hash = hashlib.md5(usedforsecurity=False)
         sha256_hash = hashlib.sha256()
@@ -424,46 +427,52 @@ class UploadPartMixin(BaseHandler):
         internal_part_num = internal_part_start
         remaining_total = content_length
 
+        def raise_stream_short(ipn: int, expected: int, received: int) -> NoReturn:
+            logger.error(
+                "UPLOAD_PART_STREAM_SHORT",
+                bucket=bucket,
+                key=key,
+                client_part=part_num,
+                internal_part=ipn,
+                expected_bytes=expected,
+                received_bytes=received,
+                content_length=content_length,
+            )
+            raise S3Error.bad_request(
+                f"Upload body ended early: got {received}B of {expected}B "
+                f"for client part {part_num} internal part {ipn}"
+            )
+
         while remaining_total > 0:
             part_pt_size = min(optimal_part_size, remaining_total)
             ct_size = crypto.framed_ciphertext_size(part_pt_size)
             ipn = internal_part_num
 
-            ciphertext = bytearray()
-            remaining = part_pt_size
-            frame_idx = 0
-            while remaining > 0:
-                frame_pt = await reader.read(min(crypto.FRAME_PLAINTEXT_SIZE, remaining))
-                if not frame_pt:
-                    break
+            upload_start = time.monotonic()
+            if part_pt_size <= crypto.FRAME_PLAINTEXT_SIZE:
+                frame_pt = await reader.read(part_pt_size)
+                if len(frame_pt) < part_pt_size:
+                    raise_stream_short(ipn, part_pt_size, len(frame_pt))
                 md5_hash.update(frame_pt)
                 sha256_hash.update(frame_pt)
-                remaining -= len(frame_pt)
-                ciphertext.extend(
-                    crypto.encrypt_frame(frame_pt, state.dek, upload_id, ipn, frame_idx)
+                ciphertext = crypto.encrypt_frame(frame_pt, state.dek, upload_id, ipn, 0)
+                resp = await client.upload_part(bucket, key, upload_id, ipn, ciphertext)
+                del ciphertext
+            else:
+                body = FramedStreamBody(
+                    reader,
+                    part_pt_size,
+                    state.dek,
+                    upload_id,
+                    ipn,
+                    plaintext_hashes=(md5_hash, sha256_hash),
                 )
-                frame_idx += 1
-
-            if remaining > 0:
-                bytes_read = part_pt_size - remaining
-                logger.error(
-                    "UPLOAD_PART_STREAM_SHORT",
-                    bucket=bucket,
-                    key=key,
-                    client_part=part_num,
-                    internal_part=ipn,
-                    expected_bytes=part_pt_size,
-                    received_bytes=bytes_read,
-                    content_length=content_length,
-                )
-                raise S3Error.bad_request(
-                    f"Upload body ended early: got {bytes_read}B of {part_pt_size}B "
-                    f"for client part {part_num} internal part {ipn}"
-                )
-
-            upload_start = time.monotonic()
-            resp = await client.upload_part(bucket, key, upload_id, ipn, ciphertext)
-            del ciphertext
+                try:
+                    resp = await client.upload_part(bucket, key, upload_id, ipn, body)
+                except Exception:
+                    if body.short_read:
+                        raise_stream_short(ipn, part_pt_size, body.bytes_read)
+                    raise
             etag = resp["ETag"].strip('"')
             logger.info(
                 "INTERNAL_PART_UPLOADED",
