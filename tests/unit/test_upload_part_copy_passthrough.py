@@ -442,10 +442,13 @@ async def test_scylla_prod_shape_range_smaller_than_metadata_uses_passthrough(
 
     updated = await manager.get_upload(BUCKET, "sst/big-Data.db.sm_manifest", upload_id)
     part = updated.parts[1]
-    assert part.plaintext_size == prod_range_end + 1
-    assert len(part.internal_parts) == len(copy_ops)
     assert len(updated.deferred_copy_tail) > 0
     assert len(updated.deferred_copy_tail) < crypto.MIN_PART_SIZE
+    # The deferred tail is not stored with this part; its plaintext is counted
+    # by whichever part eventually stores it (next part or complete-time flush).
+    assert part.plaintext_size == prod_range_end + 1 - len(updated.deferred_copy_tail)
+    assert part.plaintext_size == sum(ip.plaintext_size for ip in part.internal_parts)
+    assert len(part.internal_parts) == len(copy_ops)
 
 
 def test_should_defer_hybrid_tail_when_more_client_parts_follow(settings, manager):
