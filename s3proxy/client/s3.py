@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -10,11 +12,78 @@ import structlog
 from botocore.config import Config
 from structlog.stdlib import BoundLogger
 
+from ..errors import BackendIntegrityError
+
 if TYPE_CHECKING:
     from ..config import Settings
     from .types import S3Credentials
 
 logger: BoundLogger = structlog.get_logger(__name__)
+
+_MD5_HEX_RE = re.compile(r"[0-9a-f]{32}")
+
+# Warn only once per process when the backend's ETags are not body MD5s
+# (SSE-KMS buckets) and the integrity check therefore cannot run.
+_etag_not_md5_logged = False
+
+
+def _body_ciphertext_md5(body: Any) -> str | None:
+    """MD5 hexdigest of an uploaded body, or None if it cannot be determined."""
+    if isinstance(body, (bytes, bytearray, memoryview)):
+        return hashlib.md5(body, usedforsecurity=False).hexdigest()
+    digest = getattr(body, "ciphertext_md5_hexdigest", None)
+    if digest is not None:
+        return digest()
+    return None
+
+
+def verify_backend_etag(
+    operation: str,
+    bucket: str,
+    key: str,
+    response_etag: str | None,
+    expected_md5: str | None,
+    part_number: int | None = None,
+) -> None:
+    """Compare the backend's ETag against the MD5 of the ciphertext we sent.
+
+    Backend payload signing is disabled (UNSIGNED-PAYLOAD) because hashing the
+    body for SigV4 forced a second full copy of every internal part; this check
+    replaces it as the transport-integrity guarantee on the proxy->backend hop.
+    ETag == body MD5 holds for RGW/MinIO/AWS without SSE-KMS; non-MD5 ETags are
+    skipped (nothing to compare against).
+    """
+    global _etag_not_md5_logged
+    if expected_md5 is None:
+        return
+    etag = (response_etag or "").strip('"')
+    if not _MD5_HEX_RE.fullmatch(etag):
+        if not _etag_not_md5_logged:
+            _etag_not_md5_logged = True
+            logger.warning(
+                "BACKEND_ETAG_NOT_MD5",
+                operation=operation,
+                bucket=bucket,
+                key=key,
+                backend_etag=etag,
+            )
+        return
+    if etag != expected_md5:
+        logger.error(
+            "BACKEND_ETAG_MISMATCH",
+            operation=operation,
+            bucket=bucket,
+            key=key,
+            part_number=part_number,
+            expected_md5=expected_md5,
+            backend_etag=etag,
+        )
+        part = f" part {part_number}" if part_number is not None else ""
+        raise BackendIntegrityError(
+            f"{operation} {bucket}/{key}{part}: "
+            f"backend ETag {etag} != ciphertext MD5 {expected_md5}"
+        )
+
 
 # Shared session to avoid repeated JSON service model loading
 # See: https://github.com/boto/boto3/issues/1670
@@ -51,13 +120,19 @@ class S3Client:
         """Initialize S3 client with credentials."""
         self.settings = settings
         self.credentials = credentials
+        # payload_signing_enabled=False: hashing the body for SigV4 forces
+        # botocore to hold a second full copy of every uploaded part; integrity
+        # is covered by verify_backend_etag instead. when_required stops
+        # botocore from adding flexible checksums, which would re-read (or
+        # aws-chunk) the body the same way.
         self._config = Config(
             signature_version="s3v4",
-            s3={"addressing_style": "path"},
+            s3={"addressing_style": "path", "payload_signing_enabled": False},
             retries={"max_attempts": 3, "mode": "adaptive"},
             max_pool_connections=100,
             connect_timeout=10,
             read_timeout=300,
+            request_checksum_calculation="when_required",
         )
         self._cached_client = None
         self._client_context = None
@@ -129,7 +204,11 @@ class S3Client:
             CacheControl=cache_control,
             Expires=expires,
         )
-        return await self._cached_client.put_object(**kwargs)
+        result = await self._cached_client.put_object(**kwargs)
+        verify_backend_etag(
+            "put_object", bucket, key, result.get("ETag"), _body_ciphertext_md5(body)
+        )
+        return result
 
     async def head_object(
         self,
@@ -183,7 +262,7 @@ class S3Client:
         key: str,
         upload_id: str,
         part_number: int,
-        body: bytes,
+        body: bytes | bytearray | Any,
     ) -> dict[str, Any]:
         """Upload a part."""
         start = time.monotonic()
@@ -193,6 +272,16 @@ class S3Client:
             UploadId=upload_id,
             PartNumber=part_number,
             Body=body,
+        )
+        # The body is fully sent once the response is in, so a streaming body's
+        # running MD5 is complete here.
+        verify_backend_etag(
+            "upload_part",
+            bucket,
+            key,
+            result.get("ETag"),
+            _body_ciphertext_md5(body),
+            part_number=part_number,
         )
         duration = time.monotonic() - start
         size = len(body)
