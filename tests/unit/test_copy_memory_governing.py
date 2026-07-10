@@ -29,8 +29,7 @@ def test_copy_pipeline_peak_is_bounded_regardless_of_object_size():
     # ~90MB, identical to a 64MB copy.
     peaks = [crypto.copy_pipeline_peak(s) for s in (64 * MB, 512 * MB, 4767 * MB, 5 * 1024 * MB)]
     assert all(p == peaks[0] for p in peaks), peaks
-    part = crypto.COPY_INTERNAL_PART_SIZE
-    assert peaks[0] == 2 * part + crypto.FRAME_PLAINTEXT_SIZE + 2 * crypto.MAX_BUFFER_SIZE
+    assert peaks[0] == 4 * crypto.FRAME_PLAINTEXT_SIZE + 2 * crypto.MAX_BUFFER_SIZE
     assert peaks[0] < 128 * MB
 
 

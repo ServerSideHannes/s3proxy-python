@@ -205,7 +205,7 @@ def test_streaming_governor_clamped_reserve():
     routine = crypto.streaming_upload_peak(crypto.STREAMING_GOVERNOR_CLIENT_PART_BYTES)
     assert crypto.streaming_governor_clamped_reserve(honest, budget) == routine
 
-    small = 40 * MB
+    small = 20 * MB
     assert crypto.streaming_governor_clamped_reserve(small, budget) == small
 
 
@@ -369,17 +369,22 @@ async def test_request_handler_put_reserves_governor_footprint():
 
 @pytest.mark.asyncio
 async def test_many_concurrent_scylla_acquires_via_gather():
-    """Flood of concurrent ~50MB part admissions under prod budget."""
+    """Flood of concurrent ~50MB part admissions under prod budget.
+
+    At the flat 32MB streaming reservation a 312MB budget admits 9 at once.
+    """
     reset_state()
     set_memory_limit(312)
     try:
         per_part = estimate_memory_footprint("PUT", SCYLLA_PART_BYTES)
+        count = (312 * MB) // per_part
+        assert count >= 8
 
         async def one():
             return await try_acquire_memory(per_part)
 
-        results = await asyncio.gather(*[one() for _ in range(12)])
-        assert len(results) == 12
+        results = await asyncio.gather(*[one() for _ in range(count)])
+        assert len(results) == count
         assert sum(results) <= 312 * MB
         assert all(r == per_part for r in results)
     finally:

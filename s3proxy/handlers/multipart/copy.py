@@ -1234,6 +1234,23 @@ class CopyPartMixin(BaseHandler):
                 skip_bytes=skip_bytes,
             )
 
+        # Streamed bodies declare Content-Length up front, so the pump needs the
+        # number of bytes the source will actually yield. Scylla manifest sidecar
+        # metadata overstates total_plaintext_size relative to the stored
+        # segments (prod shape), so clamp the requested range to the segments'
+        # real extent — the claimed total would over-promise and abort the copy.
+        source_bytes = plaintext_size
+        if src_multipart_meta:
+            real_total = sum(p.plaintext_size for p in src_multipart_meta.parts)
+            if copy_source_range:
+                range_start, range_end = self._parse_copy_source_range(
+                    copy_source_range, src_multipart_meta.total_plaintext_size
+                )
+            else:
+                range_start, range_end = 0, src_multipart_meta.total_plaintext_size - 1
+            range_end = min(range_end, real_total - 1)
+            source_bytes = max(0, range_end - range_start + 1)
+
         internal_parts, total_plaintext, total_ciphertext, md5 = await self._pump_copy_chunks(
             client,
             bucket,
@@ -1245,7 +1262,7 @@ class CopyPartMixin(BaseHandler):
             chunk_size,
             internal_part_start,
             leading_plaintext=deferred_tail or b"",
-            expected_plaintext=plaintext_size + len(deferred_tail),
+            expected_plaintext=source_bytes + len(deferred_tail),
             reopen_source=open_source,
         )
 

@@ -114,8 +114,8 @@ async def test_backpressure_logged_once_per_acquire_wait():
     original_timeout = concurrency.BACKPRESSURE_TIMEOUT
     concurrency.BACKPRESSURE_TIMEOUT = 5
     concurrency.reset_state()
-    # 96MB budget: one 88MB chunk leaves no room for a second → must wait.
-    concurrency.set_memory_limit(96)
+    # Budget fits one ~48MB chunk but not two → the second acquire must wait.
+    concurrency.set_memory_limit(64)
     reset_copy_pipeline_semaphore(1)
 
     held = await concurrency.try_acquire_copy_memory(
