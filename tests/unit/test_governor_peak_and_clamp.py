@@ -56,6 +56,11 @@ class _Mgr:
 
 class _DiscardingClient:
     async def upload_part(self, bucket, key, upload_id, part_number, body):
+        # Consume streaming bodies chunk-by-chunk like the real transport,
+        # retaining nothing, so measured peaks reflect prod behavior.
+        if not isinstance(body, (bytes, bytearray)):
+            async for _chunk in body:
+                pass
         del body
         return {"ETag": '"0"'}
 
@@ -108,13 +113,10 @@ async def _measure_framed_peak(content_length: int) -> int:
     [16, 50, 512, 1024, 4096],
 )
 def test_streaming_upload_peak_formula(mb: int):
-    """Peak formula must match the two measured regimes (small 4*part, large 2*part+frame)."""
+    """Small parts buffer (4*part); multi-frame parts stream at a flat O(frame) peak."""
     cl = mb * MB
     part = crypto.memory_bounded_part_size(cl)
-    if part <= crypto.FRAME_PLAINTEXT_SIZE:
-        expected = 4 * part
-    else:
-        expected = 2 * part + crypto.FRAME_PLAINTEXT_SIZE
+    expected = 4 * part if part <= crypto.FRAME_PLAINTEXT_SIZE else 4 * crypto.FRAME_PLAINTEXT_SIZE
     assert crypto.streaming_upload_peak(cl) == expected
 
 
@@ -148,7 +150,12 @@ def test_multi_gb_estimate_capped_at_routine_workload_peak():
 
 @pytest.mark.asyncio
 async def test_clamp_does_not_monopolize_budget():
-    """Concurrent ~50MB part must not stall behind one clamped multi-GB estimate."""
+    """Concurrent ~50MB part must not stall behind one multi-GB upload.
+
+    With frame-streaming bodies the honest peak is O(frame) for any
+    Content-Length, so the clamp scenario can no longer arise at all: a
+    multi-GB estimate reserves the same as a routine part and coexists.
+    """
     reset_state()
     set_memory_limit(312)
     try:
@@ -158,13 +165,12 @@ async def test_clamp_does_not_monopolize_budget():
         r_scylla = await try_acquire_memory(scylla)
         assert r_scylla == scylla
 
-        # Honest peak for multi-GB body exceeds 312MB budget before governor cap.
         huge_honest = crypto.streaming_upload_peak(5 * 1024 * MB)
-        assert huge_honest > 312 * MB
+        routine = crypto.streaming_upload_peak(crypto.STREAMING_GOVERNOR_CLIENT_PART_BYTES)
+        assert huge_honest == routine
         huge_reserved = crypto.governor_memory_footprint(5 * 1024 * MB)
 
         r_huge = await try_acquire_memory(huge_reserved)
-        routine = crypto.streaming_upload_peak(crypto.STREAMING_GOVERNOR_CLIENT_PART_BYTES)
         assert r_huge == routine
         assert r_huge < 312 * MB
         assert scylla + r_huge < 312 * MB
@@ -199,7 +205,7 @@ def test_streaming_governor_clamped_reserve():
     routine = crypto.streaming_upload_peak(crypto.STREAMING_GOVERNOR_CLIENT_PART_BYTES)
     assert crypto.streaming_governor_clamped_reserve(honest, budget) == routine
 
-    small = 40 * MB
+    small = 20 * MB
     assert crypto.streaming_governor_clamped_reserve(small, budget) == small
 
 
@@ -363,17 +369,22 @@ async def test_request_handler_put_reserves_governor_footprint():
 
 @pytest.mark.asyncio
 async def test_many_concurrent_scylla_acquires_via_gather():
-    """Flood of concurrent ~50MB part admissions under prod budget."""
+    """Flood of concurrent ~50MB part admissions under prod budget.
+
+    At the flat 32MB streaming reservation a 312MB budget admits 9 at once.
+    """
     reset_state()
     set_memory_limit(312)
     try:
         per_part = estimate_memory_footprint("PUT", SCYLLA_PART_BYTES)
+        count = (312 * MB) // per_part
+        assert count >= 8
 
         async def one():
             return await try_acquire_memory(per_part)
 
-        results = await asyncio.gather(*[one() for _ in range(12)])
-        assert len(results) == 12
+        results = await asyncio.gather(*[one() for _ in range(count)])
+        assert len(results) == count
         assert sum(results) <= 312 * MB
         assert all(r == per_part for r in results)
     finally:
@@ -390,4 +401,4 @@ def test_copy_peak_is_bounded_and_independent_of_object_size():
     assert peak == crypto.copy_pipeline_peak(64 * MB)  # size-independent
     assert peak < 128 * MB
     # far below the old object/20 peak that forced full-budget clamping
-    assert peak < crypto.streaming_upload_peak(huge) // 4
+    assert peak < _old_streaming_upload_peak(huge) // 4

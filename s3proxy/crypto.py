@@ -231,23 +231,24 @@ def memory_bounded_part_size(
 def streaming_upload_peak(content_length: int) -> int:
     """Peak memory the framed UploadPart path holds for one in-flight request.
 
-    The path encrypts one internal part at a time. At peak it stacks the
-    accumulated ciphertext (~part), one plaintext frame being sealed, and (for
-    signed uploads) aiobotocore's copy of the part body for the HTTP request.
+    Multi-frame internal parts stream sealed frames to the backend
+    (FramedStreamBody): at peak the reader holds ~one frame of buffered source,
+    one plaintext frame is being sealed, and the sealed frame sits in the
+    transport write buffer — O(FRAME_PLAINTEXT_SIZE), independent of part size
+    and Content-Length. The backend hop is UNSIGNED-PAYLOAD, so botocore never
+    re-reads or copies the body.
 
-    Small single-frame parts (part <= FRAME_PLAINTEXT_SIZE): encrypt transient
-    dominates, bound by ``4*part`` (measured: 100KB -> 400KB).
+    Small single-frame parts (part <= FRAME_PLAINTEXT_SIZE) are buffered whole
+    so botocore can replay them: encrypt transient dominates, bound by
+    ``4*part`` (measured: 100KB -> 400KB).
 
-    Multi-frame parts: ``2*part + FRAME_PLAINTEXT_SIZE`` (measured tracemalloc
-    with transport body copy: 16MB -> 24.5MB, 512MB/25.6MB internal -> 56.1MB,
-    4GB/204MB internal -> 416.7MB). The old ``2*part + 2*frame`` formula
-    double-counted the frame term and scaled with multi-GB Content-Length even
-    though only one frame is in flight — starving concurrent ~50MB Scylla parts.
+    The rare aws-chunked path still buffers whole internal parts under this
+    same reservation; the pod memory limit is the backstop there.
     """
     part = memory_bounded_part_size(content_length)
     if part <= FRAME_PLAINTEXT_SIZE:
         return 4 * part
-    return 2 * part + FRAME_PLAINTEXT_SIZE
+    return 4 * FRAME_PLAINTEXT_SIZE
 
 
 def streaming_governor_clamped_reserve(honest_peak: int, budget_bytes: int) -> int:
@@ -264,10 +265,9 @@ def streaming_governor_clamped_reserve(honest_peak: int, budget_bytes: int) -> i
 def copy_governor_clamped_reserve(honest_peak: int, budget_bytes: int) -> int:
     """Reservation when a copy's honest peak exceeds the governor budget.
 
-    Unlike uploads, a multi-GB copy's honest peak reflects real per-chunk work
-    (238MB internal parts for a 4.7GB Scylla manifest). Clamping to the routine
-    upload peak (~59MB) under-reserves and admits several concurrent copies that
-    each need ~500MB+ RSS. Monopolize the budget slot instead.
+    Nearly vestigial now that copy chunks stream (copy_chunk_peak is O(frame),
+    far below any sane budget); kept as the safety valve for tiny budgets.
+    Monopolize the budget slot rather than under-reserving.
     """
     return min(honest_peak, budget_bytes)
 
@@ -275,12 +275,9 @@ def copy_governor_clamped_reserve(honest_peak: int, budget_bytes: int) -> int:
 def governor_memory_footprint(content_length: int) -> int:
     """Memory to reserve for a framed upload at the request gate.
 
-    Uses the honest per-part peak for routine client part sizes (≤512MB) but
-    caps at the 512MB-workload peak for larger Content-Length values. Multi-GB
-    single PutObjects are rare in backup traffic (Scylla uses ~50MB multipart
-    parts); capping prevents a 6GB Content-Length from reserving 500MB+ and
-    starving concurrent parts. A lone multi-GB PutObject may exceed its
-    reservation — the pod memory limit is the backstop.
+    streaming_upload_peak is O(frame) for multi-frame parts, so the routine cap
+    only still matters for the buffered aws-chunked path; the pod memory limit
+    remains the backstop there.
     """
     honest = streaming_upload_peak(content_length)
     routine_cap = streaming_upload_peak(STREAMING_GOVERNOR_CLIENT_PART_BYTES)
@@ -302,21 +299,19 @@ def copy_internal_part_size(plaintext_size: int) -> int:
 
 
 def copy_chunk_peak(chunk_plaintext_bytes: int) -> int:
-    """Peak memory while encrypting one internal copy chunk (streaming path).
+    """Peak memory while streaming one internal copy chunk.
 
-    The streaming copy path acquires/releases this amount per internal part.
-    Reservation covers read-buffer slack plus framed encrypt peak and the
-    ciphertext buffer through S3 upload (released after del ciphertext).
+    The pump uploads each chunk as a FramedStreamBody, so the ciphertext is
+    never accumulated: the reservation covers the reader's buffered source
+    frame, the frame being sealed, the sealed frame in the transport buffer,
+    and read-buffer slack — O(frame), independent of chunk size.
     """
     framed = (
         4 * chunk_plaintext_bytes
         if chunk_plaintext_bytes <= FRAME_PLAINTEXT_SIZE
-        else 2 * chunk_plaintext_bytes + FRAME_PLAINTEXT_SIZE
+        else 4 * FRAME_PLAINTEXT_SIZE
     )
-    peak = framed + 2 * MAX_BUFFER_SIZE
-    if chunk_plaintext_bytes > 32 * 1024 * 1024:
-        peak += chunk_plaintext_bytes // 7
-    return peak
+    return framed + 2 * MAX_BUFFER_SIZE
 
 
 # UploadPartCopy passthrough moves bytes server-side; in-process peak is tiny.

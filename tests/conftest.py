@@ -104,6 +104,23 @@ def credentials_store():
 # ============================================================================
 
 
+async def materialize_body(body) -> bytes:
+    """Collect an upload body into bytes, like the real backend transport.
+
+    Streaming bodies (FramedStreamBody) declare their exact size via len();
+    enforce that the yielded bytes match it, since the real request is sent
+    with that Content-Length.
+    """
+    if isinstance(body, (bytes, bytearray)):
+        return bytes(body)
+    declared = len(body)
+    data = b"".join([chunk async for chunk in body])
+    assert len(data) == declared, (
+        f"streaming body yielded {len(data)} bytes but declared Content-Length {declared}"
+    )
+    return data
+
+
 class MockS3Response:
     """Mock S3 response object."""
 
@@ -173,6 +190,7 @@ class MockS3Client:
     ) -> dict:
         """Store an object."""
         self.call_history.append(("put_object", {"bucket": bucket, "key": key}))
+        body = await materialize_body(body)
         self.objects[self._key(bucket, key)] = {
             "Body": body,
             "Metadata": metadata or {},
@@ -411,6 +429,7 @@ class MockS3Client:
         if upload_id not in self.multipart_uploads:
             raise self._not_found_error(f"upload {upload_id}")
 
+        body = await materialize_body(body)
         etag = hashlib.md5(body).hexdigest()
         self.multipart_uploads[upload_id]["Parts"][part_number] = {
             "Body": body,
