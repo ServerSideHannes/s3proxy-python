@@ -262,6 +262,18 @@ class LifecycleMixin(BaseHandler):
                 total_plaintext += part_meta.plaintext_size
 
                 if part_meta.internal_parts:
+                    internal_plaintext = sum(ip.plaintext_size for ip in part_meta.internal_parts)
+                    if internal_plaintext != part_meta.plaintext_size:
+                        logger.warning(
+                            "PART_PLAINTEXT_MISMATCH",
+                            bucket=bucket,
+                            key=key,
+                            upload_id=upload_id[:20] + "...",
+                            client_part=client_part_num,
+                            part_plaintext=part_meta.plaintext_size,
+                            internal_plaintext=internal_plaintext,
+                            drift=part_meta.plaintext_size - internal_plaintext,
+                        )
                     sorted_internal = sorted(
                         part_meta.internal_parts, key=lambda x: x.internal_part_number
                     )

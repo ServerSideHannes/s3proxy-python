@@ -962,9 +962,13 @@ class CopyPartMixin(BaseHandler):
             await self.multipart_manager.set_deferred_copy_tail(
                 bucket, key, upload_id, deferred_tail_bytes
             )
+        # A deferred tail is NOT part of this client part's stored bytes: it is
+        # folded into the next part's stream (take_deferred_copy_tail) or flushed
+        # at complete, and its plaintext is counted there. Counting it here too
+        # inflated total_plaintext_size by the tail size, so HEAD reported
+        # size+tail and rclone failed every >copy-cutoff copy with
+        # "corrupted on transfer: sizes differ".
         total_plaintext = sum(p.plaintext_size for p in internal_parts)
-        if deferred_tail_bytes:
-            total_plaintext += len(deferred_tail_bytes)
         total_ciphertext = sum(p.ciphertext_size for p in internal_parts)
         etag = md5_task.result().hexdigest()
         await self.multipart_manager.add_part(
@@ -1022,6 +1026,7 @@ class CopyPartMixin(BaseHandler):
         last_pn = max(state.parts)
         last_part = state.parts[last_pn]
         last_part.internal_parts.append(ip)
+        last_part.plaintext_size += len(tail)
         last_part.ciphertext_size += len(tail_ct)
         state.deferred_copy_tail = b""
         state.next_internal_part_number = internal_num + 1

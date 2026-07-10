@@ -442,10 +442,13 @@ async def test_scylla_prod_shape_range_smaller_than_metadata_uses_passthrough(
 
     updated = await manager.get_upload(BUCKET, "sst/big-Data.db.sm_manifest", upload_id)
     part = updated.parts[1]
-    assert part.plaintext_size == prod_range_end + 1
-    assert len(part.internal_parts) == len(copy_ops)
     assert len(updated.deferred_copy_tail) > 0
     assert len(updated.deferred_copy_tail) < crypto.MIN_PART_SIZE
+    # The deferred tail is not stored with this part; its plaintext is counted
+    # by whichever part eventually stores it (next part or complete-time flush).
+    assert part.plaintext_size == prod_range_end + 1 - len(updated.deferred_copy_tail)
+    assert part.plaintext_size == sum(ip.plaintext_size for ip in part.internal_parts)
+    assert len(part.internal_parts) == len(copy_ops)
 
 
 def test_should_defer_hybrid_tail_when_more_client_parts_follow(settings, manager):
@@ -622,6 +625,146 @@ async def test_two_part_hybrid_defer_tail_completes_fast(
     complete_req.headers = {}
     complete_req.body = AsyncMock(return_value=complete_body)
     await handler.handle_complete_multipart_upload(complete_req, credentials)
+
+
+async def _complete_upload(handler, dest_path, upload_id, state, credentials):
+    parts_xml = "".join(
+        f'<Part><PartNumber>{pn}</PartNumber><ETag>"{state.parts[pn].etag}"</ETag></Part>'
+        for pn in sorted(state.parts)
+    )
+    complete_req = MagicMock()
+    complete_req.url.path = dest_path
+    complete_req.url.query = f"uploadId={upload_id}"
+    complete_req.headers = {}
+    complete_req.body = AsyncMock(
+        return_value=f"<CompleteMultipartUpload>{parts_xml}</CompleteMultipartUpload>".encode()
+    )
+    await handler.handle_complete_multipart_upload(complete_req, credentials)
+
+
+@pytest.mark.asyncio
+async def test_two_part_defer_tail_total_plaintext_not_double_counted(
+    mock_s3, settings, manager, credentials, monkeypatch
+):
+    """Regression: rclone 2-part copy (>copy-cutoff SSTable) reported size+tail.
+
+    Part 1 defers its sub-5MB tail; part 2's streaming copy folds the tail into
+    its own stream and counts it. Part 1's metadata must therefore NOT count the
+    tail too, or HEAD Content-Length comes out exactly one tail too large and
+    rclone fails the copy with "corrupted on transfer: sizes differ"
+    (398 files x +1,129,664 bytes, backup run sm_20260709080013UTC).
+    """
+    from s3proxy.handlers.multipart import copy as copy_mod
+    from s3proxy.state import load_multipart_metadata
+
+    monkeypatch.setattr(copy_mod, "HYBRID_TAIL_DEFER_MIN_CLIENT_PART", 5 * 1024 * 1024)
+    monkeypatch.setattr(crypto, "COPY_INTERNAL_PART_SIZE", crypto.MIN_PART_SIZE)
+    handler = _handler(settings, mock_s3, credentials)
+    await mock_s3.create_bucket(BUCKET)
+
+    kid, kek = settings.keyring.key_for(credentials.access_key)
+    chunk = 8 * 1024 * 1024
+    src_dek, src_plaintext, ciphertext_blob, src_meta, total, _ = _build_scylla_prod_shape_source(
+        kid, kek, num_internal_parts=12, metadata_inflate_ratio=1.0, chunk_size=chunk
+    )
+    assert total == len(src_plaintext)
+    part1_range_end = chunk * 4 + chunk // 2  # ends mid-frame -> ~4MB deferred tail
+
+    await mock_s3.put_object(BUCKET, "sst/big-Data.db", ciphertext_blob)
+    await save_multipart_metadata(mock_s3, BUCKET, "sst/big-Data.db", src_meta)
+
+    dest_key = "sst/big-Data.db.sm_20260709080013UTC"
+    resp_create = await mock_s3.create_multipart_upload(BUCKET, dest_key)
+    upload_id = resp_create["UploadId"]
+    await handler.multipart_manager.create_upload(BUCKET, dest_key, upload_id, src_dek, kid)
+
+    for part_number, rng in (
+        (1, f"bytes=0-{part1_range_end}"),
+        (2, f"bytes={part1_range_end + 1}-{total - 1}"),
+    ):
+        resp = await handler.handle_upload_part_copy(
+            _copy_part_request(
+                f"/{BUCKET}/{dest_key}",
+                f"/{BUCKET}/sst/big-Data.db",
+                upload_id,
+                part_number=part_number,
+                copy_source_range=rng,
+            ),
+            credentials,
+        )
+        await _read(resp)
+
+    state = await handler.multipart_manager.get_upload(BUCKET, dest_key, upload_id)
+    for pn, part in state.parts.items():
+        assert part.plaintext_size == sum(ip.plaintext_size for ip in part.internal_parts), (
+            f"client part {pn} plaintext must match its stored internal parts"
+        )
+    assert sum(p.plaintext_size for p in state.parts.values()) == total
+
+    await _complete_upload(handler, f"/{BUCKET}/{dest_key}", upload_id, state, credentials)
+
+    dest_meta = await load_multipart_metadata(mock_s3, BUCKET, dest_key)
+    assert dest_meta.total_plaintext_size == total, (
+        "HEAD Content-Length source: must equal the source size, not size+tail"
+    )
+
+    resp = await handler.handle_get_object(_get_request(f"/{BUCKET}/{dest_key}"), credentials)
+    assert await _read(resp) == src_plaintext
+
+
+@pytest.mark.asyncio
+async def test_defer_tail_flushed_on_complete_keeps_part_accounting(
+    mock_s3, settings, manager, credentials, monkeypatch
+):
+    """A tail flushed at complete (no part 2 consumed it) lands in part accounting once."""
+    from s3proxy.handlers.multipart import copy as copy_mod
+    from s3proxy.state import load_multipart_metadata
+
+    monkeypatch.setattr(copy_mod, "HYBRID_TAIL_DEFER_MIN_CLIENT_PART", 5 * 1024 * 1024)
+    handler = _handler(settings, mock_s3, credentials)
+    await mock_s3.create_bucket(BUCKET)
+
+    kid, kek = settings.keyring.key_for(credentials.access_key)
+    chunk = 8 * 1024 * 1024
+    src_dek, src_plaintext, ciphertext_blob, src_meta, total, _ = _build_scylla_prod_shape_source(
+        kid, kek, num_internal_parts=12, metadata_inflate_ratio=1.0, chunk_size=chunk
+    )
+    part1_range_end = chunk * 4 + chunk // 2
+    part1_span = part1_range_end + 1
+
+    await mock_s3.put_object(BUCKET, "sst/solo-Data.db", ciphertext_blob)
+    await save_multipart_metadata(mock_s3, BUCKET, "sst/solo-Data.db", src_meta)
+
+    dest_key = "sst/solo-Data.db.copy"
+    resp_create = await mock_s3.create_multipart_upload(BUCKET, dest_key)
+    upload_id = resp_create["UploadId"]
+    await handler.multipart_manager.create_upload(BUCKET, dest_key, upload_id, src_dek, kid)
+
+    resp = await handler.handle_upload_part_copy(
+        _copy_part_request(
+            f"/{BUCKET}/{dest_key}",
+            f"/{BUCKET}/sst/solo-Data.db",
+            upload_id,
+            part_number=1,
+            copy_source_range=f"bytes=0-{part1_range_end}",
+        ),
+        credentials,
+    )
+    await _read(resp)
+
+    state = await handler.multipart_manager.get_upload(BUCKET, dest_key, upload_id)
+    assert state.deferred_copy_tail
+
+    await _complete_upload(handler, f"/{BUCKET}/{dest_key}", upload_id, state, credentials)
+
+    dest_meta = await load_multipart_metadata(mock_s3, BUCKET, dest_key)
+    assert dest_meta.total_plaintext_size == part1_span
+    part = dest_meta.parts[0]
+    assert part.plaintext_size == part1_span
+    assert part.plaintext_size == sum(ip.plaintext_size for ip in part.internal_parts)
+
+    resp = await handler.handle_get_object(_get_request(f"/{BUCKET}/{dest_key}"), credentials)
+    assert await _read(resp) == src_plaintext[:part1_span]
 
 
 def test_prod_shape_passthrough_eligibility_and_route(settings, manager, credentials):
