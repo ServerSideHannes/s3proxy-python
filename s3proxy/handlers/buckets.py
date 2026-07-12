@@ -15,7 +15,14 @@ from structlog.stdlib import BoundLogger
 from .. import xml_responses
 from ..client import S3Credentials
 from ..errors import S3Error
-from ..state import INTERNAL_PREFIX, META_SUFFIX_LEGACY, delete_multipart_metadata
+from ..state import (
+    INTERNAL_PREFIX,
+    META_SUFFIX_LEGACY,
+    delete_multipart_metadata,
+    load_multipart_metadata,
+    plaintext_attr_cache,
+    synthetic_multipart_etag,
+)
 from ..xml_utils import find_element, find_elements
 from .base import BaseHandler
 
@@ -211,23 +218,45 @@ class BucketHandlerMixin(BaseHandler):
         sem = asyncio.Semaphore(LIST_HEAD_CONCURRENCY)
 
         async def resolve(obj: dict) -> dict:
+            backend_etag = str(obj.get("ETag", "")).strip('"')
+            cached = plaintext_attr_cache.get(bucket, obj["Key"], backend_etag)
+            if cached is not None:
+                size, etag = cached
+                return self._list_entry(obj, size, etag)
             async with sem:
                 try:
                     head = await client.head_object(bucket, obj["Key"])
                     meta = head.get("Metadata", {})
-                    size = self._get_plaintext_size(meta, obj.get("Size", 0))
-                    etag = self._get_effective_etag(meta, obj.get("ETag", ""))
+                    if "plaintext-size" in meta:
+                        size = self._get_plaintext_size(meta, obj.get("Size", 0))
+                        etag = self._get_effective_etag(meta, obj.get("ETag", ""))
+                    elif mp_meta := await load_multipart_metadata(client, bucket, obj["Key"]):
+                        # Multipart objects can't carry plaintext-size in user
+                        # metadata (it is fixed at CreateMultipartUpload); the
+                        # size lives in the .meta sidecar. Reporting the backend
+                        # Size here would leak the ciphertext size and make sync
+                        # clients re-upload every multipart object on each pass.
+                        size = mp_meta.total_plaintext_size
+                        etag = synthetic_multipart_etag(size)
+                    else:
+                        size = self._get_plaintext_size(meta, obj.get("Size", 0))
+                        etag = self._get_effective_etag(meta, obj.get("ETag", ""))
+                    plaintext_attr_cache.put(bucket, obj["Key"], backend_etag, size, etag)
                 except Exception:
-                    size, etag = obj.get("Size", 0), obj.get("ETag", "").strip('"')
-            return {
-                "key": obj["Key"],
-                "last_modified": _s3_timestamp(obj["LastModified"]),
-                "etag": etag,
-                "size": size,
-                "storage_class": obj.get("StorageClass", "STANDARD"),
-            }
+                    size, etag = obj.get("Size", 0), backend_etag
+            return self._list_entry(obj, size, etag)
 
         return await asyncio.gather(*[resolve(obj) for obj in listable])
+
+    @staticmethod
+    def _list_entry(obj: dict, size: int, etag: str) -> dict:
+        return {
+            "key": obj["Key"],
+            "last_modified": _s3_timestamp(obj["LastModified"]),
+            "etag": etag,
+            "size": size,
+            "storage_class": obj.get("StorageClass", "STANDARD"),
+        }
 
     async def handle_create_bucket(self, request: Request, creds: S3Credentials) -> Response:
         bucket = self._parse_bucket(request.url.path)

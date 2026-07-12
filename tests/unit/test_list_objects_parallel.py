@@ -15,6 +15,7 @@ INTERNAL_PREFIX = "s3proxy-internal/"
 
 class FakeHandler:
     _process_list_objects = BucketHandlerMixin._process_list_objects
+    _list_entry = staticmethod(BucketHandlerMixin._list_entry)
 
     def __init__(self):
         self.inflight = 0
