@@ -254,10 +254,10 @@ async def test_complete_multipart_primes_cache(
     handler._client = lambda creds: _ClientCM(mock_s3_client)
 
     body = (
-        "<CompleteMultipartUpload>"
-        "<Part><PartNumber>1</PartNumber><ETag>&quot;etag-1&quot;</ETag></Part>"
-        "</CompleteMultipartUpload>"
-    ).encode()
+        b"<CompleteMultipartUpload>"
+        b"<Part><PartNumber>1</PartNumber><ETag>&quot;etag-1&quot;</ETag></Part>"
+        b"</CompleteMultipartUpload>"
+    )
     resp = await handler.handle_complete_multipart_upload(
         _FakeRequest(f"/{bucket}/{key}", urlencode({"uploadId": upload_id}), body),
         credentials,
