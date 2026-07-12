@@ -8,6 +8,9 @@ This package provides:
 - Recovery logic for lost Redis state
 """
 
+# Plaintext attribute cache for listings
+from .attr_cache import PlaintextAttrCache, plaintext_attr_cache, synthetic_multipart_etag
+
 # State manager and storage
 from .manager import MAX_INTERNAL_PARTS_PER_CLIENT, MultipartStateManager
 
@@ -81,6 +84,10 @@ __all__ = [
     "load_upload_state",
     "persist_upload_state",
     "save_multipart_metadata",
+    # Plaintext attribute cache
+    "PlaintextAttrCache",
+    "plaintext_attr_cache",
+    "synthetic_multipart_etag",
     # Recovery
     "reconstruct_upload_state_from_s3",
     # Serialization

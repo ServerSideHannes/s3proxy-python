@@ -23,7 +23,9 @@ from ...state import (
     PartMetadata,
     delete_upload_state,
     persist_upload_state,
+    plaintext_attr_cache,
     save_multipart_metadata,
+    synthetic_multipart_etag,
 )
 from ...xml_utils import find_elements, get_element_text
 from ..base import BaseHandler
@@ -179,10 +181,20 @@ class LifecycleMixin(BaseHandler):
 
             # Complete in S3
             try:
-                await client.complete_multipart_upload(bucket, key, upload_id, s3_parts)
+                complete_resp = await client.complete_multipart_upload(
+                    bucket, key, upload_id, s3_parts
+                )
             except ClientError as e:
                 await self._handle_complete_error(
                     e, client, bucket, key, upload_id, s3_parts, completed_parts, total_plaintext
+                )
+            else:
+                plaintext_attr_cache.put(
+                    bucket,
+                    key,
+                    str(complete_resp.get("ETag", "")).strip('"'),
+                    total_plaintext,
+                    synthetic_multipart_etag(total_plaintext),
                 )
 
             # Save metadata first, then delete state.
