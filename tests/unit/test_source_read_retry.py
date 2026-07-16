@@ -195,10 +195,7 @@ def _mixin():
 async def test_stream_resume_whole_object_resumes_at_offset():
     data = bytes(range(256)) * 4
     client = _StreamClient(data, die_after=100)
-    chunks = [
-        c
-        async for c in _mixin()._stream_raw_source_with_resume(client, "b", "k", None)
-    ]
+    chunks = [c async for c in _mixin()._stream_raw_source_with_resume(client, "b", "k", None)]
     assert b"".join(chunks) == data
     assert client.calls == [None, "bytes=100-"]
 
@@ -208,8 +205,7 @@ async def test_stream_resume_preserves_original_range():
     data = bytes(range(256))
     client = _StreamClient(data, die_after=15)
     chunks = [
-        c
-        async for c in _mixin()._stream_raw_source_with_resume(client, "b", "k", "bytes=10-59")
+        c async for c in _mixin()._stream_raw_source_with_resume(client, "b", "k", "bytes=10-59")
     ]
     assert b"".join(chunks) == data[10:60]
     assert client.calls == ["bytes=10-59", "bytes=25-59"]
@@ -249,7 +245,12 @@ class _FlakyS3:
         if self._upc_failures > 0:
             self._upc_failures -= 1
             raise ClientError(
-                {"Error": {"Code": "InternalError", "Message": "The server did not respond in time."}},
+                {
+                    "Error": {
+                        "Code": "InternalError",
+                        "Message": "The server did not respond in time.",
+                    }
+                },
                 "UploadPartCopy",
             )
         return await self._inner.upload_part_copy(*args, **kwargs)

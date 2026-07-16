@@ -45,7 +45,8 @@ SOURCE_READ_ATTEMPTS = int(os.environ.get("S3PROXY_SOURCE_READ_ATTEMPTS", "4"))
 SOURCE_READ_BACKOFF_SEC = float(os.environ.get("S3PROXY_SOURCE_READ_BACKOFF", "0.5"))
 
 _RETRYABLE_S3_ERROR_CODES = frozenset(
-    {"InternalError", "SlowDown", "RequestTimeout", "ServiceUnavailable", "BadGateway", "500", "502", "503"}
+    {"InternalError", "SlowDown", "RequestTimeout", "ServiceUnavailable", "BadGateway"}
+    | {"500", "502", "503"}
 )
 
 _RETRYABLE_TRANSPORT_ERRORS = (
@@ -72,7 +73,7 @@ def is_retryable_source_error(exc: BaseException) -> bool:
 
 
 async def read_source_bytes(
-    client: "S3Client",
+    client: S3Client,
     bucket: str,
     key: str,
     range_header: str | None = None,
@@ -96,6 +97,7 @@ async def read_source_bytes(
             )
             await asyncio.sleep(SOURCE_READ_BACKOFF_SEC * (2 ** (attempt - 1)))
     raise AssertionError("unreachable")
+
 
 # Shared httpx client for connection reuse
 _http_client: httpx.AsyncClient | None = None
