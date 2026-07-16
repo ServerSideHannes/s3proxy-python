@@ -2,15 +2,25 @@
 
 import asyncio
 import base64
+import os
 import re
 from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import NoReturn
 from urllib.parse import parse_qs, unquote
 
+import aiohttp
 import httpx
 import structlog
-from botocore.exceptions import ClientError
+from botocore.exceptions import (
+    ClientError,
+    ConnectionClosedError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    IncompleteReadError,
+    ReadTimeoutError,
+    ResponseStreamingError,
+)
 from fastapi import Request, Response
 from structlog.stdlib import BoundLogger
 
@@ -25,6 +35,67 @@ logger: BoundLogger = structlog.get_logger(__name__)
 
 PATH_RE = re.compile(r"^/([^/]+)/(.+)$")
 BUCKET_RE = re.compile(r"^/([^/]+)/?$")  # Handles /bucket and /bucket/
+
+# botocore's retry layer only covers a request up to the response headers; a
+# body that dies mid-read (backend drops a long-lived connection, observed as
+# ClientPayloadError at a fixed offset after minutes of sequential frame GETs)
+# surfaces here with no retry and used to fail whole UploadPartCopy parts.
+# Re-issuing the same ranged GET on a fresh connection is always safe.
+SOURCE_READ_ATTEMPTS = int(os.environ.get("S3PROXY_SOURCE_READ_ATTEMPTS", "4"))
+SOURCE_READ_BACKOFF_SEC = float(os.environ.get("S3PROXY_SOURCE_READ_BACKOFF", "0.5"))
+
+_RETRYABLE_S3_ERROR_CODES = frozenset(
+    {"InternalError", "SlowDown", "RequestTimeout", "ServiceUnavailable", "BadGateway", "500", "502", "503"}
+)
+
+_RETRYABLE_TRANSPORT_ERRORS = (
+    aiohttp.ClientPayloadError,
+    aiohttp.ClientConnectionError,
+    TimeoutError,
+    ConnectionClosedError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    IncompleteReadError,
+    ReadTimeoutError,
+    ResponseStreamingError,
+)
+
+
+def is_retryable_source_error(exc: BaseException) -> bool:
+    """Transient transport/backend failures where re-issuing the request is safe."""
+    if isinstance(exc, _RETRYABLE_TRANSPORT_ERRORS):
+        return True
+    if isinstance(exc, ClientError):
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        return code in _RETRYABLE_S3_ERROR_CODES
+    return False
+
+
+async def read_source_bytes(
+    client: "S3Client",
+    bucket: str,
+    key: str,
+    range_header: str | None = None,
+) -> bytes:
+    """GET an object (or range) and read the full body, retrying truncated reads."""
+    for attempt in range(1, SOURCE_READ_ATTEMPTS + 1):
+        try:
+            resp = await client.get_object(bucket, key, range_header=range_header)
+            async with resp["Body"] as body:
+                return await body.read()
+        except Exception as exc:
+            if not is_retryable_source_error(exc) or attempt == SOURCE_READ_ATTEMPTS:
+                raise
+            logger.warning(
+                "SOURCE_READ_RETRY",
+                bucket=bucket,
+                key=key,
+                range=range_header,
+                attempt=attempt,
+                error=str(exc),
+            )
+            await asyncio.sleep(SOURCE_READ_BACKOFF_SEC * (2 ** (attempt - 1)))
+    raise AssertionError("unreachable")
 
 # Shared httpx client for connection reuse
 _http_client: httpx.AsyncClient | None = None
@@ -229,9 +300,7 @@ class BaseHandler:
     async def _download_encrypted_single(
         self, client: S3Client, bucket: str, key: str, wrapped_dek_b64: str, kid: str = ""
     ) -> bytes:
-        resp = await client.get_object(bucket, key)
-        async with resp["Body"] as body:
-            ciphertext = await body.read()
+        ciphertext = await read_source_bytes(client, bucket, key)
         wrapped_dek = base64.b64decode(wrapped_dek_b64)
         return crypto.decrypt_object(ciphertext, wrapped_dek, self.keyring.key_by_id(kid))
 
@@ -283,9 +352,9 @@ class BaseHandler:
 
                     if in_range:
                         ct_end = ct_offset + fsize - 1
-                        resp = await client.get_object(bucket, key, f"bytes={ct_offset}-{ct_end}")
-                        async with resp["Body"] as body:
-                            ciphertext = await body.read()
+                        ciphertext = await read_source_bytes(
+                            client, bucket, key, f"bytes={ct_offset}-{ct_end}"
+                        )
                         plaintext = crypto.decrypt(ciphertext, dek)
 
                         if range_start is not None:
