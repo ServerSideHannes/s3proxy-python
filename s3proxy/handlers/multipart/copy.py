@@ -31,7 +31,8 @@ from ...state import (
     persist_upload_state,
 )
 from ...utils import format_iso8601
-from ..base import BaseHandler
+from .. import base
+from ..base import BaseHandler, is_retryable_source_error, read_source_bytes
 from .upload_part import _PlaintextReader
 
 logger: BoundLogger = structlog.get_logger(__name__)
@@ -876,14 +877,36 @@ class CopyPartMixin(BaseHandler):
             copy_range = f"bytes={seg.ct_offset}-{ct_end}"
             part_reserve = crypto.copy_passthrough_segment_peak(seg.plaintext_size)
             async with segment_sem, concurrency.reserve_copy_memory(part_reserve):
-                resp = await client.upload_part_copy(
-                    bucket,
-                    key,
-                    upload_id,
-                    internal_num,
-                    copy_source_path,
-                    copy_source_range=copy_range,
-                )
+                # The backend can accept the copy, stream a 200, and still fail
+                # ("InternalError: The server did not respond in time" embedded
+                # in the body). Same part number + range makes a retry safe.
+                for attempt in range(1, base.SOURCE_READ_ATTEMPTS + 1):
+                    try:
+                        resp = await client.upload_part_copy(
+                            bucket,
+                            key,
+                            upload_id,
+                            internal_num,
+                            copy_source_path,
+                            copy_source_range=copy_range,
+                        )
+                        break
+                    except Exception as exc:
+                        if (
+                            not is_retryable_source_error(exc)
+                            or attempt == base.SOURCE_READ_ATTEMPTS
+                        ):
+                            raise
+                        logger.warning(
+                            "UPLOAD_PART_COPY_SEGMENT_RETRY",
+                            bucket=bucket,
+                            key=key,
+                            part_num=part_num,
+                            internal_part=internal_num,
+                            attempt=attempt,
+                            error=str(exc),
+                        )
+                        await asyncio.sleep(base.SOURCE_READ_BACKOFF_SEC * (2 ** (attempt - 1)))
             return InternalPartMetadata(
                 internal_part_number=internal_num,
                 plaintext_size=seg.plaintext_size,
@@ -1103,9 +1126,7 @@ class CopyPartMixin(BaseHandler):
     ) -> bytes:
         """Download the full plaintext of a copy source (small sources only)."""
         if not src_wrapped_dek and not src_multipart_meta:
-            resp = await client.get_object(src_bucket, src_key, range_header=copy_source_range)
-            async with resp["Body"] as body:
-                return await body.read()
+            return await read_source_bytes(client, src_bucket, src_key, copy_source_range)
         elif src_multipart_meta:
             range_start, range_end = self._parse_copy_source_range(
                 copy_source_range, src_multipart_meta.total_plaintext_size
@@ -1308,16 +1329,60 @@ class CopyPartMixin(BaseHandler):
                 plaintext = plaintext[start : end + 1]
             yield plaintext
         else:
-            resp = await client.get_object(src_bucket, src_key, range_header=copy_source_range)
-            async with resp["Body"] as body:
-                # resp["Body"] enters as an aiohttp ClientResponse, whose read()
-                # takes no size arg; stream via its StreamReader in bounded chunks
-                # (body.read(n) raised TypeError and 500'd every passthrough copy).
-                while True:
-                    chunk = await body.content.read(crypto.MAX_BUFFER_SIZE)
-                    if not chunk:
-                        break
-                    yield chunk
+            async for chunk in self._stream_raw_source_with_resume(
+                client, src_bucket, src_key, copy_source_range
+            ):
+                yield chunk
+
+    async def _stream_raw_source_with_resume(
+        self,
+        client: S3Client,
+        src_bucket: str,
+        src_key: str,
+        copy_source_range: str | None,
+    ) -> AsyncIterator[bytes]:
+        """Stream an unencrypted copy source, resuming with a ranged GET if the
+        body dies mid-read (backend dropping a long-lived connection). Bytes
+        already yielded are never re-fetched: the resume range starts at the
+        exact offset the previous attempt reached.
+        """
+        if copy_source_range:
+            range_start, range_end = self._parse_raw_copy_source_range(copy_source_range)
+        else:
+            range_start, range_end = 0, None
+        sent = 0
+        attempt = 1
+        while True:
+            if sent == 0 and copy_source_range is None:
+                range_header = None
+            else:
+                end_part = "" if range_end is None else str(range_end)
+                range_header = f"bytes={range_start + sent}-{end_part}"
+            try:
+                resp = await client.get_object(src_bucket, src_key, range_header=range_header)
+                async with resp["Body"] as body:
+                    # resp["Body"] enters as an aiohttp ClientResponse, whose read()
+                    # takes no size arg; stream via its StreamReader in bounded chunks
+                    # (body.read(n) raised TypeError and 500'd every passthrough copy).
+                    while True:
+                        chunk = await body.content.read(crypto.MAX_BUFFER_SIZE)
+                        if not chunk:
+                            return
+                        sent += len(chunk)
+                        yield chunk
+            except Exception as exc:
+                if not is_retryable_source_error(exc) or attempt >= base.SOURCE_READ_ATTEMPTS:
+                    raise
+                logger.warning(
+                    "COPY_SOURCE_STREAM_RESUME",
+                    bucket=src_bucket,
+                    key=src_key,
+                    resumed_at=range_start + sent,
+                    attempt=attempt,
+                    error=str(exc),
+                )
+                await asyncio.sleep(base.SOURCE_READ_BACKOFF_SEC * (2 ** (attempt - 1)))
+                attempt += 1
 
     async def _pump_copy_chunks(
         self,
