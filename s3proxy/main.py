@@ -20,13 +20,18 @@ logger: BoundLogger = structlog.get_logger(__name__).bind(pod=pod_name)
 
 def main():
     """CLI entry point for running S3Proxy server."""
-    try:
-        import uvloop
+    # uvloop 0.22.1 on Python 3.14 dies with a libuv abort (uv__io_poll assertion,
+    # preceded by "OSError: [Errno 9] Bad file descriptor" from TCPTransport) when
+    # the backend drops connections under load — killed 3 pods on 2026-07-16 with
+    # every in-flight upload. Off unless explicitly re-enabled.
+    if os.environ.get("S3PROXY_UVLOOP", "0") == "1":
+        try:
+            import uvloop
 
-        uvloop.install()
-        logger.info("Using uvloop for improved performance")
-    except ImportError:
-        pass
+            uvloop.install()
+            logger.info("Using uvloop for improved performance")
+        except ImportError:
+            pass
 
     parser = argparse.ArgumentParser(description="S3Proxy - Transparent S3 encryption")
     parser.add_argument("--ip", default="0.0.0.0", help="Bind address")
