@@ -23,15 +23,20 @@ def main():
     # uvloop 0.22.1 on Python 3.14 dies with a libuv abort (uv__io_poll assertion,
     # preceded by "OSError: [Errno 9] Bad file descriptor" from TCPTransport) when
     # the backend drops connections under load — killed 3 pods on 2026-07-16 with
-    # every in-flight upload. Off unless explicitly re-enabled.
-    if os.environ.get("S3PROXY_UVLOOP", "0") == "1":
+    # every in-flight upload. Off unless explicitly re-enabled. Skipping
+    # uvloop.install() here is NOT enough: uvicorn's default loop="auto" installs
+    # uvloop on its own whenever the package is importable (confirmed by a
+    # 2026-07-18 crash trace with uv__io_poll frames on a build without this
+    # install call), so the loop choice must be forced in the uvicorn config too.
+    use_uvloop = os.environ.get("S3PROXY_UVLOOP", "0") == "1"
+    if use_uvloop:
         try:
             import uvloop
 
             uvloop.install()
             logger.info("Using uvloop for improved performance")
         except ImportError:
-            pass
+            use_uvloop = False
 
     parser = argparse.ArgumentParser(description="S3Proxy - Transparent S3 encryption")
     parser.add_argument("--ip", default="0.0.0.0", help="Bind address")
@@ -61,6 +66,7 @@ def main():
         "host": settings.ip,
         "port": settings.port,
         "log_level": settings.log_level.lower(),
+        "loop": "auto" if use_uvloop else "asyncio",
     }
 
     if settings.memory_limit_mb > 0:

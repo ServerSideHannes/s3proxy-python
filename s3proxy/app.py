@@ -157,7 +157,13 @@ def create_lifespan(settings: Settings, credentials_store: dict[str, str]) -> As
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         _silence_health_probe_access_logs()
-        logger.info("Starting", endpoint=settings.s3_endpoint, port=settings.port)
+        loop = asyncio.get_running_loop()
+        logger.info(
+            "Starting",
+            endpoint=settings.s3_endpoint,
+            port=settings.port,
+            event_loop=f"{type(loop).__module__}.{type(loop).__qualname__}",
+        )
 
         # Initialize Redis FIRST, then create manager with correct store
         await init_redis(settings.redis_url or None, settings.redis_password or None)
