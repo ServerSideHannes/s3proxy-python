@@ -362,6 +362,37 @@ def test_prod_shape_part2_split_has_head_and_bulk_passthrough(settings, manager)
     assert prod_part2_start % chunk_size != 0
 
 
+def test_hybrid_split_log_fields_part2_shape(settings, manager, credentials):
+    """Route diagnostics must show head+passthrough for prod part 2 offsets."""
+    handler = _copy_handler(settings, manager)
+    kid, kek = settings.keyring.key_for(credentials.access_key)
+    prod_part1_end = 4_999_341_931
+    prod_part2_start = prod_part1_end + 1
+    chunk_size = (50 * 1024 * 1024) // 6
+    num_parts = (prod_part1_end // chunk_size) + 3
+    _, src_plaintext, _, src_meta, inflated_total, _ = _build_scylla_prod_shape_source(
+        kid,
+        kek,
+        num_internal_parts=num_parts,
+        metadata_inflate_ratio=1.27,
+        chunk_size=chunk_size,
+        scylla_range_end=prod_part1_end,
+    )
+    part2_range = f"bytes={prod_part2_start}-{inflated_total - 1}"
+    fields = handler._hybrid_split_log_fields(
+        part2_range,
+        "wrapped-dek",
+        src_meta,
+        {},
+        {},
+    )
+    assert fields is not None
+    assert fields["hybrid_mode"] == "head_and_passthrough"
+    assert fields["range_start"] == prod_part2_start
+    assert fields["passthrough_segments"] >= 1
+    assert int(fields["estimated_frame_reads_if_streaming"]) > int(fields["passthrough_segments"])
+
+
 def test_prod_shape_part2_nonzero_start_eligible_for_passthrough(settings, manager, credentials):
     """Regression: prod part 2 must not hit ranged_copy_nonzero_start."""
     handler = _copy_handler(settings, manager)

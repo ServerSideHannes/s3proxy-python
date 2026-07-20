@@ -149,6 +149,13 @@ class CopyPartMixin(BaseHandler):
                 if passthrough_block is None
                 else ("streaming" if plaintext_size > crypto.STREAMING_THRESHOLD else "simple")
             )
+            hybrid_split = self._hybrid_split_log_fields(
+                copy_source_range,
+                src_wrapped_dek,
+                src_multipart_meta,
+                src_metadata,
+                head_resp,
+            )
             self._log_upload_part_copy_route(
                 bucket=bucket,
                 key=key,
@@ -159,7 +166,23 @@ class CopyPartMixin(BaseHandler):
                 range_plaintext_size=plaintext_size,
                 route=route,
                 passthrough_blocked_reason=passthrough_block,
+                hybrid_split=hybrid_split,
             )
+            if (
+                route == "streaming"
+                and part_num > 1
+                and plaintext_size > crypto.STREAMING_THRESHOLD
+            ):
+                logger.warning(
+                    "UPLOAD_PART_COPY_PART2_STREAMING_FALLBACK",
+                    bucket=bucket,
+                    key=key,
+                    part_num=part_num,
+                    raw_copy_source_range=raw_copy_source_range,
+                    passthrough_blocked_reason=passthrough_block,
+                    range_plaintext_mb=f"{plaintext_size / 1024 / 1024:.2f}MB",
+                    **(hybrid_split or {}),
+                )
 
         # Validation and routing are done with real HTTP status semantics; the
         # copy work itself runs while the response streams keepalive whitespace,
@@ -550,6 +573,61 @@ class CopyPartMixin(BaseHandler):
                 return "ranged_copy_segment_misaligned"
         return None
 
+    def _hybrid_split_log_fields(
+        self,
+        copy_source_range: str | None,
+        src_wrapped_dek: str | None,
+        src_multipart_meta: MultipartMetadata | None,
+        src_metadata: dict,
+        head_resp: dict,
+    ) -> dict[str, str | int] | None:
+        """Structured split breakdown for route/passthrough diagnostics."""
+        if not copy_source_range or not src_multipart_meta:
+            return None
+        total = src_multipart_meta.total_plaintext_size
+        range_start, range_end = self._parse_copy_source_range(copy_source_range, total)
+        segments = self._source_ciphertext_segments(
+            src_multipart_meta, head_resp, src_wrapped_dek, src_metadata
+        )
+        split = self._split_plaintext_range_on_segments(segments, range_start, range_end)
+        if split is None:
+            return {
+                "hybrid_mode": "split_failed",
+                "range_start": range_start,
+                "range_end": range_end,
+            }
+        head_bytes = (
+            split.streaming_head[1] - split.streaming_head[0] + 1 if split.streaming_head else 0
+        )
+        tail_bytes = (
+            split.streaming_tail[1] - split.streaming_tail[0] + 1 if split.streaming_tail else 0
+        )
+        passthrough_bytes = sum(seg.plaintext_size for seg in split.passthrough_segments)
+        if split.streaming_head and split.streaming_tail:
+            mode = "head_and_tail"
+        elif split.streaming_head:
+            mode = "head_and_passthrough"
+        elif split.streaming_tail:
+            mode = "passthrough_and_tail"
+        elif split.passthrough_segments:
+            mode = "passthrough_only"
+        else:
+            mode = "stream_only"
+        chunk = split.passthrough_segments[0].plaintext_size if split.passthrough_segments else 0
+        frame_reads_if_streaming = (
+            (range_end - range_start + 1) // chunk + 1 if chunk else 0
+        )
+        return {
+            "hybrid_mode": mode,
+            "range_start": range_start,
+            "range_end": range_end,
+            "passthrough_segments": len(split.passthrough_segments),
+            "passthrough_mb": f"{passthrough_bytes / 1024 / 1024:.2f}MB",
+            "streaming_head_mb": f"{head_bytes / 1024 / 1024:.2f}MB",
+            "streaming_tail_mb": f"{tail_bytes / 1024 / 1024:.2f}MB",
+            "estimated_frame_reads_if_streaming": frame_reads_if_streaming,
+        }
+
     def _log_upload_part_copy_route(
         self,
         *,
@@ -562,6 +640,7 @@ class CopyPartMixin(BaseHandler):
         range_plaintext_size: int,
         route: str,
         passthrough_blocked_reason: str | None,
+        hybrid_split: dict[str, str | int] | None = None,
     ) -> None:
         logger.info(
             "UPLOAD_PART_COPY_ROUTE",
@@ -574,6 +653,7 @@ class CopyPartMixin(BaseHandler):
             range_plaintext_mb=f"{range_plaintext_size / 1024 / 1024:.2f}MB",
             route=route,
             passthrough_blocked_reason=passthrough_blocked_reason,
+            **(hybrid_split or {}),
         )
 
     def _can_passthrough_part_copy(
@@ -1073,15 +1153,24 @@ class CopyPartMixin(BaseHandler):
             ),
         )
 
+        passthrough_segment_count = len(segments)
+        head_plaintext_bytes = internal_parts[0].plaintext_size if head_internal_slots else 0
         logger.info(
             "UPLOAD_PART_COPY_PASSTHROUGH_COMPLETE",
             bucket=bucket,
             key=key,
             part_num=part_num,
             internal_parts=len(internal_parts),
+            passthrough_segments=passthrough_segment_count,
+            head_plaintext_mb=f"{head_plaintext_bytes / 1024 / 1024:.2f}MB",
             deferred_tail_bytes=len(deferred_tail_for_next) if deferred_tail_for_next else 0,
             plaintext_mb=f"{total_plaintext / 1024 / 1024:.2f}MB",
             copy_source_range=copy_source_range,
+            hybrid_mode=(
+                "head_and_passthrough"
+                if streaming_head
+                else ("passthrough_and_tail" if streaming_tail else "passthrough_only")
+            ),
             elapsed_sec=f"{time.monotonic() - start:.2f}s",
         )
         return Response(
