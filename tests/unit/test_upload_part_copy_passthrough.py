@@ -320,6 +320,110 @@ def test_split_plaintext_range_allows_hybrid_tail(settings, manager):
     assert split is not None
     assert len(split.passthrough_segments) == 9
     assert split.streaming_tail == (chunk * 9, chunk * 10 - 1 - chunk // 2)
+    assert split.streaming_head is None
+
+
+def test_split_plaintext_range_allows_hybrid_head(settings, manager):
+    """Part 2 starts mid internal frame: stream head, passthrough the rest."""
+    from s3proxy.handlers.multipart.copy import _CiphertextSegment
+
+    handler = _copy_handler(settings, manager)
+    chunk = 1_048_576
+    ct = chunk + 64
+    segments = [_CiphertextSegment(chunk, ct, i * ct) for i in range(10)]
+    part1_end = chunk * 5 + chunk // 2
+    part2_start = part1_end + 1
+    part2_end = chunk * 10 - 1
+    split = handler._split_plaintext_range_on_segments(segments, part2_start, part2_end)
+    assert split is not None
+    assert split.streaming_head == (part2_start, chunk * 6 - 1)
+    assert len(split.passthrough_segments) == 4
+    assert split.streaming_tail is None
+
+
+def test_prod_shape_part2_split_has_head_and_bulk_passthrough(settings, manager):
+    """Prod byte offsets: part 2 starts mid-frame, bulk is passthrough-safe."""
+    from s3proxy.handlers.multipart.copy import _CiphertextSegment
+
+    handler = _copy_handler(settings, manager)
+    chunk_size = (50 * 1024 * 1024) // 6
+    ct = chunk_size + 28
+    prod_part1_end = 4_999_341_931
+    prod_part2_start = prod_part1_end + 1
+    num_segments = (prod_part2_start // chunk_size) + 200
+    segments = [_CiphertextSegment(chunk_size, ct, i * ct) for i in range(num_segments)]
+    source_end = num_segments * chunk_size - 1
+    split = handler._split_plaintext_range_on_segments(segments, prod_part2_start, source_end)
+    assert split is not None
+    assert split.streaming_head is not None
+    assert len(split.passthrough_segments) > 100
+    head_bytes = split.streaming_head[1] - split.streaming_head[0] + 1
+    assert head_bytes < chunk_size
+    assert prod_part2_start % chunk_size != 0
+
+
+def test_hybrid_split_log_fields_part2_shape(settings, manager, credentials):
+    """Route diagnostics must show head+passthrough for prod part 2 offsets."""
+    handler = _copy_handler(settings, manager)
+    kid, kek = settings.keyring.key_for(credentials.access_key)
+    prod_part1_end = 4_999_341_931
+    prod_part2_start = prod_part1_end + 1
+    chunk_size = (50 * 1024 * 1024) // 6
+    num_parts = (prod_part1_end // chunk_size) + 3
+    _, src_plaintext, _, src_meta, inflated_total, _ = _build_scylla_prod_shape_source(
+        kid,
+        kek,
+        num_internal_parts=num_parts,
+        metadata_inflate_ratio=1.27,
+        chunk_size=chunk_size,
+        scylla_range_end=prod_part1_end,
+    )
+    part2_range = f"bytes={prod_part2_start}-{inflated_total - 1}"
+    fields = handler._hybrid_split_log_fields(
+        part2_range,
+        "wrapped-dek",
+        src_meta,
+        {},
+        {},
+    )
+    assert fields is not None
+    assert fields["hybrid_mode"] == "head_and_passthrough"
+    assert fields["range_start"] == prod_part2_start
+    assert fields["passthrough_segments"] >= 1
+    assert int(fields["estimated_frame_reads_if_streaming"]) > int(fields["passthrough_segments"])
+
+
+def test_prod_shape_part2_nonzero_start_eligible_for_passthrough(settings, manager, credentials):
+    """Regression: prod part 2 must not hit ranged_copy_nonzero_start."""
+    handler = _copy_handler(settings, manager)
+    kid, kek = settings.keyring.key_for(credentials.access_key)
+    prod_part1_end = 4_999_341_931
+    prod_part2_start = prod_part1_end + 1
+    chunk_size = (50 * 1024 * 1024) // 6
+    num_parts = (prod_part1_end // chunk_size) + 3
+    _, src_plaintext, _, src_meta, inflated_total, _ = _build_scylla_prod_shape_source(
+        kid,
+        kek,
+        num_internal_parts=num_parts,
+        metadata_inflate_ratio=1.27,
+        chunk_size=chunk_size,
+        scylla_range_end=prod_part1_end,
+    )
+    # Prod part 2 range uses HEAD/metadata size (inflated), not only stored segments.
+    part2_range = f"bytes={prod_part2_start}-{inflated_total - 1}"
+    plaintext_size = inflated_total - prod_part2_start
+    assert plaintext_size > crypto.STREAMING_THRESHOLD
+    block = handler._passthrough_block_reason(
+        part2_range,
+        part2_range,
+        "wrapped-dek",
+        src_meta,
+        {},
+        credentials,
+        plaintext_size,
+        {},
+    )
+    assert block is None, f"expected passthrough, got {block}"
 
 
 def _build_scylla_prod_shape_source(
@@ -537,8 +641,8 @@ async def test_two_part_hybrid_defer_tail_completes_fast(
     kid, kek = settings.keyring.key_for(credentials.access_key)
     chunk = 8 * 1024 * 1024
     # Part 1 must exceed STREAMING_THRESHOLD (32MB) for hybrid passthrough; part 2
-    # must also exceed it so streaming consumes the deferred tail. Internal frames
-    # must be >= MIN_PART_SIZE so passthrough segments are valid S3 parts.
+    # must also exceed it so hybrid passthrough consumes the deferred head. Internal
+    # frames must be >= MIN_PART_SIZE so passthrough segments are valid S3 parts.
     num_segments = 12
     part1_range_end = chunk * 4 + chunk // 2  # 36MB, ~4MB deferred tail
     src_dek, src_plaintext, ciphertext_blob, src_meta, inflated_total, _ = (
@@ -587,6 +691,7 @@ async def test_two_part_hybrid_defer_tail_completes_fast(
     assert len(deferred) < crypto.MIN_PART_SIZE
 
     part2_start = part1_range_end + 1
+    mark2 = len(mock_s3.call_history)
     resp2 = await handler.handle_upload_part_copy(
         _copy_part_request(
             f"/{BUCKET}/sst/small-Data.db.sm_manifest",
@@ -598,6 +703,13 @@ async def test_two_part_hybrid_defer_tail_completes_fast(
         credentials,
     )
     await _read(resp2)
+    part2_ops = mock_s3.call_history[mark2:]
+    copy_ops = [c for c in part2_ops if c[0] == "upload_part_copy"]
+    upload_ops = [c for c in part2_ops if c[0] == "upload_part"]
+    assert len(copy_ops) >= 3, "part 2 bulk must passthrough aligned segments"
+    assert len(upload_ops) == 1, "part 2 should upload one hybrid head, not stream every frame"
+    # MD5 etag computation still frame-reads the range in parallel; the regression
+    # is avoiding a streaming-only path that upload_part's every internal chunk.
 
     after_part2 = await handler.multipart_manager.get_upload(
         BUCKET, "sst/small-Data.db.sm_manifest", upload_id
@@ -648,8 +760,8 @@ async def test_two_part_defer_tail_total_plaintext_not_double_counted(
 ):
     """Regression: rclone 2-part copy (>copy-cutoff SSTable) reported size+tail.
 
-    Part 1 defers its sub-5MB tail; part 2's streaming copy folds the tail into
-    its own stream and counts it. Part 1's metadata must therefore NOT count the
+    Part 1 defers its sub-5MB tail; part 2's hybrid passthrough folds the tail into
+    the head internal part and counts it. Part 1's metadata must therefore NOT count the
     tail too, or HEAD Content-Length comes out exactly one tail too large and
     rclone fails the copy with "corrupted on transfer: sizes differ"
     (398 files x +1,129,664 bytes, backup run sm_20260709080013UTC).

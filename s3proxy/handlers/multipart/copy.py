@@ -80,10 +80,11 @@ class _CiphertextSegment:
 
 @dataclass(frozen=True, slots=True)
 class _PlaintextRangeSplit:
-    """Passthrough-safe prefix segments plus optional plaintext tail to re-encrypt."""
+    """Passthrough-safe segments plus optional plaintext head/tail to re-encrypt."""
 
     passthrough_segments: tuple[_CiphertextSegment, ...]
     streaming_tail: tuple[int, int] | None  # inclusive plaintext [start, end]
+    streaming_head: tuple[int, int] | None = None  # inclusive plaintext [start, end]
 
 
 class CopyPartMixin(BaseHandler):
@@ -148,6 +149,13 @@ class CopyPartMixin(BaseHandler):
                 if passthrough_block is None
                 else ("streaming" if plaintext_size > crypto.STREAMING_THRESHOLD else "simple")
             )
+            hybrid_split = self._hybrid_split_log_fields(
+                copy_source_range,
+                src_wrapped_dek,
+                src_multipart_meta,
+                src_metadata,
+                head_resp,
+            )
             self._log_upload_part_copy_route(
                 bucket=bucket,
                 key=key,
@@ -158,7 +166,23 @@ class CopyPartMixin(BaseHandler):
                 range_plaintext_size=plaintext_size,
                 route=route,
                 passthrough_blocked_reason=passthrough_block,
+                hybrid_split=hybrid_split,
             )
+            if (
+                route == "streaming"
+                and part_num > 1
+                and plaintext_size > crypto.STREAMING_THRESHOLD
+            ):
+                logger.warning(
+                    "UPLOAD_PART_COPY_PART2_STREAMING_FALLBACK",
+                    bucket=bucket,
+                    key=key,
+                    part_num=part_num,
+                    raw_copy_source_range=raw_copy_source_range,
+                    passthrough_blocked_reason=passthrough_block,
+                    range_plaintext_mb=f"{plaintext_size / 1024 / 1024:.2f}MB",
+                    **(hybrid_split or {}),
+                )
 
         # Validation and routing are done with real HTTP status semantics; the
         # copy work itself runs while the response streams keepalive whitespace,
@@ -397,16 +421,21 @@ class CopyPartMixin(BaseHandler):
         range_start: int,
         range_end: int,
     ) -> _PlaintextRangeSplit | None:
-        """Split a plaintext range into ciphertext-passthrough prefix + optional streaming tail.
+        """Split a plaintext range into passthrough segments + optional head/tail to re-encrypt.
 
-        Scylla manifest ranges often end mid internal frame (~8.33MB from 50MB uploads).
-        Copy every fully covered segment server-side and re-encrypt only the trailing suffix.
+        Scylla manifest part 1 often ends mid internal frame (~8.33MB from 50MB uploads):
+        passthrough aligned prefix, defer or stream the trailing suffix. Part 2 starts
+        mid-frame after part 1: stream/defer the head prefix, passthrough the rest.
         """
+        if not segments:
+            return None
+        range_end = min(range_end, self._source_plaintext_end(segments))
         if range_start > range_end:
-            return _PlaintextRangeSplit((), None)
+            return _PlaintextRangeSplit((), None, None)
         selected: list[_CiphertextSegment] = []
         pt_offset = 0
         streaming_tail: tuple[int, int] | None = None
+        streaming_head: tuple[int, int] | None = None
         for seg in segments:
             seg_start = pt_offset
             seg_end = pt_offset + seg.plaintext_size - 1
@@ -416,15 +445,22 @@ class CopyPartMixin(BaseHandler):
             if seg_start > range_end:
                 break
             if seg_start < range_start:
-                return None
+                head_end = min(seg_end, range_end)
+                streaming_head = (range_start, head_end)
+                if head_end >= range_end:
+                    return _PlaintextRangeSplit((), None, streaming_head)
+                pt_offset += seg.plaintext_size
+                continue
             if seg_end > range_end:
                 streaming_tail = (seg_start, range_end)
                 break
             selected.append(seg)
             pt_offset += seg.plaintext_size
-        if streaming_tail is None and pt_offset <= range_end:
+        if streaming_tail is None and streaming_head is None and pt_offset <= range_end:
             return None
-        return _PlaintextRangeSplit(tuple(selected), streaming_tail)
+        if not selected and not streaming_tail and not streaming_head:
+            return None
+        return _PlaintextRangeSplit(tuple(selected), streaming_tail, streaming_head)
 
     def _source_plaintext_end(self, segments: list[_CiphertextSegment]) -> int:
         if not segments:
@@ -477,7 +513,7 @@ class CopyPartMixin(BaseHandler):
         split = self._split_plaintext_range_on_segments(segments, range_start, range_end)
         if split is None:
             return None
-        if split.streaming_tail is not None:
+        if split.streaming_tail is not None or split.streaming_head is not None:
             return None
         return list(split.passthrough_segments)
 
@@ -516,8 +552,6 @@ class CopyPartMixin(BaseHandler):
 
         total = src_multipart_meta.total_plaintext_size
         range_start, range_end = self._parse_copy_source_range(copy_source_range, total)
-        if range_start != 0:
-            return "ranged_copy_nonzero_start"
 
         segments = self._source_ciphertext_segments(
             src_multipart_meta, head_resp, src_wrapped_dek, src_metadata
@@ -525,14 +559,72 @@ class CopyPartMixin(BaseHandler):
         split = self._split_plaintext_range_on_segments(segments, range_start, range_end)
         if split is None:
             return "ranged_copy_segment_misaligned"
-        if not split.passthrough_segments and not split.streaming_tail:
+        if not split.passthrough_segments and not split.streaming_tail and not split.streaming_head:
             return "ranged_copy_empty_segments"
-        if not split.passthrough_segments and split.streaming_tail:
-            tail_bytes = split.streaming_tail[1] - split.streaming_tail[0] + 1
-            if tail_bytes <= crypto.STREAMING_THRESHOLD:
+        if not split.passthrough_segments:
+            edge_bytes = 0
+            if split.streaming_tail:
+                edge_bytes += split.streaming_tail[1] - split.streaming_tail[0] + 1
+            if split.streaming_head:
+                edge_bytes += split.streaming_head[1] - split.streaming_head[0] + 1
+            if edge_bytes <= crypto.STREAMING_THRESHOLD:
                 return "small_ranged_copy"
-            return "ranged_copy_segment_misaligned"
+            if split.streaming_head and split.streaming_tail:
+                return "ranged_copy_segment_misaligned"
         return None
+
+    def _hybrid_split_log_fields(
+        self,
+        copy_source_range: str | None,
+        src_wrapped_dek: str | None,
+        src_multipart_meta: MultipartMetadata | None,
+        src_metadata: dict,
+        head_resp: dict,
+    ) -> dict[str, str | int] | None:
+        """Structured split breakdown for route/passthrough diagnostics."""
+        if not copy_source_range or not src_multipart_meta:
+            return None
+        total = src_multipart_meta.total_plaintext_size
+        range_start, range_end = self._parse_copy_source_range(copy_source_range, total)
+        segments = self._source_ciphertext_segments(
+            src_multipart_meta, head_resp, src_wrapped_dek, src_metadata
+        )
+        split = self._split_plaintext_range_on_segments(segments, range_start, range_end)
+        if split is None:
+            return {
+                "hybrid_mode": "split_failed",
+                "range_start": range_start,
+                "range_end": range_end,
+            }
+        head_bytes = (
+            split.streaming_head[1] - split.streaming_head[0] + 1 if split.streaming_head else 0
+        )
+        tail_bytes = (
+            split.streaming_tail[1] - split.streaming_tail[0] + 1 if split.streaming_tail else 0
+        )
+        passthrough_bytes = sum(seg.plaintext_size for seg in split.passthrough_segments)
+        if split.streaming_head and split.streaming_tail:
+            mode = "head_and_tail"
+        elif split.streaming_head:
+            mode = "head_and_passthrough"
+        elif split.streaming_tail:
+            mode = "passthrough_and_tail"
+        elif split.passthrough_segments:
+            mode = "passthrough_only"
+        else:
+            mode = "stream_only"
+        chunk = split.passthrough_segments[0].plaintext_size if split.passthrough_segments else 0
+        frame_reads_if_streaming = (range_end - range_start + 1) // chunk + 1 if chunk else 0
+        return {
+            "hybrid_mode": mode,
+            "range_start": range_start,
+            "range_end": range_end,
+            "passthrough_segments": len(split.passthrough_segments),
+            "passthrough_mb": f"{passthrough_bytes / 1024 / 1024:.2f}MB",
+            "streaming_head_mb": f"{head_bytes / 1024 / 1024:.2f}MB",
+            "streaming_tail_mb": f"{tail_bytes / 1024 / 1024:.2f}MB",
+            "estimated_frame_reads_if_streaming": frame_reads_if_streaming,
+        }
 
     def _log_upload_part_copy_route(
         self,
@@ -546,6 +638,7 @@ class CopyPartMixin(BaseHandler):
         range_plaintext_size: int,
         route: str,
         passthrough_blocked_reason: str | None,
+        hybrid_split: dict[str, str | int] | None = None,
     ) -> None:
         logger.info(
             "UPLOAD_PART_COPY_ROUTE",
@@ -558,6 +651,7 @@ class CopyPartMixin(BaseHandler):
             range_plaintext_mb=f"{range_plaintext_size / 1024 / 1024:.2f}MB",
             route=route,
             passthrough_blocked_reason=passthrough_blocked_reason,
+            **(hybrid_split or {}),
         )
 
     def _can_passthrough_part_copy(
@@ -756,6 +850,10 @@ class CopyPartMixin(BaseHandler):
 
         all_segments = segments
         range_end = 0
+        streaming_head: tuple[int, int] | None = None
+        deferred_tail_bytes = await self.multipart_manager.take_deferred_copy_tail(
+            bucket, key, upload_id
+        )
         if copy_source_range and src_multipart_meta:
             range_start, range_end = self._parse_copy_source_range(
                 copy_source_range, src_multipart_meta.total_plaintext_size
@@ -765,6 +863,7 @@ class CopyPartMixin(BaseHandler):
                 raise S3Error.invalid_request("Copy range splits an encrypted segment")
             segments = list(split.passthrough_segments)
             streaming_tail = split.streaming_tail
+            streaming_head = split.streaming_head
             defer_tail = self._should_defer_hybrid_tail(
                 streaming_tail,
                 range_end,
@@ -782,6 +881,11 @@ class CopyPartMixin(BaseHandler):
             if streaming_tail
             else None
         )
+        head_mb = (
+            f"{(streaming_head[1] - streaming_head[0] + 1) / 1024 / 1024:.2f}MB"
+            if streaming_head
+            else None
+        )
 
         logger.info(
             "UPLOAD_PART_COPY_PASSTHROUGH",
@@ -792,6 +896,8 @@ class CopyPartMixin(BaseHandler):
             src_key=src_key,
             plaintext_mb=f"{plaintext_size / 1024 / 1024:.2f}MB",
             segments=len(segments),
+            streaming_head_mb=head_mb,
+            deferred_head_bytes=len(deferred_tail_bytes) if deferred_tail_bytes else 0,
             streaming_tail_mb=tail_mb,
             defer_tail=defer_tail,
             copy_source_range=copy_source_range,
@@ -849,12 +955,13 @@ class CopyPartMixin(BaseHandler):
                 media_type="application/xml",
             )
 
+        head_internal_slots = 1 if (streaming_head or deferred_tail_bytes) else 0
         tail_internal_slots = 0 if defer_tail else (1 if streaming_tail else 0)
         internal_part_start = await self.multipart_manager.allocate_internal_parts(
             bucket,
             key,
             upload_id,
-            len(segments) + tail_internal_slots,
+            len(segments) + head_internal_slots + tail_internal_slots,
             client_part_number=0,
         )
         logger.info(
@@ -863,16 +970,48 @@ class CopyPartMixin(BaseHandler):
             key=key,
             part_num=part_num,
             passthrough_segments=len(segments),
+            head_internal_slots=head_internal_slots,
             tail_internal_slots=tail_internal_slots,
             internal_part_start=internal_part_start,
         )
 
         start = time.monotonic()
         segment_sem = asyncio.Semaphore(PASSTHROUGH_SEGMENT_CONCURRENCY)
-        deferred_tail_bytes: bytes | None = None
+        deferred_tail_for_next: bytes | None = None
+
+        async def upload_head() -> InternalPartMetadata | None:
+            if not streaming_head and not deferred_tail_bytes:
+                return None
+            head_suffix = b""
+            if streaming_head:
+                head_start, head_end = streaming_head
+                head_suffix = await self._download_encrypted_multipart(
+                    client, src_bucket, src_key, src_multipart_meta, head_start, head_end
+                )
+            head_plaintext = (deferred_tail_bytes or b"") + head_suffix
+            internal_num = internal_part_start
+            head_ct = crypto.encrypt_frame(head_plaintext, state.dek, upload_id, internal_num, 0)
+            part_reserve = crypto.copy_chunk_peak(len(head_plaintext))
+            async with concurrency.reserve_copy_memory(part_reserve):
+                resp = await client.upload_part(bucket, key, upload_id, internal_num, head_ct)
+            logger.info(
+                "UPLOAD_PART_COPY_PASSTHROUGH_HEAD",
+                bucket=bucket,
+                key=key,
+                part_num=part_num,
+                internal_part=internal_num,
+                head_plaintext_mb=f"{len(head_plaintext) / 1024 / 1024:.2f}MB",
+                deferred_head_bytes=len(deferred_tail_bytes) if deferred_tail_bytes else 0,
+            )
+            return InternalPartMetadata(
+                internal_part_number=internal_num,
+                plaintext_size=len(head_plaintext),
+                ciphertext_size=len(head_ct),
+                etag=resp["ETag"].strip('"'),
+            )
 
         async def copy_segment(idx: int, seg: _CiphertextSegment) -> InternalPartMetadata:
-            internal_num = internal_part_start + idx
+            internal_num = internal_part_start + head_internal_slots + idx
             ct_end = seg.ct_offset + seg.ciphertext_size - 1
             copy_range = f"bytes={seg.ct_offset}-{ct_end}"
             part_reserve = crypto.copy_passthrough_segment_peak(seg.plaintext_size)
@@ -915,7 +1054,7 @@ class CopyPartMixin(BaseHandler):
             )
 
         async def upload_tail() -> InternalPartMetadata | None:
-            nonlocal deferred_tail_bytes
+            nonlocal deferred_tail_for_next
             if not (streaming_tail and src_multipart_meta):
                 return None
             tail_start, tail_end = streaming_tail
@@ -923,7 +1062,7 @@ class CopyPartMixin(BaseHandler):
                 client, src_bucket, src_key, src_multipart_meta, tail_start, tail_end
             )
             if defer_tail:
-                deferred_tail_bytes = tail_plaintext
+                deferred_tail_for_next = tail_plaintext
                 logger.info(
                     "UPLOAD_PART_COPY_PASSTHROUGH_TAIL_DEFERRED",
                     bucket=bucket,
@@ -932,7 +1071,7 @@ class CopyPartMixin(BaseHandler):
                     tail_plaintext_mb=f"{len(tail_plaintext) / 1024 / 1024:.2f}MB",
                 )
                 return None
-            internal_num = internal_part_start + len(segments)
+            internal_num = internal_part_start + head_internal_slots + len(segments)
             tail_ct = crypto.encrypt_frame(tail_plaintext, state.dek, upload_id, internal_num, 0)
             part_reserve = crypto.copy_chunk_peak(len(tail_plaintext))
             async with concurrency.reserve_copy_memory(part_reserve):
@@ -958,6 +1097,7 @@ class CopyPartMixin(BaseHandler):
         # idle timeout.
         try:
             async with asyncio.TaskGroup() as tg:
+                head_task = tg.create_task(upload_head())
                 seg_tasks = [tg.create_task(copy_segment(i, seg)) for i, seg in enumerate(segments)]
                 tail_task = tg.create_task(upload_tail())
                 md5_task = tg.create_task(
@@ -978,12 +1118,15 @@ class CopyPartMixin(BaseHandler):
                 exc = exc.exceptions[0]
             raise exc from eg
 
-        internal_parts = [t.result() for t in seg_tasks]
+        internal_parts: list[InternalPartMetadata] = []
+        if (head_part := head_task.result()) is not None:
+            internal_parts.append(head_part)
+        internal_parts.extend(t.result() for t in seg_tasks)
         if (tail_part := tail_task.result()) is not None:
             internal_parts.append(tail_part)
-        if deferred_tail_bytes:
+        if deferred_tail_for_next:
             await self.multipart_manager.set_deferred_copy_tail(
-                bucket, key, upload_id, deferred_tail_bytes
+                bucket, key, upload_id, deferred_tail_for_next
             )
         # A deferred tail is NOT part of this client part's stored bytes: it is
         # folded into the next part's stream (take_deferred_copy_tail) or flushed
@@ -1008,15 +1151,24 @@ class CopyPartMixin(BaseHandler):
             ),
         )
 
+        passthrough_segment_count = len(segments)
+        head_plaintext_bytes = internal_parts[0].plaintext_size if head_internal_slots else 0
         logger.info(
             "UPLOAD_PART_COPY_PASSTHROUGH_COMPLETE",
             bucket=bucket,
             key=key,
             part_num=part_num,
             internal_parts=len(internal_parts),
-            deferred_tail_bytes=len(deferred_tail_bytes) if deferred_tail_bytes else 0,
+            passthrough_segments=passthrough_segment_count,
+            head_plaintext_mb=f"{head_plaintext_bytes / 1024 / 1024:.2f}MB",
+            deferred_tail_bytes=len(deferred_tail_for_next) if deferred_tail_for_next else 0,
             plaintext_mb=f"{total_plaintext / 1024 / 1024:.2f}MB",
             copy_source_range=copy_source_range,
+            hybrid_mode=(
+                "head_and_passthrough"
+                if streaming_head
+                else ("passthrough_and_tail" if streaming_tail else "passthrough_only")
+            ),
             elapsed_sec=f"{time.monotonic() - start:.2f}s",
         )
         return Response(
