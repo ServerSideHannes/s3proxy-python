@@ -614,9 +614,7 @@ class CopyPartMixin(BaseHandler):
         else:
             mode = "stream_only"
         chunk = split.passthrough_segments[0].plaintext_size if split.passthrough_segments else 0
-        frame_reads_if_streaming = (
-            (range_end - range_start + 1) // chunk + 1 if chunk else 0
-        )
+        frame_reads_if_streaming = (range_end - range_start + 1) // chunk + 1 if chunk else 0
         return {
             "hybrid_mode": mode,
             "range_start": range_start,
