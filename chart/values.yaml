@@ -152,6 +152,13 @@ resources:
     cpu: "500m"
     memory: "512Mi"
 
+# Must cover the longest single request: one large UploadPart/UploadPartCopy
+# can run for minutes against a slow backend, and cutting it off mid-flight
+# orphans multipart state (InvalidPart on complete). uvicorn exits as soon as
+# in-flight requests finish, so a generous ceiling costs nothing in the
+# common case.
+terminationGracePeriodSeconds: 600
+
 # s3proxy container probes. Overridable so deployments can tolerate a busy
 # single event loop: under heavy upload load a probe can take seconds to be
 # served, and a tight liveness timeout restarts a live pod (drops in-flight
