@@ -95,9 +95,18 @@ spec:
             runAsUser: 1000
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
+          # Drain on scale-in: the sleep keeps the pod accepting while it drops
+          # out of the headless-service DNS (HAProxy stops routing new
+          # connections), then SIGTERM lets uvicorn finish in-flight requests.
+          # Killing a pod mid-UploadPart/UploadPartCopy orphans multipart state
+          # and the client's CompleteMultipartUpload fails with InvalidPart.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "10"]
       securityContext:
         fsGroup: 1000
-      terminationGracePeriodSeconds: 30
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
