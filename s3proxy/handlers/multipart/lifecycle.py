@@ -6,8 +6,9 @@ import asyncio
 import base64
 import contextlib
 import hashlib
+import os
 import xml.etree.ElementTree as ET
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import structlog
 from botocore.exceptions import ClientError
@@ -28,9 +29,18 @@ from ...state import (
     synthetic_multipart_etag,
 )
 from ...xml_utils import find_elements, get_element_text
-from ..base import BaseHandler
+from ..base import BaseHandler, is_retryable_source_error
 
 logger: BoundLogger = structlog.get_logger(__name__)
+
+# Backend (Hetzner) can stream a 200 for CompleteMultipartUpload and still fail
+# server-side mid-response, embedding an InternalError in the body - a documented
+# S3-family quirk for this operation specifically. Retrying the same upload_id
+# and part list is safe *unless* the prior attempt actually finished assembling
+# the object before the response died, in which case the upload_id is already
+# invalidated and a retry surfaces NoSuchUpload - see _verify_already_completed.
+COMPLETE_RETRY_ATTEMPTS = int(os.environ.get("S3PROXY_COMPLETE_RETRY_ATTEMPTS", "4"))
+COMPLETE_RETRY_BACKOFF_SEC = float(os.environ.get("S3PROXY_COMPLETE_RETRY_BACKOFF", "0.5"))
 
 
 class LifecycleMixin(BaseHandler):
@@ -181,8 +191,8 @@ class LifecycleMixin(BaseHandler):
 
             # Complete in S3
             try:
-                complete_resp = await client.complete_multipart_upload(
-                    bucket, key, upload_id, s3_parts
+                complete_resp = await self._complete_multipart_upload_with_retry(
+                    client, bucket, key, upload_id, s3_parts, completed_parts
                 )
             except ClientError as e:
                 await self._handle_complete_error(
@@ -322,6 +332,74 @@ class LifecycleMixin(BaseHandler):
 
         s3_parts.sort(key=lambda p: p["PartNumber"])
         return s3_parts, completed_parts, total_plaintext
+
+    async def _complete_multipart_upload_with_retry(
+        self,
+        client: S3Client,
+        bucket: str,
+        key: str,
+        upload_id: str,
+        s3_parts: list[dict[str, int | str]],
+        completed_parts: list[PartMetadata],
+    ) -> dict[str, Any]:
+        expected_ciphertext_size = sum(p.ciphertext_size for p in completed_parts)
+        last_exc: ClientError | None = None
+
+        for attempt in range(1, COMPLETE_RETRY_ATTEMPTS + 1):
+            try:
+                return await client.complete_multipart_upload(bucket, key, upload_id, s3_parts)
+            except ClientError as e:
+                error_code = e.response.get("Error", {}).get("Code", "")
+
+                # A previous attempt may have actually finished assembling the
+                # object before its response died - the upload_id would then
+                # already be invalidated. Confirm before treating this as failed.
+                if error_code == "NoSuchUpload" and attempt > 1:
+                    verified = await self._verify_already_completed(
+                        client, bucket, key, expected_ciphertext_size
+                    )
+                    if verified is not None:
+                        logger.warning(
+                            "COMPLETE_MULTIPART_ALREADY_DONE",
+                            bucket=bucket,
+                            key=key,
+                            upload_id=upload_id[:20] + "...",
+                            attempt=attempt,
+                        )
+                        return verified
+                    raise
+
+                if not is_retryable_source_error(e) or attempt == COMPLETE_RETRY_ATTEMPTS:
+                    raise
+
+                logger.warning(
+                    "COMPLETE_MULTIPART_RETRY",
+                    bucket=bucket,
+                    key=key,
+                    upload_id=upload_id[:20] + "...",
+                    attempt=attempt,
+                    aws_error_code=error_code,
+                    error=str(e),
+                )
+                last_exc = e
+                await asyncio.sleep(COMPLETE_RETRY_BACKOFF_SEC * (2 ** (attempt - 1)))
+
+        assert last_exc is not None  # loop always returns or raises before exhausting
+        raise last_exc
+
+    async def _verify_already_completed(
+        self, client: S3Client, bucket: str, key: str, expected_ciphertext_size: int
+    ) -> dict[str, Any] | None:
+        """Check whether a retried CompleteMultipartUpload's NoSuchUpload means the
+        prior attempt actually succeeded (backend assembled the object, then the
+        response delivery died before the client saw it)."""
+        try:
+            head = await client.head_object(bucket, key)
+        except ClientError:
+            return None
+        if head.get("ContentLength") == expected_ciphertext_size:
+            return {"ETag": head.get("ETag", "")}
+        return None
 
     async def _handle_complete_error(
         self,
