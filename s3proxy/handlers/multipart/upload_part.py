@@ -25,7 +25,8 @@ from ...state import (
     StateMissingError,
 )
 from ...streaming import decode_aws_chunked_stream
-from ..base import BaseHandler
+from .. import base
+from ..base import BaseHandler, is_retryable_source_error
 
 logger: BoundLogger = structlog.get_logger(__name__)
 
@@ -235,6 +236,46 @@ class UploadPartMixin(BaseHandler):
                 return self._handle_client_error(e, bucket, key, part_num, upload_id)
             except Exception as e:
                 return self._handle_generic_error(e, bucket, key, part_num, upload_id)
+
+    async def _upload_part_with_retry(
+        self,
+        client: S3Client,
+        bucket: str,
+        key: str,
+        upload_id: str,
+        internal_part_num: int,
+        ciphertext: bytes | bytearray,
+        *,
+        client_part_num: int,
+    ) -> dict:
+        """UploadPart, retrying transient backend failures.
+
+        RGW can accept the part, commit to a 200, and only then fail with an
+        <Error> body ("InternalError: The server did not respond in time").
+        Neither botocore's retries nor rclone's low-level retries fire for that:
+        both decide from the HTTP status line, which already read 200. Re-PUTting
+        the same part number with the same ciphertext is idempotent, so retry here
+        where the parsed error is actually visible.
+        """
+        for attempt in range(1, base.SOURCE_READ_ATTEMPTS + 1):
+            try:
+                return await client.upload_part(
+                    bucket, key, upload_id, internal_part_num, ciphertext
+                )
+            except Exception as exc:
+                if not is_retryable_source_error(exc) or attempt == base.SOURCE_READ_ATTEMPTS:
+                    raise
+                logger.warning(
+                    "UPLOAD_PART_RETRY",
+                    bucket=bucket,
+                    key=key,
+                    client_part=client_part_num,
+                    internal_part=internal_part_num,
+                    attempt=attempt,
+                    error=str(exc),
+                )
+                await asyncio.sleep(base.SOURCE_READ_BACKOFF_SEC * (2 ** (attempt - 1)))
+        raise AssertionError("unreachable")
 
     async def _get_or_recover_state(
         self, client: S3Client, bucket: str, key: str, upload_id: str, part_num: int
@@ -462,7 +503,9 @@ class UploadPartMixin(BaseHandler):
                 )
 
             upload_start = time.monotonic()
-            resp = await client.upload_part(bucket, key, upload_id, ipn, ciphertext)
+            resp = await self._upload_part_with_retry(
+                client, bucket, key, upload_id, ipn, ciphertext, client_part_num=part_num
+            )
             del ciphertext
             etag = resp["ETag"].strip('"')
             logger.info(
@@ -603,7 +646,15 @@ class UploadPartMixin(BaseHandler):
             del data  # Free memory
 
             # Upload
-            resp = await client.upload_part(bucket, key, upload_id, internal_part_num, ciphertext)
+            resp = await self._upload_part_with_retry(
+                client,
+                bucket,
+                key,
+                upload_id,
+                internal_part_num,
+                ciphertext,
+                client_part_num=client_part_num,
+            )
             etag = resp["ETag"].strip('"')
             del ciphertext  # Free memory
 
