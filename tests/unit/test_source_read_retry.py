@@ -53,9 +53,15 @@ def _client_error(code, operation="GetObject"):
 class _Body:
     def __init__(self, data: bytes):
         self._data = data
+        self._sent = 0
 
-    async def read(self):
-        return self._data
+    async def read(self, n: int = -1):
+        if self._sent >= len(self._data):
+            return b""
+        end = len(self._data) if n < 0 else min(self._sent + n, len(self._data))
+        chunk = self._data[self._sent : end]
+        self._sent = end
+        return chunk
 
     async def __aenter__(self):
         return self
@@ -67,7 +73,7 @@ class _Body:
 class _TruncatingBody:
     """read() dies mid-body, the exact prod failure shape."""
 
-    async def read(self):
+    async def read(self, n: int = -1):
         raise _payload_error()
 
     async def __aenter__(self):

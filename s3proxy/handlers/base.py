@@ -43,10 +43,27 @@ BUCKET_RE = re.compile(r"^/([^/]+)/?$")  # Handles /bucket and /bucket/
 # Re-issuing the same ranged GET on a fresh connection is always safe.
 SOURCE_READ_ATTEMPTS = int(os.environ.get("S3PROXY_SOURCE_READ_ATTEMPTS", "4"))
 SOURCE_READ_BACKOFF_SEC = float(os.environ.get("S3PROXY_SOURCE_READ_BACKOFF", "0.5"))
+# Chunk size for accumulating a source body so a mid-body truncation keeps what
+# already arrived (see read_source_bytes).
+SOURCE_READ_CHUNK_SIZE = int(os.environ.get("S3PROXY_SOURCE_READ_CHUNK_SIZE", str(1024 * 1024)))
 
+# GatewayTimeout/504 belongs here alongside 502/503: Hetzner returns it when its
+# own server-side copy exceeds an internal deadline. Copy latency is heavy-tailed
+# (measured p50 1.14s, p90 3.31s, max 61.86s over 572 UploadPartCopy calls), so a
+# 504 is transient congestion, not a permanent condition. botocore's own retries
+# all fire inside the same congestion window ("reached max retries: 3") and
+# exhaust; retrying here with exponential backoff gives the backend time to clear.
+# UploadPartCopy is idempotent for a given PartNumber+range, so the retry is safe.
 _RETRYABLE_S3_ERROR_CODES = frozenset(
-    {"InternalError", "SlowDown", "RequestTimeout", "ServiceUnavailable", "BadGateway"}
-    | {"500", "502", "503"}
+    {
+        "InternalError",
+        "SlowDown",
+        "RequestTimeout",
+        "ServiceUnavailable",
+        "BadGateway",
+        "GatewayTimeout",
+    }
+    | {"500", "502", "503", "504"}
 )
 
 _RETRYABLE_TRANSPORT_ERRORS = (
@@ -72,18 +89,60 @@ def is_retryable_source_error(exc: BaseException) -> bool:
     return False
 
 
+def _parse_byte_range(range_header: str) -> tuple[int, int | None]:
+    """Parse a `bytes=start-end` header into (start, end). end is None if open-ended."""
+    spec = range_header.removeprefix("bytes=").strip()
+    start_s, _, end_s = spec.partition("-")
+    return int(start_s), (int(end_s) if end_s else None)
+
+
 async def read_source_bytes(
     client: S3Client,
     bucket: str,
     key: str,
     range_header: str | None = None,
 ) -> bytes:
-    """GET an object (or range) and read the full body, retrying truncated reads."""
+    """GET an object (or range) and read the full body, resuming truncated reads.
+
+    Hetzner terminates a response mid-body with a clean TCP FIN while still
+    advertising the full Content-Length, so aiohttp raises ClientPayloadError
+    (ContentLengthError) with only part of the payload delivered. Observed at
+    ~0.5% per read, always ending on a page boundary (1017 or 2034 x 4096) --
+    the same vendor behaviour COPY_SOURCE_STREAM_RESUME already handles on the
+    upload side.
+
+    Re-requesting the identical range reproduces the identical truncation, so
+    plain retry cannot make progress. Instead keep what arrived and ask only for
+    the remainder: a fresh request gets a fresh response buffer. The stitched
+    result is byte-identical to an untruncated read.
+    """
+    start = end = None
+    if range_header is not None:
+        start, end = _parse_byte_range(range_header)
+
+    buf = bytearray()
     for attempt in range(1, SOURCE_READ_ATTEMPTS + 1):
+        if not buf:
+            resume_header = range_header
+        elif start is None:
+            # Whole-object read: no range was requested, so resume by offset.
+            resume_header = f"bytes={len(buf)}-"
+        else:
+            resume_header = f"bytes={start + len(buf)}-" + (str(end) if end is not None else "")
+
         try:
-            resp = await client.get_object(bucket, key, range_header=range_header)
-            async with resp["Body"] as body:
-                return await body.read()
+            resp = await client.get_object(bucket, key, range_header=resume_header)
+            stream = resp["Body"]
+            # Read in bounded chunks off the StreamingBody itself rather than
+            # calling read() once: read() collects blocks in a local list and
+            # drops all of them if the stream raises mid-body, which is exactly
+            # the case this function must survive. Note `async with` on the body
+            # unwraps to the raw ClientResponse, whose read() takes no size, so
+            # the chunk loop must not run inside that context.
+            async with stream:
+                while chunk := await stream.read(SOURCE_READ_CHUNK_SIZE):
+                    buf += chunk
+            return bytes(buf)
         except Exception as exc:
             if not is_retryable_source_error(exc) or attempt == SOURCE_READ_ATTEMPTS:
                 raise
@@ -92,6 +151,8 @@ async def read_source_bytes(
                 bucket=bucket,
                 key=key,
                 range=range_header,
+                resume_range=resume_header,
+                bytes_buffered=len(buf),
                 attempt=attempt,
                 error=str(exc),
             )
