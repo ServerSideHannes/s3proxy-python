@@ -128,10 +128,31 @@ class MockS3Response:
         return result
 
     async def __aenter__(self):
-        return self
+        # Fidelity: aiobotocore's StreamingBody.__aenter__ returns the *wrapped*
+        # aiohttp.ClientResponse, not the StreamingBody, so the size-aware
+        # read(amt) is NOT available on the value `async with` binds --
+        # ClientResponse.read() takes no arguments. Code that needs bounded
+        # chunks must read off the StreamingBody itself. Returning `self` here
+        # would let a `async with body: body.read(n)` bug pass tests and fail in
+        # production (observed while fixing source-read resume).
+        return _MockEnteredResponse(self)
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         return None
+
+
+class _MockEnteredResponse:
+    """What `async with StreamingBody` yields: no size-aware read()."""
+
+    def __init__(self, body: MockS3Response):
+        self._body = body
+
+    @property
+    def content(self):
+        return self._body
+
+    async def read(self) -> bytes:
+        return await self._body.read()
 
 
 class MockS3Client:
