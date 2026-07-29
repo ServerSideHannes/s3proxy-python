@@ -47,9 +47,23 @@ SOURCE_READ_BACKOFF_SEC = float(os.environ.get("S3PROXY_SOURCE_READ_BACKOFF", "0
 # already arrived (see read_source_bytes).
 SOURCE_READ_CHUNK_SIZE = int(os.environ.get("S3PROXY_SOURCE_READ_CHUNK_SIZE", str(1024 * 1024)))
 
+# GatewayTimeout/504 belongs here alongside 502/503: Hetzner returns it when its
+# own server-side copy exceeds an internal deadline. Copy latency is heavy-tailed
+# (measured p50 1.14s, p90 3.31s, max 61.86s over 572 UploadPartCopy calls), so a
+# 504 is transient congestion, not a permanent condition. botocore's own retries
+# all fire inside the same congestion window ("reached max retries: 3") and
+# exhaust; retrying here with exponential backoff gives the backend time to clear.
+# UploadPartCopy is idempotent for a given PartNumber+range, so the retry is safe.
 _RETRYABLE_S3_ERROR_CODES = frozenset(
-    {"InternalError", "SlowDown", "RequestTimeout", "ServiceUnavailable", "BadGateway"}
-    | {"500", "502", "503"}
+    {
+        "InternalError",
+        "SlowDown",
+        "RequestTimeout",
+        "ServiceUnavailable",
+        "BadGateway",
+        "GatewayTimeout",
+    }
+    | {"500", "502", "503", "504"}
 )
 
 _RETRYABLE_TRANSPORT_ERRORS = (

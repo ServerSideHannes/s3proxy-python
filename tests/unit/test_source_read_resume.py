@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import aiohttp
 import pytest
+from botocore.exceptions import ClientError
 
 from s3proxy.handlers import base
 from s3proxy.handlers.base import read_source_bytes
@@ -168,3 +169,60 @@ def test_parse_byte_range():
     assert base._parse_byte_range("bytes=0-99") == (0, 99)
     assert base._parse_byte_range("bytes=4096-") == (4096, None)
     assert base._parse_byte_range("4096-8191") == (4096, 8191)
+
+
+# --- 504 GatewayTimeout retryability ---------------------------------------
+#
+# 273 of 288 fatal copy failures in the 2026-07-29 capture were HTTP 504
+# GatewayTimeout on UploadPartCopy. The segment loop in copy.py already retries
+# via is_retryable_source_error, but 504 was absent from the retryable set, so it
+# hit `raise` on the first occurrence -- which is why only 4 SEGMENT_RETRY events
+# were logged against 273 fatal 504s.
+#
+# Reproduced: 572 UploadPartCopy calls at 8-way concurrency against the real
+# object yielded 1 x 504 (0.17%), with latency p50 1.14s / p90 3.31s / max
+# 61.86s. Heavy-tailed latency means a 504 is transient congestion. At 0.17% per
+# copy a 4.7GB file (572 copies) has a ~63% chance of hitting one.
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["GatewayTimeout", "504", "BadGateway", "502", "503", "500", "InternalError", "SlowDown"],
+)
+def test_transient_backend_codes_are_retryable(code):
+    exc = ClientError(
+        {"Error": {"Code": code, "Message": "x"}, "ResponseMetadata": {"HTTPStatusCode": 504}},
+        "UploadPartCopy",
+    )
+    assert base.is_retryable_source_error(exc) is True
+
+
+@pytest.mark.parametrize("code", ["AccessDenied", "NoSuchKey", "InvalidPart", "EntityTooSmall"])
+def test_permanent_codes_are_not_retryable(code):
+    exc = ClientError({"Error": {"Code": code, "Message": "x"}}, "UploadPartCopy")
+    assert base.is_retryable_source_error(exc) is False
+
+
+@pytest.mark.asyncio
+async def test_source_read_retries_gateway_timeout():
+    """A 504 mid-read must be retried, not raised on first sight."""
+
+    class _Flaky:
+        def __init__(self):
+            self.calls = 0
+
+        async def get_object(self, bucket, key, range_header=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise ClientError(
+                    {
+                        "Error": {"Code": "GatewayTimeout", "Message": "did not respond in time"},
+                        "ResponseMetadata": {"HTTPStatusCode": 504},
+                    },
+                    "GetObject",
+                )
+            return {"Body": _Body(BODY, None)}
+
+    c = _Flaky()
+    assert await read_source_bytes(c, "b", "k", "bytes=0-131071") == BODY
+    assert c.calls == 2
