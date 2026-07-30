@@ -84,8 +84,19 @@ def is_retryable_source_error(exc: BaseException) -> bool:
     if isinstance(exc, _RETRYABLE_TRANSPORT_ERRORS):
         return True
     if isinstance(exc, ClientError):
-        code = str(exc.response.get("Error", {}).get("Code", ""))
-        return code in _RETRYABLE_S3_ERROR_CODES
+        err = exc.response.get("Error", {})
+        code = str(err.get("Code", ""))
+        if code in _RETRYABLE_S3_ERROR_CODES:
+            return True
+        # Hetzner sheds load under concurrency by returning a bare 400 with an
+        # empty body, which botocore surfaces as InvalidArgument with no Message.
+        # A real InvalidArgument always names the offending argument, so the
+        # message-less form is congestion, not a malformed request: 4/4 observed
+        # on UploadPart had Message=None, on legal 50MiB non-final parts, while
+        # the same parts succeeded on a quiet retry (24-part 16-way probe
+        # reproduced it as GatewayTimeout, p50 13.09s vs 1.79s unloaded).
+        if code in ("InvalidArgument", "BadRequest", "400") and not err.get("Message"):
+            return True
     return False
 
 
