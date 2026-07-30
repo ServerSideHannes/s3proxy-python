@@ -257,13 +257,55 @@ class UploadPartMixin(BaseHandler):
         the same part number with the same ciphertext is idempotent, so retry here
         where the parsed error is actually visible.
         """
+        started = time.monotonic()
         for attempt in range(1, base.SOURCE_READ_ATTEMPTS + 1):
             try:
-                return await client.upload_part(
+                result = await client.upload_part(
                     bucket, key, upload_id, internal_part_num, ciphertext
                 )
+                if attempt > 1:
+                    logger.warning(
+                        "UPLOAD_PART_RECOVERED",
+                        bucket=bucket,
+                        key=key,
+                        client_part=client_part_num,
+                        internal_part=internal_part_num,
+                        attempts=attempt,
+                        elapsed_sec=round(time.monotonic() - started, 2),
+                    )
+                return result
             except Exception as exc:
-                if not is_retryable_source_error(exc) or attempt == base.SOURCE_READ_ATTEMPTS:
+                retryable = is_retryable_source_error(exc)
+                if not retryable or attempt == base.SOURCE_READ_ATTEMPTS:
+                    # Distinguishes "gave up after N transient failures" from
+                    # "rejected outright" -- the two are indistinguishable in the
+                    # UPLOAD_PART_CLIENT_ERROR that follows, which cost hours of
+                    # misdiagnosis chasing a retry gap that was really exhaustion.
+                    logger.error(
+                        "UPLOAD_PART_GAVE_UP",
+                        bucket=bucket,
+                        key=key,
+                        client_part=client_part_num,
+                        internal_part=internal_part_num,
+                        part_size=len(ciphertext),
+                        attempts=attempt,
+                        max_attempts=base.SOURCE_READ_ATTEMPTS,
+                        classified_retryable=retryable,
+                        exhausted=retryable,
+                        elapsed_sec=round(time.monotonic() - started, 2),
+                        aws_error_code=(
+                            exc.response.get("Error", {}).get("Code", "")
+                            if isinstance(exc, ClientError)
+                            else None
+                        ),
+                        aws_error_message=(
+                            exc.response.get("Error", {}).get("Message")
+                            if isinstance(exc, ClientError)
+                            else None
+                        ),
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
                     raise
                 logger.warning(
                     "UPLOAD_PART_RETRY",
@@ -271,7 +313,15 @@ class UploadPartMixin(BaseHandler):
                     key=key,
                     client_part=client_part_num,
                     internal_part=internal_part_num,
+                    part_size=len(ciphertext),
                     attempt=attempt,
+                    max_attempts=base.SOURCE_READ_ATTEMPTS,
+                    aws_error_code=(
+                        exc.response.get("Error", {}).get("Code", "")
+                        if isinstance(exc, ClientError)
+                        else None
+                    ),
+                    error_type=type(exc).__name__,
                     error=str(exc),
                 )
                 await asyncio.sleep(base.SOURCE_READ_BACKOFF_SEC * (2 ** (attempt - 1)))

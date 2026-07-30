@@ -25,6 +25,7 @@ import pytest
 from botocore.exceptions import ClientError
 
 from s3proxy.handlers import base
+from s3proxy.handlers.multipart import upload_part as upload_part_mod
 from s3proxy.handlers.multipart.upload_part import UploadPartMixin
 
 
@@ -120,3 +121,113 @@ async def test_retryable_codes(code):
     client = _FlakyUploadClient(fail_times=1, error_code=code)
     await _upload(client)
     assert client.attempts == 2
+
+
+# --- message-less 400 + observability ---------------------------------------
+#
+# Prod 2026-07-30: the same `main.companies` upload failed again, this time as
+# `InvalidArgument` with **Message=None** (4/4 occurrences) on legal 50MiB
+# non-final parts (parts 2-16, never part 1). `GatewayTimeout` was already
+# retryable from #133, but the message-less variant was not, so it fell through
+# to raise on first sight.
+#
+# Both are the same congestion event: a 24 x 50MiB probe at 16-way concurrency
+# reproduced 1 failure surfaced as GatewayTimeout("The server did not respond in
+# time"), with latency p50 13.09s / max 52.32s against p50 1.79s unloaded --
+# Hetzner sheds load and only sometimes manages to write an error body.
+
+
+class _MessagelessClient:
+    """Raises InvalidArgument with no Message, the prod 2026-07-30 shape."""
+
+    def __init__(self, fail_times: int = 1):
+        self._fail_times = fail_times
+        self.attempts = 0
+
+    async def upload_part(self, bucket, key, upload_id, part_number, body):
+        self.attempts += 1
+        if self._fail_times > 0:
+            self._fail_times -= 1
+            raise ClientError({"Error": {"Code": "InvalidArgument"}}, "UploadPart")
+        return {"ETag": f'"etag-{part_number}"'}
+
+
+@pytest.mark.asyncio
+async def test_retries_messageless_invalid_argument():
+    client = _MessagelessClient(fail_times=1)
+    resp = await _upload(client)
+    assert resp["ETag"] == '"etag-7"'
+    assert client.attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_real_invalid_argument_is_not_retried():
+    """A validation error that names its argument must fail immediately."""
+
+    class _Rejecting:
+        def __init__(self):
+            self.attempts = 0
+
+        async def upload_part(self, *a, **k):
+            self.attempts += 1
+            raise _client_error(
+                "InvalidArgument", "Part number must be an integer between 1 and 10000"
+            )
+
+    client = _Rejecting()
+    with pytest.raises(ClientError):
+        await _upload(client)
+    assert client.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_recovered_upload_is_logged(monkeypatch):
+    """A part that only lands after a retry must leave a trace."""
+    events = []
+    monkeypatch.setattr(
+        upload_part_mod.logger,
+        "warning",
+        lambda ev, **kw: events.append((ev, kw)),
+    )
+    client = _FlakyUploadClient(fail_times=2)
+    await _upload(client)
+    names = [e for e, _ in events]
+    assert "UPLOAD_PART_RECOVERED" in names
+    recovered = next(kw for e, kw in events if e == "UPLOAD_PART_RECOVERED")
+    assert recovered["attempts"] == 3
+
+
+@pytest.mark.asyncio
+async def test_exhaustion_distinguishable_from_rejection(monkeypatch):
+    """Exhausted transient retries log exhausted=True; outright rejection False."""
+    events = []
+    monkeypatch.setattr(upload_part_mod.logger, "error", lambda ev, **kw: events.append((ev, kw)))
+    monkeypatch.setattr(upload_part_mod.logger, "warning", lambda ev, **kw: None)
+
+    client = _FlakyUploadClient(fail_times=99, error_code="InternalError")
+    with pytest.raises(ClientError):
+        await _upload(client)
+    ev, kw = next((e, k) for e, k in events if e == "UPLOAD_PART_GAVE_UP")
+    assert kw["exhausted"] is True
+    assert kw["classified_retryable"] is True
+    assert kw["attempts"] == base.SOURCE_READ_ATTEMPTS
+    assert client.attempts == base.SOURCE_READ_ATTEMPTS
+
+    events.clear()
+
+    class _Denied:
+        def __init__(self):
+            self.attempts = 0
+
+        async def upload_part(self, *a, **k):
+            self.attempts += 1
+            raise _client_error("AccessDenied", "Access Denied")
+
+    denied = _Denied()
+    with pytest.raises(ClientError):
+        await _upload(denied)
+    ev, kw = next((e, k) for e, k in events if e == "UPLOAD_PART_GAVE_UP")
+    assert kw["exhausted"] is False
+    assert kw["classified_retryable"] is False
+    assert kw["aws_error_code"] == "AccessDenied"
+    assert denied.attempts == 1

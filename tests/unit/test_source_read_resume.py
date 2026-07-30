@@ -226,3 +226,51 @@ async def test_source_read_retries_gateway_timeout():
     c = _Flaky()
     assert await read_source_bytes(c, "b", "k", "bytes=0-131071") == BODY
     assert c.calls == 2
+
+
+# --- message-less 400 retryability -----------------------------------------
+#
+# Prod 2026-07-30: 4/4 UploadPart failures on main.companies arrived as
+# InvalidArgument with Message=None, on legal 50MiB non-final parts (part 2-16,
+# never part 1). A real InvalidArgument always names the offending argument, so
+# the message-less form is Hetzner shedding load, not a malformed request.
+#
+# Reproduced: 24 x 50MiB parts at 16-way concurrency yielded 1 failure, surfaced
+# as GatewayTimeout("The server did not respond in time"), with latency p50
+# 13.09s / max 52.32s -- against p50 1.79s for the same parts unloaded. Same
+# congestion event, two different bodies depending on whether RGW managed to
+# write one.
+
+
+def _upload_part_error(code, message=None):
+    err = {"Code": code}
+    if message is not None:
+        err["Message"] = message
+    return ClientError({"Error": err}, "UploadPart")
+
+
+@pytest.mark.parametrize("code", ["InvalidArgument", "BadRequest", "400"])
+def test_message_less_400_is_retryable(code):
+    assert base.is_retryable_source_error(_upload_part_error(code)) is True
+    assert base.is_retryable_source_error(_upload_part_error(code, "")) is True
+
+
+def test_invalid_argument_with_reason_still_fails():
+    """A genuine validation error must not be retried forever."""
+    exc = _upload_part_error(
+        "InvalidArgument", "Part number must be an integer between 1 and 10000"
+    )
+    assert base.is_retryable_source_error(exc) is False
+
+
+@pytest.mark.parametrize(
+    "code,msg",
+    [
+        ("AccessDenied", "Access Denied"),
+        ("NoSuchKey", "The specified key does not exist."),
+        ("EntityTooSmall", "Your proposed upload is smaller than the minimum allowed size"),
+        ("InvalidPart", "One or more of the specified parts could not be found"),
+    ],
+)
+def test_permanent_errors_with_messages_not_retried(code, msg):
+    assert base.is_retryable_source_error(_upload_part_error(code, msg)) is False
