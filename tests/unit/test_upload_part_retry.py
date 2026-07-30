@@ -201,9 +201,7 @@ async def test_recovered_upload_is_logged(monkeypatch):
 async def test_exhaustion_distinguishable_from_rejection(monkeypatch):
     """Exhausted transient retries log exhausted=True; outright rejection False."""
     events = []
-    monkeypatch.setattr(
-        upload_part_mod.logger, "error", lambda ev, **kw: events.append((ev, kw))
-    )
+    monkeypatch.setattr(upload_part_mod.logger, "error", lambda ev, **kw: events.append((ev, kw)))
     monkeypatch.setattr(upload_part_mod.logger, "warning", lambda ev, **kw: None)
 
     client = _FlakyUploadClient(fail_times=99, error_code="InternalError")
