@@ -29,6 +29,7 @@ from ..client import S3Client, S3Credentials
 from ..config import Settings
 from ..errors import S3Error, raise_for_client_error
 from ..state import MultipartStateManager
+from ..state.complete_lock import CompleteUploadLock, create_complete_upload_lock
 from ..utils import etag_matches, parse_http_date
 
 logger: BoundLogger = structlog.get_logger(__name__)
@@ -140,10 +141,12 @@ class BaseHandler:
         settings: Settings,
         credentials_store: dict[str, str],
         multipart_manager: MultipartStateManager,
+        complete_upload_lock: CompleteUploadLock | None = None,
     ):
         self.settings = settings
         self.credentials_store = credentials_store
         self.multipart_manager = multipart_manager
+        self.complete_upload_lock = complete_upload_lock or create_complete_upload_lock()
         self.keyring = settings.keyring
 
     def _client(self, creds: S3Credentials) -> S3Client:

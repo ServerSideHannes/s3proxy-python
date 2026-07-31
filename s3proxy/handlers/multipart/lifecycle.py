@@ -23,6 +23,7 @@ from ...state import (
     MultipartUploadState,
     PartMetadata,
     delete_upload_state,
+    load_multipart_metadata,
     persist_upload_state,
     plaintext_attr_cache,
     save_multipart_metadata,
@@ -151,107 +152,158 @@ class LifecycleMixin(BaseHandler):
         bucket, key = self._parse_path(request.url.path)
         async with self._client(creds) as client:
             upload_id, _ = self._extract_multipart_params(request)
-
-            state = await self.multipart_manager.complete_upload(bucket, key, upload_id)
-            if not state:
-                state = await self._recover_upload_state(
-                    client, bucket, key, upload_id, context="for complete"
+            async with self.complete_upload_lock.hold(bucket, key, upload_id):
+                return await self._handle_complete_multipart_upload_locked(
+                    request, creds, client, bucket, key, upload_id
                 )
 
-            if state.deferred_copy_tail:
-                logger.info(
-                    "COMPLETE_MULTIPART_DEFERRED_TAIL_PENDING",
-                    bucket=bucket,
-                    key=key,
-                    upload_id=upload_id[:20] + "...",
-                    tail_bytes=len(state.deferred_copy_tail),
-                )
-                state = await self._flush_deferred_copy_tail_for_complete(
-                    client, bucket, key, upload_id, state
-                )
+    async def _handle_complete_multipart_upload_locked(
+        self,
+        request: Request,
+        creds: S3Credentials,
+        client: S3Client,
+        bucket: str,
+        key: str,
+        upload_id: str,
+    ) -> Response:
+        idempotent = await self._try_idempotent_complete_response(client, bucket, key, upload_id)
+        if idempotent is not None:
+            return idempotent
 
-            # Parse client's part list
-            body = await request.body()
-            client_parts = self._parse_client_parts(body)
-
-            # Build S3 parts list
-            s3_parts, completed_parts, total_plaintext = self._build_s3_parts(
-                client_parts, state, bucket, key, upload_id
+        state = await self.multipart_manager.complete_upload(bucket, key, upload_id)
+        if not state:
+            state = await self._recover_upload_state(
+                client, bucket, key, upload_id, context="for complete"
             )
 
+        if state.deferred_copy_tail:
             logger.info(
-                "COMPLETE_MULTIPART",
+                "COMPLETE_MULTIPART_DEFERRED_TAIL_PENDING",
                 bucket=bucket,
                 key=key,
                 upload_id=upload_id[:20] + "...",
-                client_parts=len(completed_parts),
-                s3_parts=len(s3_parts),
-                total_mb=f"{total_plaintext / 1024 / 1024:.2f}MB",
+                tail_bytes=len(state.deferred_copy_tail),
+            )
+            state = await self._flush_deferred_copy_tail_for_complete(
+                client, bucket, key, upload_id, state
             )
 
-            # Complete in S3
-            try:
-                complete_resp = await self._complete_multipart_upload_with_retry(
-                    client, bucket, key, upload_id, s3_parts, completed_parts
-                )
-            except ClientError as e:
-                await self._handle_complete_error(
-                    e, client, bucket, key, upload_id, s3_parts, completed_parts, total_plaintext
-                )
-            else:
-                plaintext_attr_cache.put(
-                    bucket,
-                    key,
-                    str(complete_resp.get("ETag", "")).strip('"'),
-                    total_plaintext,
-                    synthetic_multipart_etag(total_plaintext),
-                )
+        # Parse client's part list
+        body = await request.body()
+        client_parts = self._parse_client_parts(body)
 
-            # Save metadata first, then delete state.
-            # Order matters: if metadata save fails, state is preserved
-            # so the upload can be retried. Deleting state first would
-            # lose the DEK, making the object permanently undecryptable.
-            # Prefer the kid recorded when the upload was created; if the state
-            # predates it (e.g. older recovered state), fall back to the
-            # completing credential's key.
-            if state.kid:
-                kid, kek = state.kid, self.keyring.key_by_id(state.kid)
-            else:
-                kid, kek = self.keyring.key_for(creds.access_key)
-            wrapped_dek = crypto.wrap_key(state.dek, kek)
-            await save_multipart_metadata(
-                client,
+        # Build S3 parts list
+        s3_parts, completed_parts, total_plaintext = self._build_s3_parts(
+            client_parts, state, bucket, key, upload_id
+        )
+
+        logger.info(
+            "COMPLETE_MULTIPART",
+            bucket=bucket,
+            key=key,
+            upload_id=upload_id[:20] + "...",
+            client_parts=len(completed_parts),
+            s3_parts=len(s3_parts),
+            total_mb=f"{total_plaintext / 1024 / 1024:.2f}MB",
+        )
+
+        # Complete in S3
+        try:
+            complete_resp = await self._complete_multipart_upload_with_retry(
+                client, bucket, key, upload_id, s3_parts, completed_parts
+            )
+        except ClientError as e:
+            await self._handle_complete_error(
+                e, client, bucket, key, upload_id, s3_parts, completed_parts, total_plaintext
+            )
+        else:
+            plaintext_attr_cache.put(
                 bucket,
                 key,
-                MultipartMetadata(
-                    version=2,
-                    part_count=len(completed_parts),
-                    total_plaintext_size=total_plaintext,
-                    parts=completed_parts,
-                    wrapped_dek=wrapped_dek,
-                    kid=kid,
-                ),
-            )
-            await delete_upload_state(client, bucket, key, upload_id)
-
-            logger.info(
-                "COMPLETE_MULTIPART_SUCCESS",
-                bucket=bucket,
-                key=key,
-                upload_id=upload_id[:20] + "...",
-                total_parts=len(completed_parts),
-                total_mb=f"{total_plaintext / 1024 / 1024:.2f}MB",
+                str(complete_resp.get("ETag", "")).strip('"'),
+                total_plaintext,
+                synthetic_multipart_etag(total_plaintext),
             )
 
-            location = f"{self.settings.s3_endpoint}/{bucket}/{key}"
-            etag = hashlib.md5(
-                str(state.total_plaintext_size).encode(), usedforsecurity=False
-            ).hexdigest()
+        # Save metadata first, then delete state.
+        # Order matters: if metadata save fails, state is preserved
+        # so the upload can be retried. Deleting state first would
+        # lose the DEK, making the object permanently undecryptable.
+        # Prefer the kid recorded when the upload was created; if the state
+        # predates it (e.g. older recovered state), fall back to the
+        # completing credential's key.
+        if state.kid:
+            kid, kek = state.kid, self.keyring.key_by_id(state.kid)
+        else:
+            kid, kek = self.keyring.key_for(creds.access_key)
+        wrapped_dek = crypto.wrap_key(state.dek, kek)
+        await save_multipart_metadata(
+            client,
+            bucket,
+            key,
+            MultipartMetadata(
+                version=2,
+                part_count=len(completed_parts),
+                total_plaintext_size=total_plaintext,
+                parts=completed_parts,
+                wrapped_dek=wrapped_dek,
+                kid=kid,
+            ),
+        )
+        await delete_upload_state(client, bucket, key, upload_id)
 
-            return Response(
-                content=xml_responses.complete_multipart(location, bucket, key, etag),
-                media_type="application/xml",
-            )
+        logger.info(
+            "COMPLETE_MULTIPART_SUCCESS",
+            bucket=bucket,
+            key=key,
+            upload_id=upload_id[:20] + "...",
+            total_parts=len(completed_parts),
+            total_mb=f"{total_plaintext / 1024 / 1024:.2f}MB",
+        )
+
+        location = f"{self.settings.s3_endpoint}/{bucket}/{key}"
+        etag = hashlib.md5(
+            str(state.total_plaintext_size).encode(), usedforsecurity=False
+        ).hexdigest()
+
+        return Response(
+            content=xml_responses.complete_multipart(location, bucket, key, etag),
+            media_type="application/xml",
+        )
+
+    async def _try_idempotent_complete_response(
+        self, client: S3Client, bucket: str, key: str, upload_id: str
+    ) -> Response | None:
+        """Return success if a peer pod already finished this upload."""
+        meta = await load_multipart_metadata(client, bucket, key)
+        if meta is None:
+            return None
+
+        try:
+            head = await client.head_object(bucket, key)
+        except ClientError:
+            return None
+
+        expected_ciphertext_size = sum(p.ciphertext_size for p in meta.parts)
+        if head.get("ContentLength") != expected_ciphertext_size:
+            return None
+
+        logger.info(
+            "COMPLETE_MULTIPART_IDEMPOTENT",
+            bucket=bucket,
+            key=key,
+            upload_id=upload_id[:20] + "...",
+            total_mb=f"{meta.total_plaintext_size / 1024 / 1024:.2f}MB",
+        )
+
+        location = f"{self.settings.s3_endpoint}/{bucket}/{key}"
+        etag = hashlib.md5(
+            str(meta.total_plaintext_size).encode(), usedforsecurity=False
+        ).hexdigest()
+        return Response(
+            content=xml_responses.complete_multipart(location, bucket, key, etag),
+            media_type="application/xml",
+        )
 
     def _parse_client_parts(self, body: bytes) -> list[dict]:
         client_parts = []

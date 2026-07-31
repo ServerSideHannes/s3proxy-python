@@ -39,6 +39,9 @@ from .models import (
 # Recovery
 from .recovery import reconstruct_upload_state_from_s3
 
+# Complete upload serialization (HA)
+from .complete_lock import CompleteUploadLock, create_complete_upload_lock
+
 # Redis client
 from .redis import (
     close_redis,
@@ -90,6 +93,9 @@ __all__ = [
     "synthetic_multipart_etag",
     # Recovery
     "reconstruct_upload_state_from_s3",
+    # Complete lock
+    "CompleteUploadLock",
+    "create_complete_upload_lock",
     # Serialization
     "json_dumps",
     "json_loads",
