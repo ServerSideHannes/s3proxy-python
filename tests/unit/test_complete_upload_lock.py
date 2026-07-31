@@ -12,10 +12,8 @@ import asyncio
 from urllib.parse import urlencode
 
 import pytest
-from botocore.exceptions import ClientError
 
 from s3proxy import crypto
-from s3proxy.handlers.multipart import lifecycle
 from s3proxy.state import (
     CompleteUploadLock,
     MultipartMetadata,
@@ -134,7 +132,6 @@ async def test_complete_lock_serializes_concurrent_upstream_calls(
         internal = _INTERNAL_FOR_CLIENT[client_part]
         nonce = crypto.derive_part_nonce(upload_id, internal)
         ciphertext = crypto.encrypt(plaintext, dek, nonce)
-        etag = ciphertext  # not used by mock
         from s3proxy.state import InternalPartMetadata, PartMetadata
 
         await handler_with_lock.multipart_manager.add_part(

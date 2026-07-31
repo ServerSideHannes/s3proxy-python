@@ -11,6 +11,9 @@ This package provides:
 # Plaintext attribute cache for listings
 from .attr_cache import PlaintextAttrCache, plaintext_attr_cache, synthetic_multipart_etag
 
+# Complete upload serialization (HA)
+from .complete_lock import CompleteUploadLock, create_complete_upload_lock
+
 # State manager and storage
 from .manager import MAX_INTERNAL_PARTS_PER_CLIENT, MultipartStateManager
 
@@ -38,9 +41,6 @@ from .models import (
 
 # Recovery
 from .recovery import reconstruct_upload_state_from_s3
-
-# Complete upload serialization (HA)
-from .complete_lock import CompleteUploadLock, create_complete_upload_lock
 
 # Redis client
 from .redis import (
