@@ -21,7 +21,7 @@ keywords = [
 requires-python = ">=3.14"
 dependencies = [
     "fastapi>=0.141.1",
-    "uvicorn[standard]>=0.52.3",
+    "uvicorn[standard]>=0.52.4",
     "aioboto3>=15.5.0",
     "boto3>=1.40.0",
     "botocore>=1.40.0",
@@ -48,11 +48,11 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
-    "moto[s3]>=5.2.2",
-    "ruff>=0.16.3",
+    "moto[s3]>=5.2.3",
+    "ruff>=0.16.4",
     "mypy>=2.3.1",
-    "boto3-stubs[s3]>=1.43.72",
-    "fakeredis>=2.37.0",
+    "boto3-stubs[s3]>=1.43.78",
+    "fakeredis>=2.37.1",
     "requests>=2.34.2",
 ]
 
