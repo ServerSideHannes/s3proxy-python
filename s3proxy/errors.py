@@ -31,6 +31,15 @@ S3_ERROR_CODES = {
 }
 
 
+class BackendIntegrityError(Exception):
+    """Backend-stored ciphertext ETag does not match the MD5 of what we sent.
+
+    With backend payload signing disabled (UNSIGNED-PAYLOAD), this check is the
+    transport-integrity guarantee on the proxy->backend hop. Mapped to a 500 by
+    raise_for_exception so clients retry the part.
+    """
+
+
 class S3Error(HTTPException):
     """S3-compatible error with proper error codes.
 
