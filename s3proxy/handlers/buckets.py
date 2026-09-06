@@ -19,9 +19,7 @@ from ..state import (
     INTERNAL_PREFIX,
     META_SUFFIX_LEGACY,
     delete_multipart_metadata,
-    load_multipart_metadata,
     plaintext_attr_cache,
-    synthetic_multipart_etag,
 )
 from ..xml_utils import find_element, find_elements
 from .base import BaseHandler
@@ -223,26 +221,29 @@ class BucketHandlerMixin(BaseHandler):
             if cached is not None:
                 size, etag = cached
                 return self._list_entry(obj, size, etag)
-            async with sem:
+            async with plaintext_attr_cache.coalesce(bucket, obj["Key"], backend_etag), sem:
+                cached = plaintext_attr_cache.get(bucket, obj["Key"], backend_etag)
+                if cached is not None:
+                    return self._list_entry(obj, *cached)
                 try:
                     head = await client.head_object(bucket, obj["Key"])
-                    meta = head.get("Metadata", {})
-                    if "plaintext-size" in meta:
-                        size = self._get_plaintext_size(meta, obj.get("Size", 0))
-                        etag = self._get_effective_etag(meta, obj.get("ETag", ""))
-                    elif mp_meta := await load_multipart_metadata(client, bucket, obj["Key"]):
-                        # Multipart objects can't carry plaintext-size in user
-                        # metadata (it is fixed at CreateMultipartUpload); the
-                        # size lives in the .meta sidecar. Reporting the backend
-                        # Size here would leak the ciphertext size and make sync
-                        # clients re-upload every multipart object on each pass.
-                        size = mp_meta.total_plaintext_size
-                        etag = synthetic_multipart_etag(size)
-                    else:
-                        size = self._get_plaintext_size(meta, obj.get("Size", 0))
-                        etag = self._get_effective_etag(meta, obj.get("ETag", ""))
-                    plaintext_attr_cache.put(bucket, obj["Key"], backend_etag, size, etag)
-                except Exception:
+                    head.setdefault("ContentLength", obj.get("Size", 0))
+                    head.setdefault("ETag", obj.get("ETag", ""))
+                    descriptor = await self._resolve_object(client, bucket, obj["Key"], head)
+                    size, etag = descriptor.plaintext_size, descriptor.etag
+                    plaintext_attr_cache.put(
+                        bucket,
+                        obj["Key"],
+                        str(head.get("ETag", backend_etag)).strip('"'),
+                        size,
+                        etag,
+                    )
+                except ClientError as error:
+                    from ..state.metadata import is_not_found
+
+                    if not is_not_found(error):
+                        raise
+                    # LIST and HEAD are separate snapshots; the object may have been deleted.
                     size, etag = obj.get("Size", 0), backend_etag
             return self._list_entry(obj, size, etag)
 

@@ -200,14 +200,16 @@ def create_lifespan(settings: Settings, credentials_store: dict[str, str]) -> As
 
         tracemalloc_task = _maybe_start_tracemalloc()
 
-        yield
-
-        if tracemalloc_task is not None:
-            tracemalloc_task.cancel()
-        await stats_store.aclose()  # flush buffered samples before Redis closes
-        await close_redis()
-        await close_http_client()
-        logger.info("Shutting down")
+        try:
+            yield
+        finally:
+            if tracemalloc_task is not None:
+                tracemalloc_task.cancel()
+            await stats_store.aclose()  # flush buffered samples before Redis closes
+            await close_redis()
+            await close_http_client()
+            await handler.client_pool.close()
+            logger.info("Shutting down")
 
     return lifespan
 

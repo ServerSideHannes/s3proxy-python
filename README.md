@@ -21,6 +21,10 @@
 
 ## Overview
 
+For the generation-format upgrade, migration requirements and measured performance, see
+[Generation-bound writes and streaming changes](docs/GENERATION_FORMAT.md).
+
+
 S3's server-side encryption is great, but your cloud provider holds the keys. S3Proxy sits between your app and S3, encrypting everything **before** it leaves your infrastructure.
 
 ```

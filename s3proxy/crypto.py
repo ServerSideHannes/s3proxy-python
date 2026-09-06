@@ -399,8 +399,8 @@ def framed_ciphertext_size(plaintext_size: int) -> int:
 def encrypt_frame(
     plaintext: bytes, dek: bytes, upload_id: str, part_number: int, frame_index: int
 ) -> bytes:
-    """Encrypt a single frame (nonce || ciphertext || tag) with its derived nonce."""
-    return encrypt(plaintext, dek, derive_frame_nonce(upload_id, part_number, frame_index))
+    """Encrypt a frame with a fresh nonce; network retries must reuse these sealed bytes."""
+    return encrypt(plaintext, dek)
 
 
 def ciphertext_frame_byte_sizes(plaintext_size: int, ciphertext_size: int) -> list[int]:
@@ -529,7 +529,7 @@ def decrypt(ciphertext: bytes, dek: bytes) -> bytes:
         )
 
     nonce = ciphertext[:NONCE_SIZE]
-    ct_with_tag = ciphertext[NONCE_SIZE:]
+    ct_with_tag = memoryview(ciphertext)[NONCE_SIZE:]
 
     try:
         aesgcm = AESGCM(dek)

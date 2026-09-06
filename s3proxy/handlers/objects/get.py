@@ -4,25 +4,22 @@ import asyncio
 import base64
 import contextlib
 from collections.abc import AsyncIterator, Awaitable, Callable
-from itertools import accumulate
 from typing import Any
 
 import structlog
 from botocore.exceptions import ClientError
 from fastapi import Request, Response
-from fastapi.responses import StreamingResponse
 from structlog.stdlib import BoundLogger
 
-from ... import concurrency, crypto
+from ... import crypto
 from ...client import S3Client, S3Credentials
-from ...concurrency import MAX_BUFFER_SIZE
 from ...errors import S3Error
 from ...state import (
     MultipartMetadata,
     calculate_part_range,
-    load_multipart_metadata,
 )
 from ...streaming import STREAM_CHUNK_SIZE
+from ...streaming.response import OwnedStreamingResponse
 from ...utils import format_http_date
 from ..base import BaseHandler
 
@@ -49,7 +46,9 @@ class GetObjectMixin(BaseHandler):
 
                 # Get the effective ETag (client-etag for encrypted, S3 etag otherwise)
                 metadata = head_resp.get("Metadata", {})
-                effective_etag = self._get_effective_etag(metadata, head_resp.get("ETag", ""))
+                descriptor = await self._resolve_object(client, bucket, key, head_resp)
+                mp_meta = descriptor.multipart
+                effective_etag = descriptor.etag
 
                 # Check conditional headers (inherited from BaseHandler)
                 cond_response = self._check_conditional_headers(
@@ -64,9 +63,9 @@ class GetObjectMixin(BaseHandler):
                 if cond_response:
                     return cond_response
 
-                if meta := await load_multipart_metadata(client, bucket, key):
+                if (meta := mp_meta) is not None:
                     response = await self._get_multipart(
-                        client, bucket, key, meta, range_header, last_modified, creds
+                        client, bucket, key, meta, range_header, last_modified, creds, head_resp
                     )
                 else:
                     response = await self._get_single(
@@ -120,20 +119,35 @@ class GetObjectMixin(BaseHandler):
         last_modified: str | None,
     ) -> Response:
         logger.info("GET_UNENCRYPTED", bucket=bucket, key=key)
-        resp = await client.get_object(bucket, key, range_header=range_header)
+        lease = self._client(client.credentials)
+        stream_client = await lease.__aenter__()
+        try:
+            resp = await stream_client.get_object(bucket, key, range_header=range_header)
+        except BaseException:
+            await lease.__aexit__(None, None, None)
+            raise
         s3_body = resp["Body"]
-
         headers = self._build_response_headers(resp, last_modified)
 
-        async def stream_s3_body() -> AsyncIterator[bytes]:
+        async def stream_s3_body():
             async with s3_body:
                 while chunk := await s3_body.read(STREAM_CHUNK_SIZE):
                     yield chunk
 
+        async def cleanup():
+            try:
+                await s3_body.__aexit__(None, None, None)
+            finally:
+                await lease.__aexit__(None, None, None)
+
         if "ContentRange" in resp:
             headers["Content-Range"] = resp["ContentRange"]
-            return StreamingResponse(stream_s3_body(), status_code=206, headers=headers)
-        return StreamingResponse(stream_s3_body(), headers=headers)
+        return OwnedStreamingResponse(
+            stream_s3_body(),
+            headers=headers,
+            status_code=206 if "ContentRange" in resp else 200,
+            cleanup=cleanup,
+        )
 
     async def _decrypt_single_object(
         self,
@@ -147,52 +161,41 @@ class GetObjectMixin(BaseHandler):
         kid: str = "",
     ) -> Response:
         logger.info("GET_ENCRYPTED_SINGLE", bucket=bucket, key=key)
-        resp = await client.get_object(bucket, key)
-        content_length = resp.get("ContentLength", 0)
+        resp = await client.get_object(bucket, key, if_match=head_resp.get("ETag"))
 
-        # Encrypted decrypts buffer ciphertext + plaintext simultaneously.
-        # Acquire additional memory beyond the initial MAX_BUFFER_SIZE reservation.
-        additional = max(0, content_length * 2 - MAX_BUFFER_SIZE)
-        extra_reserved = 0
+        wrapped_dek = base64.b64decode(wrapped_dek_b64)
+        dek = crypto.unwrap_key(wrapped_dek, self.keyring.key_by_id(kid))
+        from ...streaming.authenticated import decrypt_to_file, file_range
+
+        # Authenticate to bounded disk storage before emitting any plaintext. This
+        # also handles old single-envelope objects larger than the memory budget.
+        spool, length = await decrypt_to_file(resp["Body"], dek)
         try:
-            if additional > 0:
-                extra_reserved = await concurrency.try_acquire_memory(additional)
-
-            wrapped_dek = base64.b64decode(wrapped_dek_b64)
-            async with resp["Body"] as body:
-                ciphertext = await body.read()
-            plaintext = crypto.decrypt_object(ciphertext, wrapped_dek, self.keyring.key_by_id(kid))
-            del ciphertext
-
-            content_type = head_resp.get("ContentType", "application/octet-stream")
-            cache_control = head_resp.get("CacheControl")
-            expires = head_resp.get("Expires")
-
-            if range_header:
-                start, end = self._parse_range(range_header, len(plaintext))
-                headers = self._build_headers(
-                    content_type=content_type,
-                    content_length=end - start + 1,
-                    last_modified=last_modified,
-                    cache_control=cache_control,
-                    expires=expires,
-                )
-                headers["Content-Range"] = f"bytes {start}-{end}/{len(plaintext)}"
-                return Response(
-                    content=plaintext[start : end + 1], status_code=206, headers=headers
-                )
-
-            headers = self._build_headers(
-                content_type=content_type,
-                content_length=len(plaintext),
-                last_modified=last_modified,
-                cache_control=cache_control,
-                expires=expires,
+            start, end = (
+                self._parse_range(range_header, length) if range_header else (0, length - 1)
             )
-            return Response(content=plaintext, headers=headers)
-        finally:
-            if extra_reserved > 0:
-                await concurrency.release_memory(extra_reserved)
+            headers = self._build_headers(
+                head_resp.get("ContentType", "application/octet-stream"),
+                end - start + 1,
+                last_modified,
+                head_resp.get("CacheControl"),
+                head_resp.get("Expires"),
+            )
+            if range_header:
+                headers["Content-Range"] = f"bytes {start}-{end}/{length}"
+
+            async def cleanup():
+                spool.close()
+
+            return OwnedStreamingResponse(
+                file_range(spool, start, end),
+                headers=headers,
+                cleanup=cleanup,
+                status_code=206 if range_header else 200,
+            )
+        except BaseException:
+            spool.close()
+            raise
 
     async def _get_multipart(
         self,
@@ -203,26 +206,40 @@ class GetObjectMixin(BaseHandler):
         range_header: str | None,
         last_modified: str | None,
         creds: S3Credentials,
+        head_resp: dict | None = None,
     ) -> Response:
         dek = crypto.unwrap_key(meta.wrapped_dek, self.keyring.key_by_id(meta.kid))
         total = meta.total_plaintext_size
         start, end = self._parse_range(range_header, total) if range_header else (0, total - 1)
         parts = calculate_part_range(meta.parts, start, end)
 
-        # Build lookup: part_number -> (part_metadata, ciphertext_offset)
-        sorted_parts = sorted(meta.parts, key=lambda p: p.part_number)
-        offsets = [0, *accumulate(p.ciphertext_size for p in sorted_parts)]
-        part_info = {p.part_number: (p, offsets[i]) for i, p in enumerate(sorted_parts)}
-
         # Get actual object size and content type
-        actual_size, content_type, cache_control, expires_val = await self._get_object_info(
-            client, bucket, key, meta
-        )
+        head_resp = head_resp or await client.head_object(bucket, key)
+        content_type = head_resp.get("ContentType", "application/octet-stream")
+        cache_control = head_resp.get("CacheControl")
+        expires_val = head_resp.get("Expires")
 
         # Create stream generator
-        stream = self._create_multipart_stream(
-            creds, bucket, key, parts, part_info, dek, actual_size, start, end
-        )
+        async def stream():
+            from ...streaming.frames import plaintext_frames
+
+            async with (
+                self._client(creds) as stream_client,
+                contextlib.aclosing(
+                    plaintext_frames(
+                        stream_client,
+                        bucket,
+                        key,
+                        meta,
+                        dek,
+                        start if range_header else None,
+                        end if range_header else None,
+                        if_match=head_resp.get("ETag"),
+                    )
+                ) as plaintext,
+            ):
+                async for chunk in plaintext:
+                    yield chunk
 
         # Build response
         length = sum(e - s + 1 for _, s, e in parts)
@@ -235,8 +252,12 @@ class GetObjectMixin(BaseHandler):
         )
         if range_header:
             headers["Content-Range"] = f"bytes {start}-{end}/{total}"
-            return StreamingResponse(stream, status_code=206, headers=headers)
-        return StreamingResponse(stream, headers=headers)
+            return OwnedStreamingResponse(stream(), status_code=206, headers=headers)
+        if total == 0:
+            async for _ in stream():
+                pass
+            return Response(headers=headers)
+        return OwnedStreamingResponse(stream(), headers=headers)
 
     async def _get_object_info(
         self, client: S3Client, bucket: str, key: str, meta: MultipartMetadata

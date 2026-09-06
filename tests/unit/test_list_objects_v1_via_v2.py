@@ -54,7 +54,7 @@ class _FakeClient:
         return self.resp
 
     async def head_object(self, bucket, key):
-        return {"Metadata": {}}
+        return {"Metadata": {"s3proxy-format": "plain-v3"}}
 
 
 class _Handler(BucketHandlerMixin):

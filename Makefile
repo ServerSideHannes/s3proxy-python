@@ -30,6 +30,7 @@ INTEGRATION_memory_leak_TESTS = tests/integration/test_memory_leak.py
 INTEGRATION_memory_copy_TESTS = tests/integration/test_copy_memory_governor.py tests/integration/test_copy_per_part_metrics.py tests/integration/test_upload_part_copy_passthrough_e2e.py
 INTEGRATION_memory_copy_PYTEST_OPTS = -n0
 INTEGRATION_core_TESTS = \
+	tests/integration/test_generation_roundtrip.py \
 	tests/integration/test_integration.py \
 	tests/integration/test_handlers.py \
 	tests/integration/test_concurrent_operations.py \

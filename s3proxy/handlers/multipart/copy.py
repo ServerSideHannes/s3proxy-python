@@ -90,6 +90,18 @@ class _PlaintextRangeSplit:
 class CopyPartMixin(BaseHandler):
     async def handle_upload_part_copy(self, request: Request, creds: S3Credentials) -> Response:
         bucket, key = self._parse_path(request.url.path)
+        upload_id, _ = self._extract_multipart_params(request)
+        state = await self.multipart_manager.get_upload(bucket, key, upload_id)
+        if state is None:
+            raise S3Error.no_such_upload(upload_id)
+        if state.layout_version < 3:
+            raise S3Error.invalid_request(
+                "Legacy in-flight uploads must be restarted after upgrade"
+            )
+        return await self._copy_part_impl(request, creds)
+
+    async def _copy_part_impl(self, request: Request, creds: S3Credentials) -> Response:
+        bucket, key = self._parse_path(request.url.path)
         async with self._client(creds) as client:
             upload_id, part_num = self._extract_multipart_params(request)
             copy_source = request.headers.get("x-amz-copy-source", "")
@@ -107,7 +119,7 @@ class CopyPartMixin(BaseHandler):
 
             try:
                 head_resp = await client.head_object(src_bucket, src_key)
-            except Exception as e:
+            except ClientError as e:
                 logger.error(
                     "UPLOAD_PART_COPY_HEAD_FAILED",
                     bucket=bucket,
@@ -118,11 +130,13 @@ class CopyPartMixin(BaseHandler):
                     error_type=type(e).__name__,
                     error=str(e),
                 )
-                raise S3Error.no_such_key(src_key) from e
+                self._raise_s3_error(e, src_bucket, src_key)
 
             src_metadata = head_resp.get("Metadata", {})
             src_wrapped_dek = src_metadata.get(self.settings.dektag_name)
-            src_multipart_meta = await load_multipart_metadata(client, src_bucket, src_key)
+            src_multipart_meta = await load_multipart_metadata(
+                client, src_bucket, src_key, head_resp
+            )
 
             total_plaintext = self._copy_plaintext_size(
                 head_resp, None, src_wrapped_dek, src_multipart_meta
@@ -133,6 +147,78 @@ class CopyPartMixin(BaseHandler):
             plaintext_size = self._copy_plaintext_size(
                 head_resp, copy_source_range, src_wrapped_dek, src_multipart_meta
             )
+
+            if state.layout_version >= 3:
+                from .staged import stage_ciphertext_copy, stage_part
+
+                full_source = (
+                    copy_source_range is None
+                    or copy_source_range == f"bytes=0-{total_plaintext - 1}"
+                )
+                source_etag = (
+                    src_multipart_meta.client_etag
+                    if src_multipart_meta
+                    else src_metadata.get("client-etag", "")
+                )
+                native = False
+                if full_source and source_etag and (src_multipart_meta or src_wrapped_dek):
+                    source_dek, source_kid = self._resolve_source_dek(
+                        src_multipart_meta, src_wrapped_dek, src_metadata, creds
+                    )
+                    state = await self.multipart_manager.begin_write(
+                        bucket, key, upload_id, source_dek, source_kid
+                    )
+                    native = state.dek == source_dek
+                else:
+                    state = await self.multipart_manager.begin_write(bucket, key, upload_id)
+
+                async def stage_copy():
+                    if native:
+                        async with self._client(creds) as work_client:
+                            part = await stage_ciphertext_copy(
+                                self,
+                                work_client,
+                                state,
+                                part_num,
+                                copy_source,
+                                head_resp,
+                                self._source_ciphertext_segments(
+                                    src_multipart_meta, head_resp, src_wrapped_dek, src_metadata
+                                ),
+                                source_etag,
+                            )
+                            logger.info("UPLOAD_PART_COPY_PASSTHROUGH", bucket=bucket, key=key)
+                            return xml_responses.upload_part_copy_result(
+                                part.md5, format_iso8601(datetime.now(UTC))
+                            ).encode()
+
+                    async with (
+                        self._client(creds) as work_client,
+                        concurrency.reserve_copy_memory(4 * crypto.FRAME_PLAINTEXT_SIZE),
+                    ):
+                        source = self._iter_copy_source(
+                            work_client,
+                            src_bucket,
+                            src_key,
+                            copy_source_range,
+                            src_wrapped_dek,
+                            src_multipart_meta,
+                            head_resp,
+                            src_metadata,
+                        )
+                        part = await stage_part(
+                            self, request, work_client, state, part_num, source, verify=False
+                        )
+                        return xml_responses.upload_part_copy_result(
+                            part.md5, format_iso8601(datetime.now(UTC))
+                        ).encode()
+
+                return StreamingResponse(
+                    self._keepalive_copy_stream(
+                        stage_copy(), bucket=bucket, key=key, part_num=part_num
+                    ),
+                    media_type="application/xml",
+                )
 
             passthrough_block = self._passthrough_block_reason(
                 copy_source_range,
@@ -1473,13 +1559,26 @@ class CopyPartMixin(BaseHandler):
                 yield chunk
         elif src_wrapped_dek:
             src_kid = src_metadata.get(self.settings.kidtag_name, "")
-            plaintext = await self._download_encrypted_single(
-                client, src_bucket, src_key, src_wrapped_dek, src_kid
-            )
+            from contextlib import aclosing
+
+            start, end = 0, None
             if copy_source_range:
-                start, end = self._parse_copy_source_range(copy_source_range, len(plaintext))
-                plaintext = plaintext[start : end + 1]
-            yield plaintext
+                total = crypto.plaintext_size(head_resp["ContentLength"])
+                start, end = self._parse_copy_source_range(copy_source_range, total)
+            async with aclosing(
+                self._iter_single_plaintext(
+                    client,
+                    src_bucket,
+                    src_key,
+                    src_wrapped_dek,
+                    src_kid,
+                    start,
+                    end,
+                    if_match=head_resp.get("ETag"),
+                )
+            ) as stream:
+                async for chunk in stream:
+                    yield chunk
         else:
             async for chunk in self._stream_raw_source_with_resume(
                 client, src_bucket, src_key, copy_source_range

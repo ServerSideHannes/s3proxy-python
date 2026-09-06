@@ -191,7 +191,13 @@ def poll_during(ctx: RunContext, fn) -> tuple[int, int]:
 
 
 def load_sidecar(ctx: RunContext, key: str):
-    meta_key = f".s3proxy-internal/{key}.meta"
+    head = ctx.raw.head_object(Bucket=ctx.bucket, Key=key)
+    generation = head.get("Metadata", {}).get("s3proxy-generation")
+    meta_key = (
+        f".s3proxy-internal/generations/{generation}.meta"
+        if generation
+        else f".s3proxy-internal/{key}.meta"
+    )
     raw = ctx.raw.get_object(Bucket=ctx.bucket, Key=meta_key)["Body"].read()
     return decode_multipart_metadata(raw.decode())
 
@@ -311,7 +317,7 @@ def check_reencrypt_control(ctx: RunContext, source: str, dest: str, size: int) 
         lambda: upload_part_copy(ctx, dest, source, byte_range=f"bytes=0-{partial_end}"),
     )
     ctx.ok("encrypts partial range", enc >= (partial_end + 1) * 0.5, f"{enc / MB:.0f}MB")
-    ctx.ok("high peak memory", peak >= CHUNK_PEAK * 0.5, f"{peak / MB:.2f}MB")
+    ctx.ok("bounded re-encryption memory", peak <= 32 * MB, f"{peak / MB:.2f}MB")
 
 
 def check_scylla_manifest_full_range_passthrough(

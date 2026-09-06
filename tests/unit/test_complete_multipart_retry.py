@@ -146,10 +146,19 @@ async def test_does_not_retry_non_retryable_error(handler):
 
 
 @pytest.mark.asyncio
-async def test_recovers_via_head_object_when_prior_attempt_already_finished(handler):
+async def test_recovers_via_head_object_when_prior_attempt_already_finished(handler, monkeypatch):
     """The exact prod failure: backend finished the assembly, the client only saw
     the error, and a naive retry would otherwise report a false failure."""
     client = _FlakyCompleteClient(phantom_success_on_first=True)
+    from unittest.mock import AsyncMock
+
+    from s3proxy.state import MultipartMetadata
+
+    monkeypatch.setattr(
+        lifecycle,
+        "load_multipart_metadata",
+        AsyncMock(return_value=MultipartMetadata(upload_id="upload-1")),
+    )
 
     resp = await handler._complete_multipart_upload_with_retry(
         client, "bucket", "key", "upload-1", S3_PARTS, COMPLETED_PARTS
