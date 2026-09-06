@@ -172,12 +172,14 @@ class TestMemoryBasedConcurrencyStress:
         yield bucket
         # Delete only this test's unique bucket, including hidden manifests and
         # unfinished staging uploads. Proxy LIST deliberately hides these keys.
-        with boto3.client(
-            "s3",
-            endpoint_url=os.environ.get("S3PROXY_TEST_BACKEND", "http://localhost:9000"),
-            aws_access_key_id="minioadmin",
-            aws_secret_access_key="minioadmin",
-            region_name="us-east-1",
+        with contextlib.closing(
+            boto3.client(
+                "s3",
+                endpoint_url=os.environ.get("S3PROXY_TEST_BACKEND", "http://localhost:9000"),
+                aws_access_key_id="minioadmin",
+                aws_secret_access_key="minioadmin",
+                region_name="us-east-1",
+            )
         ) as raw:
             for page in raw.get_paginator("list_multipart_uploads").paginate(Bucket=bucket):
                 for upload in page.get("Uploads", []):
