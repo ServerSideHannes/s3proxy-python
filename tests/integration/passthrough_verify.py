@@ -137,7 +137,9 @@ def upload_multipart(ctx: RunContext, key: str, size: int) -> None:
         UploadId=upload_id,
         MultipartUpload={"Parts": parts},
     )
-    meta = f".s3proxy-internal/{key}.meta"
+    head = ctx.raw.head_object(Bucket=ctx.bucket, Key=key)
+    generation = head["Metadata"]["s3proxy-generation"]
+    meta = f".s3proxy-internal/generations/{generation}.meta"
     assert ctx.raw.head_object(Bucket=ctx.bucket, Key=meta)["ContentLength"] > 0
 
 

@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 
 from .. import crypto
+from ..errors import S3Error
 
 
 async def read_frames(client, bucket, key, frames, *, if_match=None):
@@ -59,18 +60,25 @@ async def read_frames(client, bucket, key, frames, *, if_match=None):
                 await asyncio.sleep(SOURCE_READ_BACKOFF_SEC * 2 ** (attempt - 1))
 
 
-async def plaintext_frames(client, bucket, key, meta, dek, start=None, end=None, *, if_match=None):
+async def plaintext_frames(
+    client, bucket, key, meta, dek, start=None, end=None, *, if_match=None, ciphertext_size=None
+):
     frames = []
     pt_offset = 0
     ct_offset = 0
     for part in sorted(meta.parts, key=lambda p: p.part_number):
         segments = part.internal_parts or [part]
-        for segment in segments:
+        for segment_number, segment in enumerate(segments, 1):
             for size in crypto.ciphertext_frame_byte_sizes(
                 segment.plaintext_size, segment.ciphertext_size
             ):
                 plaintext_size = size - crypto.ENCRYPTION_OVERHEAD
                 if start is None or (pt_offset + plaintext_size > start and pt_offset <= end):
+                    if ciphertext_size is not None and ct_offset + size > ciphertext_size:
+                        raise S3Error.invalid_range(
+                            f"Metadata corruption: part {part.part_number}, internal part "
+                            f"{segment_number} exceeds object size {ciphertext_size}"
+                        )
                     left = max(0, start - pt_offset) if start is not None else 0
                     right = (
                         min(plaintext_size, end - pt_offset + 1)
