@@ -56,7 +56,7 @@ Regression tests separately demonstrate eight consecutive frames using one backe
 
 ## Validation and remaining rollout checks
 
-Local validation: 670 unit tests passed (two upstream deprecation warnings); 27 real-backend compatibility tests passed, plus 11 copy/concurrency tests and 56 mock integration tests. Ruff lint and formatting checks passed. The PR CI remains the source of truth for the broader Linux integration shards.
+Local validation: the CI unit selection passed 779 tests, including 110 mock integration tests (two upstream deprecation warnings). The separate full unit-directory run passed 670 tests, including its slow case. Real-backend validation passed 27 compatibility tests, 11 copy/concurrency tests and nine native-copy tests covering 1.28 GiB objects and concurrent copies. Ruff lint and formatting checks passed. CI repeats the Linux integration shards; the memory-usage shard runs serially and removes all data from each unique test bucket to stay within its 4 GiB test backend.
 
 Run `uv run pytest tests/unit -q`, `uv run ruff check .` and `uv run ruff format --check .`. `tests/integration/test_generation_roundtrip.py` exercises real HTTP and MinIO, including hash tampering below/at/above the buffering threshold, generation overwrite, conditional writes, ListParts, native copying and UploadPartCopy. Set `S3PROXY_TEST_REDIS_URL` to a dedicated test Redis to repeat the scenario with durable state. `S3PROXY_TEST_BACKEND` selects the backend for the shared integration fixtures.
 
