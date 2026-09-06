@@ -27,6 +27,7 @@ verify-passthrough:
 # Integration shards for parallel CI (make test-integration-shard SHARD=memory_usage)
 INTEGRATION_memory_usage_TESTS = tests/integration/test_memory_usage.py
 INTEGRATION_memory_usage_PYTEST_OPTS = -n0
+INTEGRATION_memory_usage_COMPOSE_OPTS = -f tests/docker-compose.oom.yml
 INTEGRATION_memory_leak_TESTS = tests/integration/test_memory_leak.py
 INTEGRATION_memory_copy_TESTS = tests/integration/test_copy_memory_governor.py tests/integration/test_copy_per_part_metrics.py tests/integration/test_upload_part_copy_passthrough_e2e.py
 INTEGRATION_memory_copy_PYTEST_OPTS = -n0
@@ -74,15 +75,15 @@ test-integration-shard:
 ifndef SHARD
 	$(error SHARD is required, e.g. make test-integration-shard SHARD=memory)
 endif
-	@docker compose -f tests/docker-compose.yml down 2>/dev/null || true
-	@docker compose -f tests/docker-compose.yml up -d
+	@docker compose -f tests/docker-compose.yml $(INTEGRATION_$(SHARD)_COMPOSE_OPTS) down 2>/dev/null || true
+	@docker compose -f tests/docker-compose.yml $(INTEGRATION_$(SHARD)_COMPOSE_OPTS) up -d
 	@sleep 3
 	@AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin \
 		uv run pytest -m "e2e" -v \
 		$(if $(INTEGRATION_$(SHARD)_PYTEST_OPTS),$(INTEGRATION_$(SHARD)_PYTEST_OPTS),-n auto --dist loadgroup) \
 		$(INTEGRATION_$(SHARD)_TESTS); \
 		EXIT_CODE=$$?; \
-		docker compose -f tests/docker-compose.yml down; \
+		docker compose -f tests/docker-compose.yml $(INTEGRATION_$(SHARD)_COMPOSE_OPTS) down; \
 		exit $$EXIT_CODE
 
 # Run all tests with containers (unit + integration)
