@@ -2,10 +2,13 @@
 
 import base64
 import gzip
+import hashlib
 
 import structlog
+from botocore.exceptions import ClientError
 from structlog.stdlib import BoundLogger
 
+from ..errors import S3Error
 from .models import InternalPartMetadata, MultipartMetadata, PartMetadata
 from .serialization import json_dumps, json_loads
 
@@ -35,6 +38,11 @@ def encode_multipart_metadata(meta: MultipartMetadata) -> str:
     """
     data = {
         "v": meta.version,
+        "generation": meta.generation,
+        "upload_id": meta.upload_id,
+        "upload_bucket": meta.upload_bucket,
+        "upload_key": meta.upload_key,
+        "client_etag": meta.client_etag,
         "pc": meta.part_count,
         "ts": meta.total_plaintext_size,
         "dek": base64.b64encode(meta.wrapped_dek).decode(),
@@ -63,6 +71,8 @@ def encode_multipart_metadata(meta: MultipartMetadata) -> str:
     }
 
     json_bytes = json_dumps(data)
+    if len(json_bytes) > MAX_METADATA_SIZE:
+        raise S3Error.invalid_request("Multipart metadata exceeds the supported size limit")
     compressed = gzip.compress(json_bytes)
     return base64.b64encode(compressed).decode()
 
@@ -88,6 +98,11 @@ def decode_multipart_metadata(encoded: str) -> MultipartMetadata:
 
     return MultipartMetadata(
         version=data.get("v", 1),
+        generation=data.get("generation", ""),
+        upload_id=data.get("upload_id", ""),
+        upload_bucket=data.get("upload_bucket", ""),
+        upload_key=data.get("upload_key", ""),
+        client_etag=data.get("client_etag", ""),
         part_count=data.get("pc", 0),
         total_plaintext_size=data.get("ts", 0),
         wrapped_dek=base64.b64decode(data.get("dek", "")),
@@ -121,10 +136,16 @@ async def persist_upload_state(
     upload_id: str,
     wrapped_dek: bytes,
     kid: str = "",
+    *,
+    layout_version: int = 2,
 ) -> None:
     """Persist DEK to S3 during upload (fallback for Redis failures)."""
     state_key = _internal_upload_key(key, upload_id)
-    data = {"dek": base64.b64encode(wrapped_dek).decode(), "kid": kid}
+    data = {
+        "dek": base64.b64encode(wrapped_dek).decode(),
+        "kid": kid,
+        "layout_version": layout_version,
+    }
 
     logger.info(
         "PERSIST_UPLOAD_STATE",
@@ -174,6 +195,8 @@ async def load_upload_state(
         response = await s3_client.get_object(bucket, state_key)
         body = await response["Body"].read()
         data = json_loads(body)
+        if data.get("layout_version", 2) >= 3:
+            return None  # Restart incomplete uploads; never guess accepted part state.
         wrapped_dek = base64.b64decode(data["dek"])
 
         logger.info(
@@ -230,7 +253,7 @@ async def save_multipart_metadata(
     meta: MultipartMetadata,
 ) -> None:
     """Save multipart metadata to S3."""
-    meta_key = _internal_meta_key(key)
+    meta_key = generation_meta_key(meta.generation) if meta.generation else _internal_meta_key(key)
     encoded = encode_multipart_metadata(meta)
 
     logger.info(
@@ -262,68 +285,93 @@ async def save_multipart_metadata(
         raise
 
 
+FORMAT_KEY = "s3proxy-format"
+GENERATION_KEY = "s3proxy-generation"
+
+
+def generation_for(wrapped_dek: bytes) -> str:
+    """The wrapped random per-upload DEK identifies an immutable generation."""
+    return hashlib.sha256(wrapped_dek).hexdigest()
+
+
+def generation_meta_key(generation: str) -> str:
+    if len(generation) != 64 or any(c not in "0123456789abcdef" for c in generation):
+        raise S3Error.internal_error("Invalid object generation")
+    return f"{INTERNAL_PREFIX}generations/{generation}.meta"
+
+
+def multipart_headers(wrapped_dek: bytes) -> dict[str, str]:
+    return {FORMAT_KEY: "multipart-v3", GENERATION_KEY: generation_for(wrapped_dek)}
+
+
+def multipart_etag(meta: MultipartMetadata) -> str:
+    # Legacy ETags were inconsistent across operations. Use the existing HEAD
+    # representation consistently for old objects; new manifests record identity.
+    return (
+        meta.client_etag
+        or hashlib.md5(str(meta.total_plaintext_size).encode(), usedforsecurity=False).hexdigest()
+    )
+
+
+def is_not_found(error: ClientError) -> bool:
+    return str(error.response.get("Error", {}).get("Code")) in {"404", "NoSuchKey", "NotFound"}
+
+
 async def load_multipart_metadata(
-    s3_client,
-    bucket: str,
-    key: str,
+    s3_client, bucket: str, key: str, head: dict | None = None
 ) -> MultipartMetadata | None:
-    """Load multipart metadata from S3.
-
-    Checks the new internal prefix first, then falls back to legacy location.
-    """
-    # Try new location first
-    meta_key = _internal_meta_key(key)
-    logger.debug("LOAD_METADATA", bucket=bucket, key=key, meta_key=meta_key)
-
-    try:
-        response = await s3_client.get_object(bucket, meta_key)
-        body = await response["Body"].read()
-        encoded = body.decode()
-        meta = decode_multipart_metadata(encoded)
-
-        logger.info(
-            "METADATA_LOADED",
-            bucket=bucket,
-            key=key,
-            meta_key=meta_key,
-            part_count=meta.part_count,
-            total_size=meta.total_plaintext_size,
-        )
-        return meta
-
-    except Exception as e:
-        logger.debug(
-            "METADATA_NOT_AT_NEW_LOCATION",
-            bucket=bucket,
-            key=key,
-            error=str(e),
-        )
-
-    # Fall back to legacy location
-    legacy_key = f"{key}{META_SUFFIX_LEGACY}"
-    try:
-        response = await s3_client.get_object(bucket, legacy_key)
-        body = await response["Body"].read()
-        encoded = body.decode()
-        meta = decode_multipart_metadata(encoded)
-
-        logger.info(
-            "METADATA_LOADED_LEGACY",
-            bucket=bucket,
-            key=key,
-            legacy_key=legacy_key,
-            part_count=meta.part_count,
-        )
-        return meta
-
-    except Exception as e:
-        logger.debug(
-            "NO_MULTIPART_METADATA",
-            bucket=bucket,
-            key=key,
-            error=str(e),
-        )
+    """Resolve only the current generation; never turn backend failures into plaintext."""
+    if head is None:
+        try:
+            head = await s3_client.head_object(bucket, key)
+        except ClientError as error:
+            if is_not_found(error):
+                return None
+            raise
+    metadata = head.get("Metadata", {})
+    fmt = metadata.get(FORMAT_KEY)
+    if fmt in ("single-v3", "plain-v3") or (not fmt and "plaintext-size" in metadata):
         return None
+    if fmt and fmt != "multipart-v3":
+        raise S3Error.internal_error("Unsupported encrypted object format")
+    generation = metadata.get(GENERATION_KEY, "") if fmt else ""
+    keys = (
+        [generation_meta_key(generation)]
+        if fmt
+        else [_internal_meta_key(key), f"{key}{META_SUFFIX_LEGACY}"]
+    )
+    for meta_key in keys:
+        try:
+            response = await s3_client.get_object(bucket, meta_key)
+            stream = response["Body"]
+            body = bytearray()
+            async with stream:
+                while len(body) <= MAX_METADATA_SIZE:
+                    chunk = await stream.read(min(65536, MAX_METADATA_SIZE + 1 - len(body)))
+                    if not chunk:
+                        break
+                    body.extend(chunk)
+            if len(body) > MAX_METADATA_SIZE:
+                raise S3Error.internal_error("Metadata exceeds size limit")
+            meta = decode_multipart_metadata(body.decode())
+            if generation and meta.generation != generation:
+                raise S3Error.internal_error("Metadata generation mismatch")
+            if generation:
+                sizes = [p.plaintext_size for p in meta.parts]
+                if (
+                    meta.part_count != len(meta.parts)
+                    or sum(sizes) != meta.total_plaintext_size
+                    or any(size < 0 for size in sizes)
+                    or sum(p.ciphertext_size for p in meta.parts) != head.get("ContentLength")
+                ):
+                    raise S3Error.internal_error("Inconsistent encryption metadata")
+            return meta
+        except ClientError as error:
+            if not is_not_found(error):
+                raise
+    if fmt:
+        raise S3Error.internal_error("Required encryption metadata is missing")
+    return None
 
 
 async def delete_multipart_metadata(

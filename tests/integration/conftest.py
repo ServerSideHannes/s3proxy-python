@@ -136,7 +136,7 @@ def run_s3proxy(
                 '[{"access_key":"minioadmin","secret_key":"minioadmin",'
                 '"kek":"test-encryption-key-32-bytes!!"}]'
             ),
-            "S3PROXY_HOST": "http://localhost:9000",
+            "S3PROXY_HOST": os.environ.get("S3PROXY_TEST_BACKEND", "http://localhost:9000"),
             "S3PROXY_REGION": "us-east-1",
             "S3PROXY_PORT": str(port),
             "S3PROXY_NO_TLS": "true",

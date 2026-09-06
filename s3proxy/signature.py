@@ -38,3 +38,20 @@ def verify_deferred_payload_hash(
         if error and "signature" in error.lower():
             raise S3Error.signature_does_not_match(error)
         raise S3Error.access_denied(error or "Access Denied")
+
+
+def verify_payload_hash(request: Request, payload_hash: str) -> None:
+    """Verify the body before publishing any new object or part state."""
+    import hmac
+
+    if deferred_signature_required(request):
+        verify_deferred_payload_hash(request, request.app.state.verifier, payload_hash)
+        return
+    expected = request.headers.get("x-amz-content-sha256", "")
+    if (
+        expected
+        and expected != "UNSIGNED-PAYLOAD"
+        and not expected.startswith("STREAMING-")
+        and not hmac.compare_digest(expected, payload_hash)
+    ):
+        raise S3Error.signature_does_not_match("Payload SHA256 mismatch")

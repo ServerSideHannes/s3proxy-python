@@ -322,7 +322,7 @@ async def test_passthrough_copy_survives_transient_backend_failures(
     upload_id = resp_create["UploadId"]
     await manager.create_upload(BUCKET, "sst/big.db.snap", upload_id, crypto.generate_dek(), kid)
 
-    resp = await handler.handle_upload_part_copy(
+    resp = await handler._copy_part_impl(
         _copy_part_request(
             f"/{BUCKET}/sst/big.db.snap",
             f"/{BUCKET}/sst/big.db",

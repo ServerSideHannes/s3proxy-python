@@ -51,6 +51,9 @@ def serialize_upload_state(state: MultipartUploadState) -> bytes:
         "total_plaintext_size": state.total_plaintext_size,
         "next_internal_part_number": state.next_internal_part_number,
         "kid": state.kid,
+        "layout_version": state.layout_version,
+        "write_started": state.write_started,
+        "generation": state.generation,
         "deferred_copy_tail": base64.b64encode(state.deferred_copy_tail).decode()
         if state.deferred_copy_tail
         else "",
@@ -62,6 +65,7 @@ def serialize_upload_state(state: MultipartUploadState) -> bytes:
                 "ciphertext_size": p.ciphertext_size,
                 "etag": p.etag,
                 "md5": p.md5,
+                "staging_key": p.staging_key,
                 "internal_parts": [
                     {
                         "internal_part_number": ip.internal_part_number,
@@ -129,6 +133,7 @@ def deserialize_upload_state(data: bytes) -> MultipartUploadState | None:
                 ciphertext_size=p["ciphertext_size"],
                 etag=p["etag"],
                 md5=p.get("md5", ""),
+                staging_key=p.get("staging_key", ""),
                 internal_parts=[
                     InternalPartMetadata(
                         internal_part_number=ip["internal_part_number"],
@@ -164,6 +169,9 @@ def deserialize_upload_state(data: bytes) -> MultipartUploadState | None:
             total_plaintext_size=obj.get("total_plaintext_size", 0),
             next_internal_part_number=obj.get("next_internal_part_number", 1),
             kid=obj.get("kid", ""),
+            layout_version=obj.get("layout_version", 2),
+            write_started=obj.get("write_started", bool(parts)),
+            generation=obj.get("generation", ""),
             deferred_copy_tail=base64.b64decode(obj["deferred_copy_tail"])
             if obj.get("deferred_copy_tail")
             else b"",

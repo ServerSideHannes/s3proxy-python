@@ -17,7 +17,6 @@ from structlog.stdlib import BoundLogger
 from ... import crypto
 from ...client import S3Client, S3Credentials
 from ...errors import S3Error, raise_for_client_error, raise_for_exception
-from ...signature import deferred_signature_required, verify_deferred_payload_hash
 from ...state import (
     InternalPartMetadata,
     MultipartUploadState,
@@ -98,144 +97,21 @@ class UploadPartMixin(BaseHandler):
             # Get upload state
             state = await self._get_or_recover_state(client, bucket, key, upload_id, part_num)
 
-            # Parse request info
-            content_encoding = request.headers.get("content-encoding", "")
-            content_sha = request.headers.get("x-amz-content-sha256", "")
-            try:
-                content_length = int(request.headers.get("content-length", "0"))
-            except ValueError:
-                content_length = 0
+            if state.layout_version >= 3:
+                from ..objects.put import _iter_request_body
+                from .staged import stage_part
 
-            upload_start_time = time.monotonic()
-            logger.info(
-                "UPLOAD_PART_START",
-                bucket=bucket,
-                key=key,
-                upload_id=upload_id[:20] + "...",
-                part_number=part_num,
-                content_length_mb=f"{content_length / 1024 / 1024:.2f}MB",
-            )
-
-            # Determine encoding type and upload path.
-            cls = classify_upload(content_sha, content_encoding, content_length)
-            is_unsigned = cls.is_unsigned
-            is_streaming_sig = cls.is_streaming_sig
-            needs_chunked_decode = cls.needs_chunked_decode
-            is_large_signed = cls.is_large_signed
-            use_framed = cls.use_framed
-
-            # Smallest internal part that bounds memory while staying within the
-            # per-client part-number allocation range (so we never collide and
-            # never buffer more than necessary).
-            internal_part_size = crypto.memory_bounded_part_size(content_length)
-            estimated_parts = max(1, -(-content_length // internal_part_size))
-            logger.info(
-                "UPLOAD_PART_CONFIG",
-                bucket=bucket,
-                key=key,
-                part_number=part_num,
-                internal_part_size_mb=f"{internal_part_size / 1024 / 1024:.2f}MB",
-                estimated_internal_parts=estimated_parts,
-                is_unsigned=is_unsigned,
-                is_large_signed=is_large_signed,
-                is_streaming_sig=is_streaming_sig,
-                needs_chunked_decode=needs_chunked_decode,
-                upload_path="framed" if use_framed else "buffered",
-            )
-
-            # Per-client allocation: dense 1:1 for all-5MB uploads (ClickHouse 600+
-            # parts), sparse ranges once a client part needs multiple internals (Scylla).
-            internal_part_start = await self.multipart_manager.allocate_internal_parts(
-                bucket,
-                key,
-                upload_id,
-                estimated_parts,
-                client_part_number=part_num,
-            )
-            internal_part_end = internal_part_start + estimated_parts - 1
-            logger.info(
-                "UPLOAD_PART_INTERNAL_RANGE",
-                bucket=bucket,
-                key=key,
-                part_number=part_num,
-                internal_part_start=internal_part_start,
-                internal_part_end=internal_part_end,
-                estimated_internal_parts=estimated_parts,
-            )
-
-            try:
-                # Known-length direct streams (unsigned or large signed, e.g. barman
-                # backups) can be uploaded frame-by-frame with O(frame) memory.
-                # aws-chunked / streaming-sig bodies don't know the size up front and
-                # keep the buffered path.
-                if use_framed:
-                    result = await self._stream_and_upload_framed(
-                        request,
-                        client,
-                        bucket,
-                        key,
-                        upload_id,
-                        part_num,
-                        state,
-                        content_length,
-                        internal_part_size,
-                        internal_part_start,
-                        estimated_parts,
-                    )
-                else:
-                    result = await self._stream_and_upload(
-                        request,
-                        client,
-                        bucket,
-                        key,
-                        upload_id,
-                        part_num,
-                        state,
-                        content_sha,
-                        content_length,
-                        is_unsigned,
-                        is_streaming_sig,
-                        is_large_signed,
-                        needs_chunked_decode,
-                        internal_part_size,
-                        internal_part_start,
-                    )
-
-                # Late signature verification for large signed uploads
-                if deferred_signature_required(request):
-                    verify_deferred_payload_hash(
-                        request, request.app.state.verifier, result["computed_sha256"]
-                    )
-                elif is_large_signed and content_sha and result["computed_sha256"] != content_sha:
-                    logger.warning(
-                        "UPLOAD_PART_SHA256_MISMATCH",
-                        bucket=bucket,
-                        key=key,
-                        part_num=part_num,
-                        expected=content_sha,
-                        computed=result["computed_sha256"],
-                    )
-                    raise S3Error.signature_does_not_match("Signature verification failed")
-
-                upload_duration = time.monotonic() - upload_start_time
-                logger.info(
-                    "UPLOAD_PART_COMPLETE",
-                    bucket=bucket,
-                    key=key,
-                    part_number=part_num,
-                    plaintext_mb=f"{result['total_plaintext_size'] / 1024 / 1024:.2f}MB",
-                    internal_parts=result["internal_parts_count"],
-                    duration_sec=f"{upload_duration:.2f}",
+                decode = "aws-chunked" in request.headers.get(
+                    "content-encoding", ""
+                ) or request.headers.get("x-amz-content-sha256", "").startswith("STREAMING-")
+                part = await stage_part(
+                    self, request, client, state, part_num, _iter_request_body(request, decode)
                 )
+                return Response(headers={"ETag": f'"{part.md5}"'})
 
-                return Response(headers={"ETag": f'"{result["client_etag"]}"'})
-
-            except S3Error:
-                raise
-            except ClientError as e:
-                return self._handle_client_error(e, bucket, key, part_num, upload_id)
-            except Exception as e:
-                return self._handle_generic_error(e, bucket, key, part_num, upload_id)
+            raise S3Error.invalid_request(
+                "Legacy in-flight uploads must be restarted after upgrade"
+            )
 
     async def _upload_part_with_retry(
         self,
@@ -689,7 +565,7 @@ class UploadPartMixin(BaseHandler):
 
         try:
             # Encrypt
-            nonce = crypto.derive_part_nonce(upload_id, internal_part_num)
+            nonce = crypto.generate_nonce()
             ciphertext = crypto.encrypt(data, state.dek, nonce)
             plaintext_size = len(data)
             ciphertext_size = len(ciphertext)

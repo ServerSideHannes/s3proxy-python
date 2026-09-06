@@ -41,7 +41,7 @@ class S3Client:
 
     Memory management:
     - Uses a shared aioboto3 Session to avoid repeated JSON model loading
-    - Creates fresh clients per request for proper connection cleanup
+    - Clients are leased from the credential-isolated application pool
     - Each session load costs ~30-150MB (botocore service definitions)
 
     See: https://github.com/boto/boto3/issues/1670
@@ -118,6 +118,7 @@ class S3Client:
         tagging: str | None = None,
         cache_control: str | None = None,
         expires: str | None = None,
+        if_none_match: str | None = None,
     ) -> dict[str, Any]:
         """Put object to S3."""
         kwargs: dict[str, Any] = {"Bucket": bucket, "Key": key, "Body": body}
@@ -128,6 +129,7 @@ class S3Client:
             Tagging=tagging,
             CacheControl=cache_control,
             Expires=expires,
+            IfNoneMatch=if_none_match,
         )
         return await self._cached_client.put_object(**kwargs)
 
@@ -213,6 +215,7 @@ class S3Client:
         key: str,
         upload_id: str,
         parts: list[dict[str, Any]],
+        if_none_match: str | None = None,
     ) -> dict[str, Any]:
         """Complete multipart upload."""
         start = time.monotonic()
@@ -221,6 +224,7 @@ class S3Client:
             Key=key,
             UploadId=upload_id,
             MultipartUpload={"Parts": parts},
+            **({"IfNoneMatch": if_none_match} if if_none_match is not None else {}),
         )
         duration = time.monotonic() - start
         logger.info(
@@ -284,6 +288,9 @@ class S3Client:
         content_type: str | None = None,
         tagging_directive: str | None = None,
         tagging: str | None = None,
+        copy_source_if_match: str | None = None,
+        cache_control: str | None = None,
+        expires=None,
     ) -> dict[str, Any]:
         """Copy object within S3."""
         kwargs: dict[str, Any] = {
@@ -300,6 +307,12 @@ class S3Client:
             kwargs["TaggingDirective"] = tagging_directive
         if tagging and tagging_directive == "REPLACE":
             kwargs["Tagging"] = tagging
+        _add_optional_kwargs(
+            kwargs,
+            CopySourceIfMatch=copy_source_if_match,
+            CacheControl=cache_control,
+            Expires=expires,
+        )
         return await self._cached_client.copy_object(**kwargs)
 
     async def delete_objects(
@@ -399,6 +412,7 @@ class S3Client:
         part_number: int,
         copy_source: str,
         copy_source_range: str | None = None,
+        copy_source_if_match: str | None = None,
     ) -> dict[str, Any]:
         """Copy a part from another object."""
         kwargs: dict[str, Any] = {
@@ -408,5 +422,7 @@ class S3Client:
             "PartNumber": part_number,
             "CopySource": copy_source,
         }
-        _add_optional_kwargs(kwargs, CopySourceRange=copy_source_range)
+        _add_optional_kwargs(
+            kwargs, CopySourceRange=copy_source_range, CopySourceIfMatch=copy_source_if_match
+        )
         return await self._cached_client.upload_part_copy(**kwargs)

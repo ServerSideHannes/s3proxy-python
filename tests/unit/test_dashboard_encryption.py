@@ -15,6 +15,7 @@ from s3proxy.state.models import MultipartMetadata
 
 async def test_sidecar_present_means_encrypted(mock_s3) -> None:
     bucket, key = "scylla-backups", "backup/sst/me-big-Data.db"
+    await mock_s3.put_object(bucket, key, b"ciphertext")
     await save_multipart_metadata(
         mock_s3,
         bucket,
