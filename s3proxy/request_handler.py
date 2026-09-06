@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import time
 from urllib.parse import parse_qs
@@ -26,9 +27,18 @@ from .metrics import (
 )
 from .request_context import bind_request, clear_request, get_request_context
 from .routing import RequestDispatcher
+from .signature import verify_payload_hash
+from .streaming.response import OwnedStreamingResponse
 
 pod_name = os.environ.get("HOSTNAME", "unknown")
 logger: BoundLogger = structlog.get_logger(__name__).bind(pod=pod_name)
+
+
+async def _record_request_safely(*args):
+    try:
+        await record_request(*args)
+    except Exception as error:
+        logger.warning("REQUEST_METRICS_FAILED", error=str(error))
 
 
 def _is_dashboard_path(request: Request, path: str) -> bool:
@@ -138,38 +148,40 @@ async def handle_proxy_request(
 
     # Check memory limit BEFORE reading body data - reject if at capacity
     reserved_memory = 0
-    needs_limit = method in ("PUT", "POST", "GET")
+    needs_limit = method in ("PUT", "POST", "GET") and not request.headers.get("x-amz-copy-source")
     memory_limit = concurrency.get_memory_limit()
-
-    if memory_limit > 0 and needs_limit:
-        try:
-            content_length = int(request.headers.get("content-length", "0"))
-        except ValueError:
-            content_length = 0
-        bind_request(method=method, path=path, query=query, content_length=content_length)
-        memory_needed = concurrency.estimate_memory_footprint(method, content_length)
-
-        logger.info(
-            "REQUEST_ARRIVED - attempting to acquire memory",
-            memory_needed_mb=round(memory_needed / 1024 / 1024, 2),
-            active_mb=round(concurrency.get_active_memory() / 1024 / 1024, 2),
-            limit_mb=round(memory_limit / 1024 / 1024, 2),
-            method=method,
-            path=path,
-            content_length=content_length,
-        )
-        reserved_memory = await concurrency.try_acquire_memory(memory_needed)
-        logger.info(
-            "MEMORY_RESERVED",
-            reserved_mb=round(reserved_memory / 1024 / 1024, 2),
-            active_mb=round(concurrency.get_active_memory() / 1024 / 1024, 2),
-            limit_mb=round(memory_limit / 1024 / 1024, 2),
-            method=method,
-            path=path,
-        )
 
     response = None
     try:
+        if memory_limit > 0 and needs_limit:
+            try:
+                content_length = int(request.headers.get("content-length", "0"))
+            except ValueError:
+                content_length = 0
+            bind_request(method=method, path=path, query=query, content_length=content_length)
+            memory_needed = concurrency.estimate_memory_footprint(method, content_length)
+            if method in ("PUT", "POST") and "content-length" not in request.headers:
+                memory_needed = 4 * crypto.MAX_BUFFER_SIZE
+
+            logger.info(
+                "REQUEST_ARRIVED - attempting to acquire memory",
+                memory_needed_mb=round(memory_needed / 1024 / 1024, 2),
+                active_mb=round(concurrency.get_active_memory() / 1024 / 1024, 2),
+                limit_mb=round(memory_limit / 1024 / 1024, 2),
+                method=method,
+                path=path,
+                content_length=content_length,
+            )
+            reserved_memory = await concurrency.try_acquire_memory(memory_needed)
+            logger.info(
+                "MEMORY_RESERVED",
+                reserved_mb=round(reserved_memory / 1024 / 1024, 2),
+                active_mb=round(concurrency.get_active_memory() / 1024 / 1024, 2),
+                limit_mb=round(memory_limit / 1024 / 1024, 2),
+                method=method,
+                path=path,
+            )
+
         response = await _handle_proxy_request_impl(request, handler, verifier)
         if response is not None:
             status_code = response.status_code
@@ -180,9 +192,63 @@ async def handle_proxy_request(
         # GETs accumulates frames and OOMs the pod while the limiter reads ~budget.
         # Hold the reservation for the whole stream lifetime so the limiter bounds
         # how many streaming GETs run at once (admission control).
-        if reserved_memory > 0 and isinstance(response, StreamingResponse):
-            response.body_iterator = _release_after_stream(response.body_iterator, reserved_memory)
+        if isinstance(response, StreamingResponse):
+            original = response
+            reserved = reserved_memory
             reserved_memory = 0
+            stream_status = [status_code]
+            cleaned = False
+
+            async def stream():
+                try:
+                    async for chunk in original.body_iterator:
+                        yield chunk
+                except BaseException:
+                    stream_status[0] = 500
+                    raise
+                finally:
+                    try:
+                        if hasattr(original.body_iterator, "aclose"):
+                            await original.body_iterator.aclose()
+                    finally:
+                        await cleanup()
+
+            async def cleanup():
+                nonlocal cleaned
+                if cleaned:
+                    return
+                cleaned = True
+                try:
+                    if isinstance(original, OwnedStreamingResponse) and original.cleanup:
+                        await original.cleanup()
+                finally:
+                    await concurrency.release_memory(reserved)
+                    if not _is_dashboard_path(request, path):
+                        await _record_request_safely(
+                            method,
+                            path,
+                            operation,
+                            stream_status[0],
+                            time.perf_counter() - start_time,
+                            int(original.headers.get("content-length", "0")),
+                            request.client.host if request.client else "",
+                        )
+                    REQUESTS_IN_FLIGHT.labels(method=method).dec()
+                    REQUEST_COUNT.labels(
+                        method=method, operation=operation, status=stream_status[0]
+                    ).inc()
+                    REQUEST_DURATION.labels(method=method, operation=operation).observe(
+                        time.perf_counter() - start_time
+                    )
+
+            response = OwnedStreamingResponse(
+                stream(),
+                status_code=original.status_code,
+                headers=dict(original.headers),
+                background=original.background,
+                cleanup=cleanup,
+                on_error=lambda: stream_status.__setitem__(0, 500),
+            )
         return response
     except HTTPException as e:
         status_code = e.status_code
@@ -219,9 +285,10 @@ async def handle_proxy_request(
         clear_request()
         # Record metrics
         duration = time.perf_counter() - start_time
-        REQUESTS_IN_FLIGHT.labels(method=method).dec()
-        REQUEST_COUNT.labels(method=method, operation=operation, status=status_code).inc()
-        REQUEST_DURATION.labels(method=method, operation=operation).observe(duration)
+        if not isinstance(response, StreamingResponse):
+            REQUESTS_IN_FLIGHT.labels(method=method).dec()
+            REQUEST_COUNT.labels(method=method, operation=operation, status=status_code).inc()
+            REQUEST_DURATION.labels(method=method, operation=operation).observe(duration)
 
         try:
             if method == "GET" and response is not None:
@@ -235,8 +302,10 @@ async def handle_proxy_request(
         # "/dashboard" (no trailing slash) doesn't match the mounted dashboard router and
         # falls through to this S3 catch-all, where it would otherwise be logged
         # as a phantom "dashboard" bucket.
-        if not _is_dashboard_path(request, path):
-            await record_request(method, path, operation, status_code, duration, size, client_ip)
+        if not isinstance(response, StreamingResponse) and not _is_dashboard_path(request, path):
+            await _record_request_safely(
+                method, path, operation, status_code, duration, size, client_ip
+            )
 
         if reserved_memory > 0:
             await concurrency.release_memory(reserved_memory)
@@ -260,14 +329,28 @@ async def _handle_proxy_request_impl(
     query = parse_qs(str(request.url.query), keep_blank_values=True)
 
     content_length = _parse_content_length(headers)
-    defer_sig = request.method in ("PUT", "POST") and _defer_signature_for_body(
-        headers, content_length, query
+    data_write = (
+        request.method == "PUT"
+        and not headers.get("x-amz-copy-source")
+        and not any(k in query for k in ("tagging", "acl", "lifecycle", "policy", "cors"))
+        and "/" in request.url.path.strip("/")
+    )
+    defer_sig = data_write and _defer_signature_for_body(
+        headers,
+        content_length if "content-length" in headers else crypto.MAX_BUFFER_SIZE + 1,
+        query,
     )
 
     needs_body = request.method in ("PUT", "POST") and _needs_body_for_signature(headers, query)
     body = b""
     if needs_body and not defer_sig:
-        body = await request.body()
+        chunks = bytearray()
+        async for chunk in request.stream():
+            chunks.extend(chunk)
+            if len(chunks) > crypto.MAX_BUFFER_SIZE:
+                raise S3Error.invalid_request("Control request body exceeds 8 MiB")
+        body = bytes(chunks)
+        request._body = body
         if body:
             request.state.s3proxy_preloaded_body = body
             logger.debug(
@@ -311,6 +394,17 @@ async def _handle_proxy_request_impl(
             if error and "signature" in error.lower():
                 raise S3Error.signature_does_not_match(error)
             raise S3Error.access_denied(error or "No credentials")
+
+    if request.method in ("PUT", "POST", "DELETE") and not data_write:
+        if headers.get("x-amz-content-sha256", "").startswith("STREAMING-"):
+            raise S3Error.invalid_request("Streaming encoding is only supported for data uploads")
+        chunks = bytearray()
+        async for chunk in request.stream():
+            chunks.extend(chunk)
+            if len(chunks) > crypto.MAX_BUFFER_SIZE:
+                raise S3Error.invalid_request("Control request body exceeds 8 MiB")
+        request._body = bytes(chunks)
+        verify_payload_hash(request, hashlib.sha256(chunks).hexdigest())
 
     dispatcher = RequestDispatcher(handler)
     try:

@@ -4,8 +4,8 @@ import asyncio
 import base64
 import hashlib
 import xml.etree.ElementTree as ET
+from dataclasses import replace
 from datetime import UTC, datetime
-from urllib.parse import quote
 
 import structlog
 from botocore.exceptions import ClientError
@@ -20,10 +20,15 @@ from ...state import (
     MultipartMetadata,
     PartMetadata,
     delete_multipart_metadata,
-    load_multipart_metadata,
     save_multipart_metadata,
 )
-from ...state.metadata import _internal_meta_key
+from ...state.metadata import (
+    FORMAT_KEY,
+    GENERATION_KEY,
+    generation_for,
+    multipart_etag,
+    multipart_headers,
+)
 from ...utils import format_http_date, format_iso8601
 from ...xml_utils import find_element, find_elements
 from ..base import BaseHandler
@@ -50,8 +55,8 @@ class MiscObjectMixin(BaseHandler):
                 last_modified_dt = resp.get("LastModified")
 
                 # Get the effective ETag (client-etag for encrypted, S3 etag otherwise)
-                metadata = resp.get("Metadata", {})
-                effective_etag = self._get_effective_etag(metadata, resp.get("ETag", ""))
+                descriptor = await self._resolve_object(client, bucket, key, resp)
+                effective_etag = descriptor.etag
 
                 # Check conditional headers (inherited from BaseHandler)
                 cond_response = self._check_conditional_headers(
@@ -68,27 +73,10 @@ class MiscObjectMixin(BaseHandler):
 
                 extra_headers = self._build_head_extra_headers(resp, last_modified)
 
-                if meta := await load_multipart_metadata(client, bucket, key):
-                    headers = {
-                        "Content-Length": str(meta.total_plaintext_size),
-                        "Content-Type": resp.get("ContentType", "application/octet-stream"),
-                        "ETag": f'"{
-                            hashlib.md5(
-                                str(meta.total_plaintext_size).encode(),
-                                usedforsecurity=False,
-                            ).hexdigest()
-                        }"',
-                        **extra_headers,
-                    }
-                    return Response(headers=headers)
-
-                size = self._get_plaintext_size(metadata, resp.get("ContentLength", 0))
-                etag = self._get_effective_etag(metadata, resp.get("ETag", ""))
-
                 headers = {
-                    "Content-Length": str(size),
+                    "Content-Length": str(descriptor.plaintext_size),
                     "Content-Type": resp.get("ContentType", "application/octet-stream"),
-                    "ETag": f'"{etag}"',
+                    "ETag": f'"{effective_etag}"',
                     **extra_headers,
                 }
                 return Response(headers=headers)
@@ -162,7 +150,10 @@ class MiscObjectMixin(BaseHandler):
             if metadata_directive == "REPLACE":
                 new_metadata = {}
                 for hdr, val in request.headers.items():
-                    if hdr.lower().startswith("x-amz-meta-"):
+                    if (
+                        hdr.lower().startswith("x-amz-meta-")
+                        and hdr[11:] not in self._internal_meta_keys()
+                    ):
                         new_metadata[hdr[11:]] = val  # Strip x-amz-meta- prefix
 
             logger.info(
@@ -184,11 +175,12 @@ class MiscObjectMixin(BaseHandler):
                     src_key=src_key,
                     error=str(e),
                 )
-                raise S3Error.no_such_key(src_key) from e
+                self._raise_s3_error(e, src_bucket, src_key)
 
             src_metadata = head_resp.get("Metadata", {})
             src_wrapped_dek = src_metadata.get(self.settings.dektag_name)
-            src_multipart_meta = await load_multipart_metadata(client, src_bucket, src_key)
+            source = await self._resolve_object(client, src_bucket, src_key, head_resp)
+            src_multipart_meta = source.multipart
 
             if not src_wrapped_dek and not src_multipart_meta:
                 # Not encrypted - pass through
@@ -203,6 +195,7 @@ class MiscObjectMixin(BaseHandler):
                     metadata_directive,
                     new_metadata,
                     request,
+                    head_resp,
                 )
 
             # Encrypted source. A plain COPY needs no re-encrypt: the ciphertext
@@ -267,6 +260,7 @@ class MiscObjectMixin(BaseHandler):
         metadata_directive: str,
         new_metadata: dict[str, str] | None,
         request: Request,
+        head_resp: dict,
     ) -> Response:
         logger.info(
             "COPY_PASSTHROUGH",
@@ -285,9 +279,19 @@ class MiscObjectMixin(BaseHandler):
             bucket,
             key,
             copy_source,
-            metadata=new_metadata,
-            metadata_directive=metadata_directive,
-            content_type=content_type,
+            metadata={
+                **(
+                    new_metadata or {}
+                    if metadata_directive == "REPLACE"
+                    else head_resp.get("Metadata", {})
+                ),
+                FORMAT_KEY: "plain-v3",
+            },
+            metadata_directive="REPLACE",
+            content_type=content_type or head_resp.get("ContentType"),
+            copy_source_if_match=head_resp.get("ETag"),
+            cache_control=head_resp.get("CacheControl") if metadata_directive == "COPY" else None,
+            expires=head_resp.get("Expires") if metadata_directive == "COPY" else None,
             tagging_directive=tagging_directive if tagging_directive != "COPY" else None,
             tagging=tagging,
         )
@@ -333,30 +337,39 @@ class MiscObjectMixin(BaseHandler):
             is_multipart=bool(src_multipart_meta),
         )
 
+        metadata = dict(head_resp.get("Metadata", {}))
+        if src_multipart_meta:
+            if not src_multipart_meta.generation:
+                src_multipart_meta = replace(
+                    src_multipart_meta, generation=generation_for(src_multipart_meta.wrapped_dek)
+                )
+            metadata.update(
+                {FORMAT_KEY: "multipart-v3", GENERATION_KEY: src_multipart_meta.generation}
+            )
+            await save_multipart_metadata(client, bucket, key, src_multipart_meta)
+        else:
+            metadata[FORMAT_KEY] = "single-v3"
         resp = await client.copy_object(
             bucket,
             key,
             copy_source,
-            metadata_directive="COPY",
-            content_type=content_type,
+            metadata=metadata,
+            metadata_directive="REPLACE",
+            content_type=content_type or head_resp.get("ContentType"),
+            cache_control=head_resp.get("CacheControl"),
+            expires=head_resp.get("Expires"),
+            copy_source_if_match=head_resp.get("ETag"),
         )
-
-        # Multipart objects keep their part/frame map in a separate sidecar
-        # object; the destination needs its own copy or the read path can't
-        # reconstruct (and decrypt) it.
-        if src_multipart_meta:
-            await client.copy_object(
-                bucket,
-                _internal_meta_key(key),
-                f"{src_bucket}/{quote(_internal_meta_key(src_key), safe='/')}",
-                metadata_directive="COPY",
-            )
 
         # Encrypted objects report the plaintext md5 (client-etag), not the
         # ciphertext ETag, to match GET/HEAD and the re-encrypt path.
         src_metadata = head_resp.get("Metadata", {})
         result = resp.get("CopyObjectResult", {})
-        etag = src_metadata.get("client-etag") or str(result.get("ETag", "")).strip('"')
+        etag = (
+            multipart_etag(src_multipart_meta)
+            if src_multipart_meta
+            else src_metadata.get("client-etag") or str(result.get("ETag", "")).strip('"')
+        )
         last_modified = result.get("LastModified")
         if hasattr(last_modified, "isoformat"):
             last_modified = last_modified.isoformat().replace("+00:00", "Z")
@@ -469,6 +482,7 @@ class MiscObjectMixin(BaseHandler):
         etag = hashlib.md5(plaintext, usedforsecurity=False).hexdigest()
 
         dest_metadata = {
+            FORMAT_KEY: "single-v3",
             self.settings.dektag_name: base64.b64encode(encrypted.wrapped_dek).decode(),
             self.settings.kidtag_name: dest_kid,
             "client-etag": etag,
@@ -550,6 +564,7 @@ class MiscObjectMixin(BaseHandler):
         wrapped_dek = crypto.wrap_key(dek, dest_kek)
 
         upload_metadata: dict[str, str] = {
+            **multipart_headers(wrapped_dek),
             self.settings.dektag_name: base64.b64encode(wrapped_dek).decode(),
             self.settings.kidtag_name: dest_kid,
         }
@@ -593,26 +608,27 @@ class MiscObjectMixin(BaseHandler):
                 head_resp,
             )
 
+            etag = hashlib.sha256(wrapped_dek).hexdigest()
+            await save_multipart_metadata(
+                client,
+                bucket,
+                key,
+                MultipartMetadata(
+                    version=3,
+                    generation=generation_for(wrapped_dek),
+                    upload_id=upload_id,
+                    client_etag=etag,
+                    part_count=len(meta_parts),
+                    total_plaintext_size=total_plaintext,
+                    parts=meta_parts,
+                    wrapped_dek=wrapped_dek,
+                    kid=dest_kid,
+                ),
+            )
             await client.complete_multipart_upload(bucket, key, upload_id, s3_parts)
-        except Exception:
+        except BaseException:
             await self._safe_abort(client, bucket, key, upload_id)
             raise
-
-        await save_multipart_metadata(
-            client,
-            bucket,
-            key,
-            MultipartMetadata(
-                version=2,
-                part_count=len(meta_parts),
-                total_plaintext_size=total_plaintext,
-                parts=meta_parts,
-                wrapped_dek=wrapped_dek,
-                kid=dest_kid,
-            ),
-        )
-
-        etag = hashlib.md5(str(total_plaintext).encode(), usedforsecurity=False).hexdigest()
 
         logger.info(
             "COPY_ENCRYPTED_STREAMING_COMPLETE",
@@ -716,7 +732,7 @@ class MiscObjectMixin(BaseHandler):
         meta_parts: list[PartMetadata],
         total_plaintext: int,
     ) -> tuple[int, list[dict], list[PartMetadata], int]:
-        nonce = crypto.derive_part_nonce(upload_id, part_number)
+        nonce = crypto.generate_nonce()
         ciphertext = crypto.encrypt(chunk, dek, nonce)
         resp = await client.upload_part(bucket, key, upload_id, part_number, ciphertext)
         etag = resp["ETag"].strip('"')
@@ -765,10 +781,20 @@ class MiscObjectMixin(BaseHandler):
                 yield chunk
         else:
             src_kid = head_resp.get("Metadata", {}).get(self.settings.kidtag_name, "")
-            plaintext = await self._download_encrypted_single(
-                client, src_bucket, src_key, src_wrapped_dek, src_kid
-            )
-            yield plaintext
+            from contextlib import aclosing
+
+            async with aclosing(
+                self._iter_single_plaintext(
+                    client,
+                    src_bucket,
+                    src_key,
+                    src_wrapped_dek,
+                    src_kid,
+                    if_match=head_resp.get("ETag"),
+                )
+            ) as stream:
+                async for chunk in stream:
+                    yield chunk
 
     async def handle_get_object_tagging(self, request: Request, creds: S3Credentials) -> Response:
         bucket, key = self._parse_path(request.url.path)

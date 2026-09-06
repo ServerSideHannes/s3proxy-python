@@ -77,7 +77,7 @@ class TestMemoryFootprintEstimation:
         import s3proxy.concurrency as concurrency_module
 
         footprint = concurrency_module.estimate_memory_footprint("GET", 0)
-        assert footprint == concurrency_module.MAX_BUFFER_SIZE
+        assert footprint == 4 * concurrency_module.MAX_BUFFER_SIZE
 
     def test_head_delete_bypass(self):
         """HEAD and DELETE reserve 0 (no buffering, bypass limit)."""

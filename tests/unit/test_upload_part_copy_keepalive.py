@@ -134,7 +134,7 @@ async def test_keepalive_bytes_stream_while_copy_is_still_running(
 
     mock_s3.upload_part_copy = slow_copy
 
-    resp = await handler.handle_upload_part_copy(_copy_part_request(upload_id), credentials)
+    resp = await handler._copy_part_impl(_copy_part_request(upload_id), credentials)
     assert resp.status_code == 200
 
     stream = resp.body_iterator
@@ -173,7 +173,7 @@ async def test_copy_failure_after_200_reports_error_document(
 
     mock_s3.upload_part_copy = failing_copy
 
-    resp = await handler.handle_upload_part_copy(_copy_part_request(upload_id), credentials)
+    resp = await handler._copy_part_impl(_copy_part_request(upload_id), credentials)
     body = b"".join([c async for c in resp.body_iterator])
 
     assert resp.status_code == 200
@@ -210,7 +210,7 @@ async def test_client_disconnect_cancels_inflight_copy_work(
 
     mock_s3.upload_part_copy = hanging_copy
 
-    resp = await handler.handle_upload_part_copy(_copy_part_request(upload_id), credentials)
+    resp = await handler._copy_part_impl(_copy_part_request(upload_id), credentials)
     stream = resp.body_iterator
     assert await anext(stream) == b" "
     await asyncio.wait_for(started.wait(), 1)
@@ -249,7 +249,7 @@ async def test_passthrough_segments_copy_concurrently(mock_s3, settings, manager
 
     mock_s3.upload_part_copy = tracking_copy
 
-    resp = await handler.handle_upload_part_copy(_copy_part_request(upload_id), credentials)
+    resp = await handler._copy_part_impl(_copy_part_request(upload_id), credentials)
     body = b"".join([c async for c in resp.body_iterator])
 
     assert ET.fromstring(body).tag.endswith("CopyPartResult")
@@ -291,7 +291,7 @@ async def test_md5_source_pass_overlaps_segment_copies(mock_s3, settings, manage
     mock_s3.upload_part_copy = slow_copy
     mock_s3.get_object = tracked_get
 
-    resp = await handler.handle_upload_part_copy(_copy_part_request(upload_id), credentials)
+    resp = await handler._copy_part_impl(_copy_part_request(upload_id), credentials)
     b"".join([c async for c in resp.body_iterator])
 
     assert first_md5_read is not None and last_copy_done is not None
@@ -315,7 +315,7 @@ async def test_hybrid_tail_roundtrip_with_parallel_segments(
     range_end = 4 * frame_size + frame_size // 2 - 1  # ends mid 5th frame
     assert range_end + 1 > crypto.STREAMING_THRESHOLD
 
-    resp = await handler.handle_upload_part_copy(
+    resp = await handler._copy_part_impl(
         _copy_part_request(upload_id, copy_source_range=f"bytes=0-{range_end}"),
         credentials,
     )
