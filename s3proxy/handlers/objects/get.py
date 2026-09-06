@@ -235,11 +235,15 @@ class GetObjectMixin(BaseHandler):
                         start if range_header else None,
                         end if range_header else None,
                         if_match=head_resp.get("ETag"),
+                        ciphertext_size=head_resp.get("ContentLength"),
                     )
                 ) as plaintext,
             ):
-                async for chunk in plaintext:
-                    yield chunk
+                try:
+                    async for chunk in plaintext:
+                        yield chunk
+                except ClientError as error:
+                    self._raise_s3_error(error, bucket, key)
 
         # Build response
         length = sum(e - s + 1 for _, s, e in parts)

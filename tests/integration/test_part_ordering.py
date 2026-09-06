@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 
 from s3proxy.client import S3Credentials
 from s3proxy.handlers import S3ProxyHandler
@@ -109,10 +110,14 @@ class TestPartOrdering:
 
         # Mock S3 client
         mock_client = AsyncMock()
+        mock_client.head_object = AsyncMock(return_value={"ContentLength": 0})
+        mock_client.get_object = AsyncMock(
+            side_effect=ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+        )
         # Make mock_client an async context manager
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client.complete_multipart_upload = AsyncMock()
+        mock_client.complete_multipart_upload = AsyncMock(return_value={"ETag": "backend-etag"})
         mock_client.head_object = AsyncMock(return_value={"ContentLength": 3156})
 
         creds = S3Credentials(
@@ -194,10 +199,14 @@ class TestPartOrdering:
 
         # Mock S3 client
         mock_client = AsyncMock()
+        mock_client.head_object = AsyncMock(return_value={"ContentLength": 0})
+        mock_client.get_object = AsyncMock(
+            side_effect=ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+        )
         # Make mock_client an async context manager
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client.complete_multipart_upload = AsyncMock()
+        mock_client.complete_multipart_upload = AsyncMock(return_value={"ETag": "backend-etag"})
         mock_client.head_object = AsyncMock(return_value={"ContentLength": 3156})
 
         creds = S3Credentials(

@@ -26,6 +26,7 @@ verify-passthrough:
 
 # Integration shards for parallel CI (make test-integration-shard SHARD=memory_usage)
 INTEGRATION_memory_usage_TESTS = tests/integration/test_memory_usage.py
+INTEGRATION_memory_usage_PYTEST_OPTS = -n0
 INTEGRATION_memory_leak_TESTS = tests/integration/test_memory_leak.py
 INTEGRATION_memory_copy_TESTS = tests/integration/test_copy_memory_governor.py tests/integration/test_copy_per_part_metrics.py tests/integration/test_upload_part_copy_passthrough_e2e.py
 INTEGRATION_memory_copy_PYTEST_OPTS = -n0
