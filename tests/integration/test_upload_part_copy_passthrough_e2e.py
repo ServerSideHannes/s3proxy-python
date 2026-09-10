@@ -80,7 +80,7 @@ class TestUploadPartCopyPassthroughQuick:
         check_reencrypt_control(ctx, "sst/source-96mb.bin", "sst/dest-d.bin", QUICK_SIZE)
         assert proc.poll() is None
         _assert_check(ctx, "encrypts partial range")
-        _assert_check(ctx, "high peak memory")
+        _assert_check(ctx, "bounded re-encryption memory")
 
     def test_scylla_manifest_full_range_passthrough(self, passthrough_env):
         ctx, proc, _ = passthrough_env
@@ -143,4 +143,4 @@ class TestUploadPartCopyPassthroughScylla:
         assert enc_pt <= 1 * MB
         assert enc_re >= (partial_end + 1) * 0.5
         assert peak_pt <= CHUNK_PEAK * 0.5
-        assert peak_re >= CHUNK_PEAK * 0.5
+        assert peak_re <= 32 * MB

@@ -59,6 +59,9 @@ class MultipartStateManager:
         upload_id: str,
         dek: bytes,
         kid: str = "",
+        *,
+        generation: str = "",
+        layout_version: int = 2,
     ) -> MultipartUploadState:
         """Create new upload state."""
         state = MultipartUploadState(
@@ -67,6 +70,8 @@ class MultipartStateManager:
             key=key,
             upload_id=upload_id,
             kid=kid,
+            generation=generation,
+            layout_version=layout_version,
         )
 
         sk = self._storage_key(bucket, key, upload_id)
@@ -129,6 +134,31 @@ class MultipartStateManager:
             parts_count=len(state.parts),
         )
         return state
+
+    async def begin_write(self, bucket, key, upload_id, candidate_dek=None, candidate_kid=None):
+        """Freeze the upload DEK atomically before any concurrent attempt uses it.
+
+        The first whole-object copy may select its source DEK. Once any writer
+        starts (even a failed one), no later request can change the key.
+        """
+
+        def updater(data):
+            state = deserialize_upload_state(data)
+            if state is None:
+                raise StateMissingError("Corrupt multipart state")
+            if not state.write_started:
+                if candidate_dek is not None and not state.parts:
+                    state.dek = candidate_dek
+                    state.kid = candidate_kid
+                state.write_started = True
+            return serialize_upload_state(state)
+
+        data = await self._store.update(
+            self._storage_key(bucket, key, upload_id), updater, self._ttl
+        )
+        if data is None:
+            raise StateMissingError("Upload state missing")
+        return deserialize_upload_state(data)
 
     async def add_part(
         self,

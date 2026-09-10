@@ -16,6 +16,7 @@ from s3proxy.state import (
     MultipartMetadata,
     PartMetadata,
 )
+from tests.conftest import MockS3Response
 
 
 @pytest.fixture
@@ -105,7 +106,7 @@ class TestElasticsearchRangeScenario:
             mock_request.headers = {}
 
             with patch(
-                "s3proxy.handlers.objects.get.load_multipart_metadata",
+                "s3proxy.state.metadata.load_multipart_metadata",
                 return_value=meta,
             ):
                 creds = Mock()
@@ -219,7 +220,7 @@ class TestElasticsearchRangeScenario:
             mock_request.headers = {}
 
             with patch(
-                "s3proxy.handlers.objects.get.load_multipart_metadata",
+                "s3proxy.state.metadata.load_multipart_metadata",
                 return_value=meta,
             ):
                 creds = Mock()
@@ -283,32 +284,12 @@ class TestElasticsearchRangeScenario:
             return_value={"ContentLength": total_ciphertext_size, "LastModified": None}
         )
 
-        # Mock get_object to return the correct ciphertext for each range
-        def get_object_side_effect(bucket, key, range_header=None):
-            if range_header:
-                # Parse range to determine which part to return
-                range_str = range_header.replace("bytes=", "")
-                start, end = map(int, range_str.split("-"))
+        # A real body honors bounded reads and each GET's requested range.
+        ciphertext = b"".join(part["ciphertext"] for part in internal_parts_data)
 
-                # Find which internal part this range corresponds to
-                current_offset = 0
-                for part_data in internal_parts_data:
-                    part_size = part_data["meta"].ciphertext_size
-                    if start >= current_offset and start < current_offset + part_size:
-                        # This is the right part
-                        mock_body = AsyncMock()
-                        mock_body.read = AsyncMock(return_value=part_data["ciphertext"])
-                        mock_body.__aenter__ = AsyncMock(return_value=mock_body)
-                        mock_body.__aexit__ = AsyncMock(return_value=None)
-                        return {"Body": mock_body}
-                    current_offset += part_size
-
-            # Default mock
-            mock_body = AsyncMock()
-            mock_body.read = AsyncMock(return_value=b"")
-            mock_body.__aenter__ = AsyncMock(return_value=mock_body)
-            mock_body.__aexit__ = AsyncMock(return_value=None)
-            return {"Body": mock_body}
+        async def get_object_side_effect(bucket, key, range_header=None, **kwargs):
+            start, end = map(int, range_header.removeprefix("bytes=").split("-"))
+            return {"Body": MockS3Response(ciphertext[start : end + 1])}
 
         mock_client.get_object = AsyncMock(side_effect=get_object_side_effect)
 
@@ -337,7 +318,7 @@ class TestElasticsearchRangeScenario:
             mock_request.headers = {}
 
             with patch(
-                "s3proxy.handlers.objects.get.load_multipart_metadata",
+                "s3proxy.state.metadata.load_multipart_metadata",
                 return_value=meta,
             ):
                 creds = Mock()

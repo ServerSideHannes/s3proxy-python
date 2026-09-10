@@ -250,6 +250,14 @@ def raise_for_client_error(
     msg = e.response.get("Error", {}).get("Message", str(e))
     _log_upstream_failure(source="client_error", exc=e, bucket=bucket, key=key)
 
+    if code == "PreconditionFailed":
+        raise S3Error.precondition_failed(msg) from e
+    if code in ("AccessDenied", "403"):
+        raise S3Error.access_denied(msg) from e
+    if code == "InvalidRange":
+        raise S3Error.invalid_range(msg) from e
+    if code == "ConditionalRequestConflict":
+        raise S3Error(409, code, msg) from e
     if code == "NoSuchUpload":
         raise S3Error.no_such_upload(msg) from e
     if code in ("NoSuchKey", "404"):

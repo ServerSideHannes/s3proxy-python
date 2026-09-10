@@ -33,6 +33,7 @@ from s3proxy.state import (
 )
 from s3proxy.state.attr_cache import PlaintextAttrCache
 from s3proxy.state.metadata import _internal_meta_key, persist_upload_state
+from tests.conftest import MockS3Response as _Body
 
 INTERNAL_PREFIX = ".s3proxy-internal/"
 
@@ -47,15 +48,8 @@ def fresh_cache(monkeypatch):
     plaintext_attr_cache.clear()
 
 
-class _Body:
-    def __init__(self, data: bytes) -> None:
-        self._data = data
-
-    async def read(self) -> bytes:
-        return self._data
-
-
 class FakeHandler:
+    _resolve_object = BucketHandlerMixin._resolve_object
     _process_list_objects = BucketHandlerMixin._process_list_objects
     _list_entry = staticmethod(BucketHandlerMixin._list_entry)
 
@@ -90,7 +84,9 @@ class FakeClient:
         if key in self.sidecars:
             encoded = encode_multipart_metadata(self.sidecars[key])
             return {"Body": _Body(encoded.encode())}
-        raise KeyError(key)
+        from botocore.exceptions import ClientError
+
+        raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
 
 
 def _obj(key, size, etag="backend-etag"):
@@ -177,17 +173,33 @@ def test_cache_scoped_to_backend_etag():
     assert client.head_calls == head_calls + 1
 
 
-def test_failed_head_falls_back_and_does_not_cache(fresh_cache):
+def test_failed_head_propagates_and_does_not_cache(fresh_cache):
     handler = FakeHandler()
     client = FakeClient(fail_head_key="broken.db")
-
-    result = asyncio.run(
-        handler._process_list_objects(client, "bucket", [_obj("broken.db", size=555)])
-    )
-
-    assert result[0]["size"] == 555
-    assert result[0]["etag"] == "backend-etag"
+    with pytest.raises(RuntimeError, match="backend HEAD failed"):
+        asyncio.run(handler._process_list_objects(client, "bucket", [_obj("broken.db", size=555)]))
     assert len(fresh_cache) == 0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_listing_coalesces_metadata_lookups():
+    handler = FakeHandler()
+    client = FakeClient(metadata={"small.txt": {"plaintext-size": "42", "client-etag": "abc"}})
+    original = client.head_object
+
+    async def delayed(*args):
+        await asyncio.sleep(0.01)
+        return await original(*args)
+
+    client.head_object = delayed
+    results = await asyncio.gather(
+        *[
+            handler._process_list_objects(client, "bucket", [_obj("small.txt", size=100)])
+            for _ in range(8)
+        ]
+    )
+    assert all(r[0]["size"] == 42 for r in results)
+    assert client.head_calls == 1
 
 
 def test_cache_evicts_least_recently_used():

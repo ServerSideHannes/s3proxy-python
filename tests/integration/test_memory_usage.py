@@ -55,7 +55,7 @@ class TestMemoryBasedConcurrencyStress:
                     '[{"access_key":"minioadmin","secret_key":"minioadmin",'
                     '"kek":"test-encryption-key-32-bytes!!"}]'
                 ),
-                "S3PROXY_HOST": "http://localhost:9000",
+                "S3PROXY_HOST": os.environ.get("S3PROXY_TEST_BACKEND", "http://localhost:9000"),
                 "S3PROXY_REGION": "us-east-1",
                 "S3PROXY_PORT": str(port),
                 "S3PROXY_NO_TLS": "true",
@@ -109,7 +109,7 @@ class TestMemoryBasedConcurrencyStress:
                     '[{"access_key":"minioadmin","secret_key":"minioadmin",'
                     '"kek":"test-encryption-key-32-bytes!!"}]'
                 ),
-                "S3PROXY_HOST": "http://localhost:9000",
+                "S3PROXY_HOST": os.environ.get("S3PROXY_TEST_BACKEND", "http://localhost:9000"),
                 "S3PROXY_REGION": "us-east-1",
                 "S3PROXY_PORT": str(port),
                 "S3PROXY_NO_TLS": "true",
@@ -170,14 +170,28 @@ class TestMemoryBasedConcurrencyStress:
         with contextlib.suppress(stress_client.exceptions.BucketAlreadyOwnedByYou):
             stress_client.create_bucket(Bucket=bucket)
         yield bucket
-        try:
-            response = stress_client.list_objects_v2(Bucket=bucket)
-            if "Contents" in response:
-                objects = [{"Key": obj["Key"]} for obj in response["Contents"]]
-                stress_client.delete_objects(Bucket=bucket, Delete={"Objects": objects})
-            stress_client.delete_bucket(Bucket=bucket)
-        except Exception:
-            pass
+        # Delete only this test's unique bucket, including hidden manifests and
+        # unfinished staging uploads. Proxy LIST deliberately hides these keys.
+        with contextlib.closing(
+            boto3.client(
+                "s3",
+                endpoint_url=os.environ.get("S3PROXY_TEST_BACKEND", "http://localhost:9000"),
+                aws_access_key_id="minioadmin",
+                aws_secret_access_key="minioadmin",
+                region_name="us-east-1",
+            )
+        ) as raw:
+            for page in raw.get_paginator("list_multipart_uploads").paginate(Bucket=bucket):
+                for upload in page.get("Uploads", []):
+                    raw.abort_multipart_upload(
+                        Bucket=bucket, Key=upload["Key"], UploadId=upload["UploadId"]
+                    )
+            for page in raw.get_paginator("list_objects_v2").paginate(Bucket=bucket):
+                objects = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
+                if objects:
+                    result = raw.delete_objects(Bucket=bucket, Delete={"Objects": objects})
+                    assert not result.get("Errors"), result
+            raw.delete_bucket(Bucket=bucket)
 
     def test_backpressure_queues_concurrent_uploads(self, s3proxy_with_memory_limit, stress_bucket):
         """Verify backpressure queues excess requests instead of rejecting them.

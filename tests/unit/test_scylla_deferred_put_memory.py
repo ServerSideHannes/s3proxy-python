@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import tracemalloc
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -61,6 +62,7 @@ class _StreamRequest:
 
 def _handler() -> PutObjectMixin:
     h = PutObjectMixin.__new__(PutObjectMixin)
+    h.settings = SimpleNamespace(dektag_name="isec", kidtag_name="isec-kid")
     h.keyring = MagicMock()
     h.keyring.key_for.return_value = ("kid1", b"0" * 32)
     return h

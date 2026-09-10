@@ -10,8 +10,10 @@ scopes an entry to one object version: overwriting the key changes the
 backend ETag, which invalidates the cached attributes without coordination.
 """
 
+import asyncio
 import hashlib
 from collections import OrderedDict
+from contextlib import asynccontextmanager
 
 # ~100k entries of (bucket, key, etag) -> (size, etag) stays in the tens of
 # MB even with long backup keys — well inside the pod memory limit.
@@ -30,7 +32,21 @@ def synthetic_multipart_etag(plaintext_size: int) -> str:
 class PlaintextAttrCache:
     def __init__(self, maxsize: int = _DEFAULT_MAXSIZE) -> None:
         self._maxsize = maxsize
+        self._locks = {}
         self._entries: OrderedDict[tuple[str, str, str], tuple[int, str]] = OrderedDict()
+
+    @asynccontextmanager
+    async def coalesce(self, bucket, key, backend_etag):
+        cache_key = (bucket, key, backend_etag)
+        entry = self._locks.setdefault(cache_key, [asyncio.Lock(), 0])
+        entry[1] += 1
+        try:
+            async with entry[0]:
+                yield
+        finally:
+            entry[1] -= 1
+            if entry[1] == 0:
+                del self._locks[cache_key]
 
     def get(self, bucket: str, key: str, backend_etag: str) -> tuple[int, str] | None:
         if not backend_etag:

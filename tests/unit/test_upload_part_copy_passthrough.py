@@ -123,7 +123,7 @@ async def test_multipart_encrypted_upload_part_copy_is_server_side_passthrough(
     await manager.create_upload(BUCKET, "sst/big.db.snap", upload_id, dst_dek, kid)
 
     mark = len(mock_s3.call_history)
-    resp = await handler.handle_upload_part_copy(
+    resp = await handler._copy_part_impl(
         _copy_part_request(
             f"/{BUCKET}/sst/big.db.snap",
             f"/{BUCKET}/sst/big.db",
@@ -205,7 +205,7 @@ async def test_upload_part_copy_passthrough_roundtrips_via_get(
     )
     upload_id = _extract_upload_id(create_resp.body)
 
-    copy_resp = await handler.handle_upload_part_copy(
+    copy_resp = await handler._copy_part_impl(
         _copy_part_request(f"/{BUCKET}/sst/dest.db", f"/{BUCKET}/sst/source.db", upload_id),
         credentials,
     )
@@ -271,7 +271,7 @@ async def test_range_copy_still_reencrypts(mock_s3, settings, manager, credentia
     req.headers["x-amz-copy-source-range"] = f"bytes=0-{crypto.MAX_BUFFER_SIZE - 1}"
 
     mark = len(mock_s3.call_history)
-    await _read(await handler.handle_upload_part_copy(req, credentials))
+    await _read(await handler._copy_part_impl(req, credentials))
     during = mock_s3.call_history[mark:]
 
     assert not any(c[0] == "upload_part_copy" for c in during)
@@ -527,7 +527,7 @@ async def test_scylla_prod_shape_range_smaller_than_metadata_uses_passthrough(
 
     scylla_range = f"bytes=0-{range_end}"
     mark = len(mock_s3.call_history)
-    resp = await handler.handle_upload_part_copy(
+    resp = await handler._copy_part_impl(
         _copy_part_request(
             f"/{BUCKET}/sst/big-Data.db.sm_manifest",
             f"/{BUCKET}/sst/big-Data.db",
@@ -667,7 +667,7 @@ async def test_two_part_hybrid_defer_tail_completes_fast(
     )
 
     mark = len(mock_s3.call_history)
-    resp1 = await handler.handle_upload_part_copy(
+    resp1 = await handler._copy_part_impl(
         _copy_part_request(
             f"/{BUCKET}/sst/small-Data.db.sm_manifest",
             f"/{BUCKET}/sst/small-Data.db",
@@ -692,7 +692,7 @@ async def test_two_part_hybrid_defer_tail_completes_fast(
 
     part2_start = part1_range_end + 1
     mark2 = len(mock_s3.call_history)
-    resp2 = await handler.handle_upload_part_copy(
+    resp2 = await handler._copy_part_impl(
         _copy_part_request(
             f"/{BUCKET}/sst/small-Data.db.sm_manifest",
             f"/{BUCKET}/sst/small-Data.db",
@@ -794,7 +794,7 @@ async def test_two_part_defer_tail_total_plaintext_not_double_counted(
         (1, f"bytes=0-{part1_range_end}"),
         (2, f"bytes={part1_range_end + 1}-{total - 1}"),
     ):
-        resp = await handler.handle_upload_part_copy(
+        resp = await handler._copy_part_impl(
             _copy_part_request(
                 f"/{BUCKET}/{dest_key}",
                 f"/{BUCKET}/sst/big-Data.db",
@@ -852,7 +852,7 @@ async def test_defer_tail_flushed_on_complete_keeps_part_accounting(
     upload_id = resp_create["UploadId"]
     await handler.multipart_manager.create_upload(BUCKET, dest_key, upload_id, src_dek, kid)
 
-    resp = await handler.handle_upload_part_copy(
+    resp = await handler._copy_part_impl(
         _copy_part_request(
             f"/{BUCKET}/{dest_key}",
             f"/{BUCKET}/sst/solo-Data.db",
@@ -1029,7 +1029,7 @@ async def test_scylla_manifest_full_range_uses_passthrough_not_streaming(
 
     full_range = f"bytes=0-{len(src_plaintext) - 1}"
     mark = len(mock_s3.call_history)
-    resp = await handler.handle_upload_part_copy(
+    resp = await handler._copy_part_impl(
         _copy_part_request(
             f"/{BUCKET}/sst/big-Data.db.sm_manifest",
             f"/{BUCKET}/sst/big-Data.db",
@@ -1089,7 +1089,7 @@ async def test_large_passthrough_not_blocked_by_pipeline_semaphore(
     handler._streaming_copy_part = blocked_streaming  # type: ignore[method-assign]
 
     async def run_passthrough():
-        resp = await handler.handle_upload_part_copy(
+        resp = await handler._copy_part_impl(
             _copy_part_request(
                 f"/{BUCKET}/sst/big-Data.db.sm_manifest",
                 f"/{BUCKET}/sst/big-Data.db",
@@ -1155,7 +1155,9 @@ async def test_single_segment_passthrough_complete_presents_backend_etag(
     import xml.etree.ElementTree as ET
 
     client_etag = ET.fromstring(await _read(copy_resp)).find("{*}ETag").text.strip('"')
-    backend_etag = mock_s3.multipart_uploads[upload_id]["Parts"][1]["ETag"]
+    state = await handler.multipart_manager.get_upload(BUCKET, "single/dst.bin", upload_id)
+    backend_etag = mock_s3.objects[f"{BUCKET}/{state.parts[1].staging_key}"]["ETag"].strip('"')
+    assert not mock_s3.multipart_uploads[upload_id]["Parts"]
     assert client_etag == hashlib.md5(plaintext, usedforsecurity=False).hexdigest()
     assert client_etag != backend_etag
 

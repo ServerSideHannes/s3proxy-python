@@ -8,12 +8,15 @@ keys are skipped, and a failing HEAD falls back to the listed size/etag.
 import asyncio
 import datetime as dt
 
+from botocore.exceptions import ClientError
+
 from s3proxy.handlers.buckets import LIST_HEAD_CONCURRENCY, BucketHandlerMixin
 
 INTERNAL_PREFIX = "s3proxy-internal/"
 
 
 class FakeHandler:
+    _resolve_object = BucketHandlerMixin._resolve_object
     _process_list_objects = BucketHandlerMixin._process_list_objects
     _list_entry = staticmethod(BucketHandlerMixin._list_entry)
 
@@ -42,7 +45,7 @@ class FakeClient:
         try:
             await asyncio.sleep(0.02)  # simulate backend round-trip
             if key == self.fail_key:
-                raise RuntimeError("backend HEAD failed")
+                raise ClientError({"Error": {"Code": "NoSuchKey"}}, "HeadObject")
             return {"Metadata": {"plaintext-size": "111", "client-etag": f"etag-{key}"}}
         finally:
             self.handler.inflight -= 1

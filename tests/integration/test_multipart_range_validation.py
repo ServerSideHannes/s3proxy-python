@@ -9,6 +9,7 @@ from s3proxy import crypto
 from s3proxy.errors import S3Error
 from s3proxy.handlers.objects import ObjectHandlerMixin
 from s3proxy.state import InternalPartMetadata, MultipartMetadata, PartMetadata
+from tests.conftest import MockS3Response
 
 
 @pytest.fixture
@@ -97,7 +98,7 @@ class TestMultipartRangeValidation:
 
             # Mock load_multipart_metadata to return our test metadata
             with patch(
-                "s3proxy.handlers.objects.get.load_multipart_metadata",
+                "s3proxy.state.metadata.load_multipart_metadata",
                 return_value=meta,
             ):
                 # Mock credentials
@@ -155,7 +156,7 @@ class TestMultipartRangeValidation:
         invalid_range_error = ClientError(error_response, "GetObject")
 
         mock_client.head_object = AsyncMock(
-            return_value={"ContentLength": 100, "LastModified": None}
+            return_value={"ContentLength": 1028, "LastModified": None}
         )
         mock_client.get_object = AsyncMock(side_effect=invalid_range_error)
 
@@ -194,7 +195,7 @@ class TestMultipartRangeValidation:
             mock_request.headers = {}
 
             with patch(
-                "s3proxy.handlers.objects.get.load_multipart_metadata",
+                "s3proxy.state.metadata.load_multipart_metadata",
                 return_value=meta,
             ):
                 creds = Mock()
@@ -209,10 +210,8 @@ class TestMultipartRangeValidation:
                         pass
 
                 # Verify error message is helpful
-                assert (
-                    "metadata corruption" in str(exc_info.value).lower()
-                    or "cannot read" in str(exc_info.value).lower()
-                )
+                assert exc_info.value.code == "InvalidRange"
+                mock_client.get_object.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_valid_range_succeeds(self, handler, settings, kek):
@@ -234,10 +233,7 @@ class TestMultipartRangeValidation:
         )
 
         # Mock get_object to return ciphertext
-        mock_body = AsyncMock()
-        mock_body.read = AsyncMock(return_value=ciphertext)
-        mock_body.__aenter__ = AsyncMock(return_value=mock_body)
-        mock_body.__aexit__ = AsyncMock(return_value=None)
+        mock_body = MockS3Response(ciphertext)
         mock_client.get_object = AsyncMock(
             return_value={"Body": mock_body, "ContentType": "application/octet-stream"}
         )
@@ -277,7 +273,7 @@ class TestMultipartRangeValidation:
             mock_request.headers = {}
 
             with patch(
-                "s3proxy.handlers.objects.get.load_multipart_metadata",
+                "s3proxy.state.metadata.load_multipart_metadata",
                 return_value=meta,
             ):
                 creds = Mock()
@@ -290,6 +286,7 @@ class TestMultipartRangeValidation:
                 # Verify response is valid
                 assert response is not None
                 assert response.status_code == 200
+                assert b"".join([chunk async for chunk in response.body_iterator]) == plaintext
 
     @pytest.mark.asyncio
     async def test_multiple_internal_parts_validation(self, handler, settings, kek):
@@ -349,7 +346,7 @@ class TestMultipartRangeValidation:
             mock_request.headers = {}
 
             with patch(
-                "s3proxy.handlers.objects.get.load_multipart_metadata",
+                "s3proxy.state.metadata.load_multipart_metadata",
                 return_value=meta,
             ):
                 creds = Mock()

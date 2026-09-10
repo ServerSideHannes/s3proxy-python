@@ -223,6 +223,7 @@ async def test_complete_lock_idempotent_when_peer_already_finished(
         key,
         MultipartMetadata(
             version=2,
+            upload_id=upload_id,
             part_count=2,
             total_plaintext_size=len(chunk1) + len(chunk2),
             parts=parts,
@@ -283,3 +284,20 @@ async def test_complete_lock_redis_acquire_timeout_raises(mock_redis):
                 pass
 
     assert getattr(exc.value, "code", None) == "SlowDown"
+
+
+@pytest.mark.asyncio
+async def test_lease_is_renewed_and_registry_released():
+    from fakeredis.aioredis import FakeRedis
+
+    redis = FakeRedis()
+    lock = CompleteUploadLock(redis_client=redis, ttl_seconds=1)
+    async with lock.hold("bucket", "key", "upload"):
+        await asyncio.sleep(1.2)
+        assert await redis.exists(lock._redis_key("bucket", "key", "upload"))
+    assert not await redis.exists(lock._redis_key("bucket", "key", "upload"))
+    local = CompleteUploadLock()
+    async with local.hold("bucket", "key", "upload"):
+        assert len(local._memory_locks) == 1
+    assert not local._memory_locks
+    await redis.aclose()

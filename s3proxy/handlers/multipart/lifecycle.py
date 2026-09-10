@@ -29,6 +29,7 @@ from ...state import (
     save_multipart_metadata,
     synthetic_multipart_etag,
 )
+from ...state.metadata import GENERATION_KEY, multipart_etag, multipart_headers
 from ...xml_utils import find_elements, get_element_text
 from ..base import BaseHandler, is_retryable_source_error
 
@@ -90,12 +91,11 @@ class LifecycleMixin(BaseHandler):
 
             # Build metadata (include user's x-amz-meta-*)
             upload_metadata = {
+                **self._user_metadata(request),
+                **multipart_headers(wrapped_dek),
                 self.settings.dektag_name: base64.b64encode(wrapped_dek).decode(),
                 self.settings.kidtag_name: kid,
             }
-            for hdr, val in request.headers.items():
-                if hdr.lower().startswith("x-amz-meta-"):
-                    upload_metadata[hdr[11:]] = val
 
             resp = await client.create_multipart_upload(
                 bucket,
@@ -109,12 +109,22 @@ class LifecycleMixin(BaseHandler):
             upload_id = resp["UploadId"]
 
             # Store state in Redis/memory first, then persist to S3 as backup
-            await self.multipart_manager.create_upload(bucket, key, upload_id, dek, kid)
+            await self.multipart_manager.create_upload(
+                bucket,
+                key,
+                upload_id,
+                dek,
+                kid,
+                generation=upload_metadata[GENERATION_KEY],
+                layout_version=3,
+            )
 
             # Persist DEK to S3 as backup - retry once on failure
             for attempt in range(2):
                 try:
-                    await persist_upload_state(client, bucket, key, upload_id, wrapped_dek, kid)
+                    await persist_upload_state(
+                        client, bucket, key, upload_id, wrapped_dek, kid, layout_version=3
+                    )
                     break
                 except Exception as e:
                     if attempt == 0:
@@ -170,11 +180,20 @@ class LifecycleMixin(BaseHandler):
         if idempotent is not None:
             return idempotent
 
-        state = await self.multipart_manager.complete_upload(bucket, key, upload_id)
+        state = await self.multipart_manager.get_upload(bucket, key, upload_id)
         if not state:
             state = await self._recover_upload_state(
                 client, bucket, key, upload_id, context="for complete"
             )
+
+        if state.layout_version >= 3:
+            from .staged import cleanup_attempts, complete_staged
+
+            response = await complete_staged(self, request, client, state)
+            await self.multipart_manager.abort_upload(bucket, key, upload_id)
+            await delete_upload_state(client, bucket, key, upload_id)
+            await cleanup_attempts(self, client, state)
+            return response
 
         if state.deferred_copy_tail:
             logger.info(
@@ -243,6 +262,7 @@ class LifecycleMixin(BaseHandler):
             key,
             MultipartMetadata(
                 version=2,
+                upload_id=upload_id,
                 part_count=len(completed_parts),
                 total_plaintext_size=total_plaintext,
                 parts=completed_parts,
@@ -250,6 +270,7 @@ class LifecycleMixin(BaseHandler):
                 kid=kid,
             ),
         )
+        await self.multipart_manager.abort_upload(bucket, key, upload_id)
         await delete_upload_state(client, bucket, key, upload_id)
 
         logger.info(
@@ -276,7 +297,9 @@ class LifecycleMixin(BaseHandler):
     ) -> Response | None:
         """Return success if a peer pod already finished this upload."""
         meta = await load_multipart_metadata(client, bucket, key)
-        if meta is None:
+        if meta is None or meta.upload_id != upload_id:
+            return None
+        if meta.generation and (meta.upload_bucket, meta.upload_key) != (bucket, key):
             return None
 
         try:
@@ -297,23 +320,27 @@ class LifecycleMixin(BaseHandler):
         )
 
         location = f"{self.settings.s3_endpoint}/{bucket}/{key}"
-        etag = hashlib.md5(
-            str(meta.total_plaintext_size).encode(), usedforsecurity=False
-        ).hexdigest()
+        etag = multipart_etag(meta)
         return Response(
             content=xml_responses.complete_multipart(location, bucket, key, etag),
             media_type="application/xml",
         )
 
     def _parse_client_parts(self, body: bytes) -> list[dict]:
-        client_parts = []
-        root = ET.fromstring(body.decode())
-        for part in find_elements(root, "Part"):
-            pn_text = get_element_text(part, "PartNumber")
-            etag_text = get_element_text(part, "ETag")
-            if pn_text and etag_text:
-                client_parts.append({"PartNumber": int(pn_text), "ETag": etag_text})
-        return client_parts
+        try:
+            root = ET.fromstring(body)
+            client_parts = []
+            for part in find_elements(root, "Part"):
+                number = int(get_element_text(part, "PartNumber") or "")
+                etag = get_element_text(part, "ETag")
+                if not 1 <= number <= 10000 or not etag:
+                    raise ValueError("Invalid part")
+                client_parts.append({"PartNumber": number, "ETag": etag})
+            if not client_parts:
+                raise ValueError("Empty part list")
+            return client_parts
+        except (ET.ParseError, ValueError, TypeError) as error:
+            raise S3Error.malformed_xml() from error
 
     def _build_s3_parts(
         self,
@@ -408,7 +435,7 @@ class LifecycleMixin(BaseHandler):
                 # already be invalidated. Confirm before treating this as failed.
                 if error_code == "NoSuchUpload" and attempt > 1:
                     verified = await self._verify_already_completed(
-                        client, bucket, key, expected_ciphertext_size
+                        client, bucket, key, expected_ciphertext_size, upload_id
                     )
                     if verified is not None:
                         logger.warning(
@@ -440,7 +467,12 @@ class LifecycleMixin(BaseHandler):
         raise last_exc
 
     async def _verify_already_completed(
-        self, client: S3Client, bucket: str, key: str, expected_ciphertext_size: int
+        self,
+        client: S3Client,
+        bucket: str,
+        key: str,
+        expected_ciphertext_size: int,
+        upload_id: str = "",
     ) -> dict[str, Any] | None:
         """Check whether a retried CompleteMultipartUpload's NoSuchUpload means the
         prior attempt actually succeeded (backend assembled the object, then the
@@ -449,7 +481,13 @@ class LifecycleMixin(BaseHandler):
             head = await client.head_object(bucket, key)
         except ClientError:
             return None
-        if head.get("ContentLength") == expected_ciphertext_size:
+        meta = await load_multipart_metadata(client, bucket, key, head)
+        if (
+            meta is not None
+            and meta.upload_id == upload_id
+            and (not meta.generation or (meta.upload_bucket, meta.upload_key) == (bucket, key))
+            and head.get("ContentLength") == expected_ciphertext_size
+        ):
             return {"ETag": head.get("ETag", "")}
         return None
 
@@ -499,10 +537,15 @@ class LifecycleMixin(BaseHandler):
                 upload_id=upload_id[:20] + "...",
             )
 
+            state = await self.multipart_manager.get_upload(bucket, key, upload_id)
             await asyncio.gather(
                 self.multipart_manager.abort_upload(bucket, key, upload_id),
                 self._safe_abort(client, bucket, key, upload_id),
                 delete_upload_state(client, bucket, key, upload_id),
             )
 
+            if state is not None and state.layout_version >= 3:
+                from .staged import cleanup_attempts
+
+                await cleanup_attempts(self, client, state)
             return Response(status_code=204)

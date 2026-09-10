@@ -1,6 +1,9 @@
 # OOM tests upload 5GB+ into MinIO (e.g. 20 concurrent 256MB PUTs).
 # The default compose caps MinIO at 4g tmpfs for integration shards; drop
 # that cap here so MinIO uses disk-backed storage like before #117.
+# The memory-usage shard also uses this override: immutable staging adds
+# temporary copies to its multi-gigabyte workload. Proxy RSS limits and
+# assertions stay unchanged; this removes only the backend storage cap.
 services:
   minio:
     tmpfs: !reset null

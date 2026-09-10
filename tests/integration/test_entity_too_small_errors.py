@@ -17,6 +17,10 @@ class TestEntityTooSmallHandling:
     async def test_complete_with_missing_part_rejected(self, handler, settings):
         """Test that CompleteMultipartUpload fails when client requests non-existent parts."""
         mock_client = AsyncMock()
+        mock_client.head_object = AsyncMock(return_value={"ContentLength": 0})
+        mock_client.get_object = AsyncMock(
+            side_effect=ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+        )
         # Make mock_client an async context manager
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
@@ -82,6 +86,10 @@ class TestEntityTooSmallHandling:
     async def test_entity_too_small_with_small_parts(self, handler, settings):
         """Test EntityTooSmall error when multiple parts are < 5MB."""
         mock_client = AsyncMock()
+        mock_client.head_object = AsyncMock(return_value={"ContentLength": 0})
+        mock_client.get_object = AsyncMock(
+            side_effect=ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+        )
         # Make mock_client an async context manager
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)

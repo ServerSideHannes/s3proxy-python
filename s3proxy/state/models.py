@@ -33,6 +33,7 @@ class PartMetadata:
     md5: str = ""
     # Internal sub-parts for streaming uploads
     internal_parts: list[InternalPartMetadata] = field(default_factory=list)
+    staging_key: str = ""
 
 
 @dataclass(slots=True)
@@ -52,6 +53,9 @@ class MultipartUploadState:
     total_plaintext_size: int = 0
     next_internal_part_number: int = 1  # Next S3 part number to use
     kid: str = ""  # Key id that wraps this upload's DEK ("" = default key)
+    generation: str = ""
+    layout_version: int = 2
+    write_started: bool = False
     # True while every client part uses a single internal part (e.g. 5MB ClickHouse
     # shadow tars). Maps client part N → internal N so 600-part uploads stay under
     # S3's 10k part limit. Cleared on the first multi-internal client part (Scylla).
@@ -75,6 +79,12 @@ class MultipartMetadata:
     parts: list[PartMetadata] = field(default_factory=list)
     wrapped_dek: bytes = b""
     kid: str = ""  # Key id that wrapped the DEK ("" = legacy/default key)
+
+    generation: str = ""
+    upload_id: str = ""
+    upload_bucket: str = ""
+    upload_key: str = ""
+    client_etag: str = ""
 
 
 class StateMissingError(Exception):

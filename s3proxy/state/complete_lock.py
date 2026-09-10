@@ -9,6 +9,7 @@ completion is already in progress" and can leave the client with NoSuchUpload.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -51,7 +52,7 @@ class CompleteUploadLock:
         self._ttl = ttl_seconds
         self._acquire_timeout = acquire_timeout_seconds
         self._poll_interval = poll_interval_seconds
-        self._memory_locks: dict[str, asyncio.Lock] = {}
+        self._memory_locks: dict[str, list] = {}
         self._memory_guard = asyncio.Lock()
 
     def _storage_key(self, bucket: str, key: str, upload_id: str) -> str:
@@ -73,30 +74,16 @@ class CompleteUploadLock:
     async def _memory_hold(self, bucket: str, key: str, upload_id: str) -> AsyncIterator[None]:
         lk = self._storage_key(bucket, key, upload_id)
         async with self._memory_guard:
-            lock = self._memory_locks.get(lk)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._memory_locks[lk] = lock
-
-        await lock.acquire()
-        logger.debug(
-            "COMPLETE_LOCK_ACQUIRED",
-            bucket=bucket,
-            key=key,
-            upload_id=upload_id[:20] + "..." if len(upload_id) > 20 else upload_id,
-            backend="memory",
-        )
+            entry = self._memory_locks.setdefault(lk, [asyncio.Lock(), 0])
+            entry[1] += 1
         try:
-            yield
+            async with entry[0]:
+                yield
         finally:
-            lock.release()
-            logger.debug(
-                "COMPLETE_LOCK_RELEASED",
-                bucket=bucket,
-                key=key,
-                upload_id=upload_id[:20] + "..." if len(upload_id) > 20 else upload_id,
-                backend="memory",
-            )
+            async with self._memory_guard:
+                entry[1] -= 1
+                if entry[1] == 0:
+                    del self._memory_locks[lk]
 
     @asynccontextmanager
     async def _redis_hold(self, bucket: str, key: str, upload_id: str) -> AsyncIterator[None]:
@@ -130,17 +117,45 @@ class CompleteUploadLock:
 
             await asyncio.sleep(self._poll_interval)
 
+        owner = asyncio.current_task()
+        lost = False
+
+        async def renew():
+            nonlocal lost
+            try:
+                while True:
+                    await asyncio.sleep(max(0.1, self._ttl / 3))
+                    if not await self._renew_redis_lock(redis_key, token):
+                        raise RuntimeError("Completion lease was lost")
+            except Exception:
+                lost = True
+                owner.cancel()
+
+        renewal = asyncio.create_task(renew())
         try:
             yield
+        except asyncio.CancelledError:
+            if lost:
+                raise S3Error.slow_down("Completion lease lost; retry the upload") from None
+            raise
         finally:
+            renewal.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await renewal
             await self._release_redis_lock(redis_key, token)
-            logger.debug(
-                "COMPLETE_LOCK_RELEASED",
-                bucket=bucket,
-                key=key,
-                upload_id=upload_id[:20] + "..." if len(upload_id) > 20 else upload_id,
-                backend="redis",
-            )
+
+    async def _renew_redis_lock(self, redis_key, token):
+        async with self._redis.pipeline(transaction=True) as pipe:
+            await pipe.watch(redis_key)
+            current = await pipe.get(redis_key)
+            current = current.decode() if isinstance(current, bytes) else current
+            if current != token:
+                await pipe.unwatch()
+                return False
+            pipe.multi()
+            pipe.expire(redis_key, self._ttl)
+            await pipe.execute()
+            return True
 
     async def _release_redis_lock(self, redis_key: str, token: str) -> None:
         import redis.asyncio as redis
