@@ -314,3 +314,33 @@ async def test_empty_streaming_put_roundtrip(proxy, credentials):
         request(body=b"", headers={"x-amz-content-sha256": "UNSIGNED-PAYLOAD"}), credentials
     )
     assert await consume(await proxy.handle_get_object(request("GET"), credentials)) == b""
+
+
+@pytest.mark.parametrize("blocker", [None, "object", "upload"])
+async def test_delete_bucket_purges_only_orphaned_proxy_metadata(
+    proxy, mock_s3, credentials, monkeypatch, blocker
+):
+    await mock_s3.create_bucket("bucket")
+    await mock_s3.put_object("bucket", f".s3proxy-internal/generations/{'a' * 64}.meta", b"m")
+    if blocker == "object":
+        await mock_s3.put_object("bucket", "visible", b"x")
+    if blocker == "upload":
+        await mock_s3.create_multipart_upload("bucket", "pending")
+    delete_bucket = mock_s3.delete_bucket
+
+    async def strict_delete_bucket(bucket):
+        if any(k.startswith(f"{bucket}/") for k in mock_s3.objects):
+            raise ClientError({"Error": {"Code": "BucketNotEmpty"}}, "DeleteBucket")
+        return await delete_bucket(bucket)
+
+    monkeypatch.setattr(mock_s3, "delete_bucket", strict_delete_bucket)
+    req = request(method="DELETE")
+    req.scope["path"] = "/bucket"
+    if blocker:
+        with pytest.raises(S3Error) as error:
+            await proxy.handle_delete_bucket(req, credentials)
+        assert error.value.code == "BucketNotEmpty"
+        assert any("/generations/" in k for k in mock_s3.objects)
+    else:
+        assert (await proxy.handle_delete_bucket(req, credentials)).status_code == 204
+        assert not mock_s3.objects and "bucket" not in mock_s3.buckets

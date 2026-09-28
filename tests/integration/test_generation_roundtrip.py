@@ -144,10 +144,13 @@ def test_generation_roundtrip(redis_url):
             )
             assert result.status_code == 403
             assert client.get_object(Bucket=bucket, Key="object")["Body"].read() == b"new"
-        # This test owns a unique bucket and removes only that bucket's data.
-        objects = raw.list_objects_v2(Bucket=bucket).get("Contents", [])
-        if objects:
-            raw.delete_objects(
-                Bucket=bucket, Delete={"Objects": [{"Key": o["Key"]} for o in objects]}
-            )
-        raw.delete_bucket(Bucket=bucket)
+        with pytest.raises(ClientError, match="BucketNotEmpty"):
+            client.delete_bucket(Bucket=bucket)
+        backend_keys = [o["Key"] for o in raw.list_objects_v2(Bucket=bucket)["Contents"]]
+        assert any(k.startswith(".s3proxy-internal/generations/") for k in backend_keys)
+        assert client.get_object(Bucket=bucket, Key="native")["Body"].read() == b"plain"
+        for obj in client.list_objects_v2(Bucket=bucket)["Contents"]:
+            client.delete_object(Bucket=bucket, Key=obj["Key"])
+        client.delete_bucket(Bucket=bucket)
+        with pytest.raises(ClientError):
+            raw.head_bucket(Bucket=bucket)

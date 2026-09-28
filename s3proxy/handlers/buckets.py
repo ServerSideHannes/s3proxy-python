@@ -279,7 +279,14 @@ class BucketHandlerMixin(BaseHandler):
         bucket = self._parse_bucket(request.url.path)
         async with self._client(creds) as client:
             try:
-                await client.delete_bucket(bucket)
+                try:
+                    await client.delete_bucket(bucket)
+                except ClientError as e:
+                    if e.response["Error"]["Code"] != "BucketNotEmpty":
+                        raise
+                    if not await self._purge_internal_keys(client, bucket):
+                        raise
+                    await client.delete_bucket(bucket)
                 return Response(status_code=204)
             except ClientError as e:
                 code = e.response["Error"]["Code"]
@@ -288,6 +295,27 @@ class BucketHandlerMixin(BaseHandler):
                 if code == "BucketNotEmpty":
                     raise S3Error.bucket_not_empty(bucket) from None
                 raise S3Error.internal_error(str(e)) from e
+
+    async def _purge_internal_keys(self, client, bucket: str) -> bool:
+        """Remove proxy metadata only once no client object or upload can reference it."""
+        if (await client.list_multipart_uploads(bucket, max_uploads=1)).get("Uploads"):
+            return False
+        keys: list[str] = []
+        token = None
+        while True:
+            page = await client.list_objects_v2(bucket, continuation_token=token)
+            for obj in page.get("Contents", []):
+                if not self._is_internal_key(obj["Key"]):
+                    return False
+                keys.append(obj["Key"])
+            if not page.get("IsTruncated"):
+                break
+            token = page["NextContinuationToken"]
+        for offset in range(0, len(keys), 1000):
+            batch = [{"Key": key} for key in keys[offset : offset + 1000]]
+            if (await client.delete_objects(bucket, batch, quiet=True)).get("Errors"):
+                return False
+        return bool(keys)
 
     async def handle_head_bucket(self, request: Request, creds: S3Credentials) -> Response:
         bucket = self._parse_bucket(request.url.path)
