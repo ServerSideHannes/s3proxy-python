@@ -53,3 +53,6 @@ chart/charts/*.tgz
 
 # Database backup testing
 db-backup-tests/
+
+# Local-only cluster e2e tests
+e2e/
