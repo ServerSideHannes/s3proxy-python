@@ -370,7 +370,7 @@ services:
             spec:
               containers:
               - name: minio
-                image: minio/minio:latest
+                image: pgsty/minio:latest
                 args: ["server", "/data", "--console-address", ":9001"]
                 env:
                 - name: MINIO_ROOT_USER
@@ -430,7 +430,7 @@ services:
         # 6. Start bucket creation in background (doesn't block s3proxy)
         echo "  - Creating buckets (background)..."
         kubectl run minio-setup --namespace minio --rm -i \
-          --image=minio/mc:latest \
+          --image=pgsty/mc:latest \
           --restart=Never \
           --command -- /bin/sh -c "
             mc alias set local http://minio:9000 minioadmin minioadmin && \

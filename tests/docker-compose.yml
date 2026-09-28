@@ -6,7 +6,7 @@ services:
       - "6379:6379"
 
   minio:
-    image: minio/minio
+    image: pgsty/minio
     container_name: s3proxy-test-minio
     ports:
       - "9000:9000"

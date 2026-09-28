@@ -80,7 +80,7 @@ def minio_backend(*, isolated: bool = False) -> Generator[str]:
             "MINIO_ROOT_USER=minioadmin",
             "-e",
             "MINIO_ROOT_PASSWORD=minioadmin",
-            "minio/minio",
+            "pgsty/minio",
             "server",
             "/data",
         ],
