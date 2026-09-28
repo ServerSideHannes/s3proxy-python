@@ -1,10 +1,17 @@
 """Failure-path and backend round-trip regressions for the shared services."""
 
 import asyncio
+import io
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from botocore.httpchecksum import (
+    AwsChunkedWrapper,
+    Crc32Checksum,
+    Sha1Checksum,
+    Sha256Checksum,
+)
 from cryptography.exceptions import InvalidTag
 from starlette.requests import ClientDisconnect
 
@@ -13,7 +20,7 @@ from s3proxy.client import SigV4Verifier
 from s3proxy.client.pool import S3ClientPool
 from s3proxy.errors import S3Error
 from s3proxy.state import MultipartMetadata, PartMetadata
-from s3proxy.streaming.authenticated import decrypt_to_file
+from s3proxy.streaming.authenticated import decrypt_to_file, file_range
 from s3proxy.streaming.chunked import decode_aws_chunked_stream
 from s3proxy.streaming.frames import plaintext_frames
 from s3proxy.streaming.response import OwnedStreamingResponse
@@ -165,3 +172,97 @@ async def test_aws_published_chunk_signature_vector(credentials, tamper):
             _ = [part async for part in decode_aws_chunked_stream(req)]
     else:
         assert b"".join([part async for part in decode_aws_chunked_stream(req)]) == b"a" * 66560
+
+
+async def test_spilled_plaintext_is_encrypted_at_rest():
+    dek = crypto.generate_dek()
+    data = b"secret-plaintext" * (crypto.MAX_BUFFER_SIZE // 16 + 4096)
+    spool, length = await decrypt_to_file(MockS3Response(crypto.encrypt(data, dek)), dek)
+    assert length == len(data)
+    assert spool._file._rolled
+    spool._file.seek(0)
+    assert b"secret-plaintext" not in spool._file.read()
+    start, end = 12345, 12345 + 3 * 1024 * 1024
+    assert b"".join([c async for c in file_range(spool, start, end)]) == data[start : end + 1]
+
+
+_CHECKSUMS = {
+    "x-amz-checksum-crc32": Crc32Checksum,
+    "x-amz-checksum-sha1": Sha1Checksum,
+    "x-amz-checksum-sha256": Sha256Checksum,
+}
+
+
+def _trailer_request(data, name="x-amz-checksum-crc32", body=None, mode=None):
+    if body is None:
+        body = b"".join(
+            AwsChunkedWrapper(
+                io.BytesIO(data),
+                checksum_cls=_CHECKSUMS[name],
+                checksum_name=name,
+                chunk_size=64 * 1024,
+            )
+        )
+    return request(
+        body=body,
+        headers={
+            "x-amz-content-sha256": mode or "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+            "content-encoding": "aws-chunked",
+            "x-amz-trailer": name,
+            "x-amz-decoded-content-length": str(len(data)),
+        },
+    )
+
+
+async def _decode(req):
+    return b"".join([part async for part in decode_aws_chunked_stream(req)])
+
+
+@pytest.mark.parametrize("name", list(_CHECKSUMS))
+async def test_unsigned_trailer_checksum_is_verified(name):
+    data = bytes(range(256)) * 1000
+    assert await _decode(_trailer_request(data, name)) == data
+
+
+async def test_unsigned_trailer_checksum_mismatch_is_rejected():
+    data = b"a" * 100_000
+    body = b"".join(
+        AwsChunkedWrapper(
+            io.BytesIO(data), checksum_cls=Crc32Checksum, checksum_name="x-amz-checksum-crc32"
+        )
+    )
+    with pytest.raises(S3Error) as error:
+        await _decode(_trailer_request(data, body=body.replace(b"aaaa", b"baaa", 1)))
+    assert error.value.code == "BadDigest"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"5\r\nhello\r\n0\r\n\r\n", b"5\r\nhello\r\n0\r\nx-amz-checksum-crc32:NhCmhg=="],
+)
+async def test_unsigned_trailer_must_be_complete(body):
+    with pytest.raises(S3Error):
+        await _decode(_trailer_request(b"hello", body=body))
+
+
+async def test_unsupported_trailer_algorithm_is_rejected_before_reading():
+    body = b"".join(
+        AwsChunkedWrapper(
+            io.BytesIO(b"x"), checksum_cls=Crc32Checksum, checksum_name="x-amz-checksum-crc32"
+        )
+    )
+    req = _trailer_request(b"x", body=body)
+    req.scope["headers"] = [
+        (k, b"x-amz-checksum-crc32c" if k == b"x-amz-trailer" else v)
+        for k, v in req.scope["headers"]
+    ]
+    with pytest.raises(S3Error) as error:
+        await _decode(req)
+    assert error.value.code == "InvalidRequest"
+
+
+async def test_signed_trailer_mode_is_still_rejected():
+    req = _trailer_request(b"x", mode="STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER")
+    with pytest.raises(S3Error) as error:
+        await _decode(req)
+    assert error.value.code == "InvalidRequest"

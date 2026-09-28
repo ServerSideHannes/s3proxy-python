@@ -1,7 +1,9 @@
 """Strict aws-chunked framing with incremental reads and SigV4 chunk validation."""
 
+import base64
 import hashlib
 import hmac
+import zlib
 from collections.abc import AsyncIterator, Iterator
 
 from fastapi import Request
@@ -11,12 +13,32 @@ from ..errors import S3Error
 STREAM_CHUNK_SIZE = 64 * 1024
 _MAX_CHUNK_HEADER_SIZE = 4096
 _MAX_CHUNK_SIZE = 64 * 1024 * 1024
+SIGNED_PAYLOAD = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
+UNSIGNED_PAYLOAD_TRAILER = "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+
+
+class _Crc32:
+    def __init__(self):
+        self.value = 0
+
+    def update(self, data: bytes) -> None:
+        self.value = zlib.crc32(data, self.value)
+
+    def digest(self) -> bytes:
+        return self.value.to_bytes(4, "big")
+
+
+_TRAILER_CHECKSUMS = {
+    "x-amz-checksum-crc32": _Crc32,
+    "x-amz-checksum-sha1": lambda: hashlib.sha1(usedforsecurity=False),
+    "x-amz-checksum-sha256": hashlib.sha256,
+}
 
 
 class ChunkDecoder:
     """A bounded framing state machine; EOF is valid only after the terminal chunk."""
 
-    def __init__(self, validate=None):
+    def __init__(self, validate=None, trailer=False):
         self.buffer = bytearray()
         self.remaining = None
         self.terminal = False
@@ -24,6 +46,8 @@ class ChunkDecoder:
         self.validate = validate
         self.digest = None
         self.signature = ""
+        self.trailers = {} if trailer else None
+        self.trailer_size = 0
 
     def feed(self, data: bytes) -> Iterator[bytes]:
         self.buffer.extend(data)
@@ -66,6 +90,25 @@ class ChunkDecoder:
                 self.digest.update(chunk)
                 yield chunk
                 continue
+            if self.terminal and self.trailers is not None:
+                end = self.buffer.find(b"\r\n")
+                if end < 0 or self.trailer_size + end > _MAX_CHUNK_HEADER_SIZE:
+                    if self.trailer_size + len(self.buffer) > _MAX_CHUNK_HEADER_SIZE:
+                        raise ValueError("Trailer too large")
+                    return
+                line = bytes(self.buffer[:end])
+                del self.buffer[: end + 2]
+                self.trailer_size += end + 2
+                if line:
+                    name, sep, value = line.partition(b":")
+                    if not sep:
+                        raise ValueError("Invalid trailer")
+                    self.trailers[name.strip().lower().decode("ascii")] = value.strip().decode(
+                        "ascii"
+                    )
+                else:
+                    self.done = True
+                continue
             if len(self.buffer) < 2:
                 return
             if self.buffer[:2] != b"\r\n":
@@ -93,9 +136,9 @@ def decode_aws_chunked(body: bytes) -> bytes:
 
 def _chunk_validator(request: Request):
     mode = request.headers.get("x-amz-content-sha256", "")
-    if mode.startswith("STREAMING-") and mode != "STREAMING-AWS4-HMAC-SHA256-PAYLOAD":
+    if mode.startswith("STREAMING-") and mode not in (SIGNED_PAYLOAD, UNSIGNED_PAYLOAD_TRAILER):
         raise S3Error.invalid_request("Unsupported streaming signature/trailer format")
-    if mode != "STREAMING-AWS4-HMAC-SHA256-PAYLOAD":
+    if mode != SIGNED_PAYLOAD:
         return None
     from ..client import ParsedRequest
     from ..client.verifier import _derive_signing_key
@@ -138,8 +181,19 @@ def _chunk_validator(request: Request):
     return validate
 
 
+def _trailer_checksum(request: Request):
+    if request.headers.get("x-amz-content-sha256") != UNSIGNED_PAYLOAD_TRAILER:
+        return None
+    name = request.headers.get("x-amz-trailer", "").strip().lower()
+    factory = _TRAILER_CHECKSUMS.get(name)
+    if factory is None:
+        raise S3Error.invalid_request(f"Unsupported trailing checksum: {name or 'missing'}")
+    return name, factory()
+
+
 async def decode_aws_chunked_stream(request: Request) -> AsyncIterator[bytes]:
-    decoder = ChunkDecoder(_chunk_validator(request))
+    trailer = _trailer_checksum(request)
+    decoder = ChunkDecoder(_chunk_validator(request), trailer=trailer is not None)
     decoded = 0
     try:
         async for raw in request.stream():
@@ -147,11 +201,23 @@ async def decode_aws_chunked_stream(request: Request) -> AsyncIterator[bytes]:
             for offset in range(0, len(raw), STREAM_CHUNK_SIZE):
                 for chunk in decoder.feed(raw[offset : offset + STREAM_CHUNK_SIZE]):
                     decoded += len(chunk)
+                    if trailer:
+                        trailer[1].update(chunk)
                     yield chunk
         decoder.finish()
         expected = request.headers.get("x-amz-decoded-content-length")
         if expected is not None and int(expected) != decoded:
             raise ValueError("Decoded content length mismatch")
+        if trailer:
+            name, checksum = trailer
+            if set(decoder.trailers) != {name}:
+                raise ValueError(f"Expected exactly the {name} trailer")
+            try:
+                received = base64.b64decode(decoder.trailers[name], validate=True)
+            except ValueError as error:
+                raise S3Error.invalid_digest(name) from error
+            if not hmac.compare_digest(received, checksum.digest()):
+                raise S3Error.bad_digest(name)
     except (ValueError, UnicodeError) as error:
         raise S3Error.bad_request(str(error)) from error
 

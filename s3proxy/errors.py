@@ -93,6 +93,16 @@ class S3Error(HTTPException):
     def invalid_request(cls, message: str) -> S3Error:
         return cls(400, "InvalidRequest", message)
 
+    @classmethod
+    def bad_digest(cls, checksum: str) -> S3Error:
+        return cls(
+            400, "BadDigest", f"The {checksum} you specified did not match the calculated checksum."
+        )
+
+    @classmethod
+    def invalid_digest(cls, checksum: str) -> S3Error:
+        return cls(400, "InvalidDigest", f"The {checksum} you specified was invalid.")
+
     # 403 Forbidden variants
     @classmethod
     def access_denied(cls, message: str = "Access Denied") -> S3Error:

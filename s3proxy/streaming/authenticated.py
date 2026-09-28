@@ -1,6 +1,7 @@
 """Bounded legacy GCM reads: authenticate fully before exposing plaintext."""
 
 import asyncio
+import os
 import tempfile
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -9,8 +10,38 @@ from .. import crypto
 from ..errors import S3Error
 
 
+class _SealedSpool:
+    """Spooled plaintext stays AES-CTR encrypted under a key held only in memory."""
+
+    def __init__(self):
+        self._file = tempfile.SpooledTemporaryFile(max_size=crypto.MAX_BUFFER_SIZE)  # noqa: SIM115 -- response owns it
+        self._key = os.urandom(32)
+        self._iv = int.from_bytes(os.urandom(16), "big")
+        self._encryptor = self._cipher(0).encryptor()
+        self._decryptor = None
+
+    def _cipher(self, block):
+        counter = (self._iv + block) % (1 << 128)
+        return Cipher(algorithms.AES(self._key), modes.CTR(counter.to_bytes(16, "big")))
+
+    def write(self, data):
+        self._file.write(self._encryptor.update(data))
+
+    def seek(self, offset):
+        self._file.seek(offset)
+        block, skip = divmod(offset, 16)
+        self._decryptor = self._cipher(block).decryptor()
+        self._decryptor.update(bytes(skip))
+
+    def read(self, size):
+        return self._decryptor.update(self._file.read(size))
+
+    def close(self):
+        self._file.close()
+
+
 async def decrypt_to_file(body, dek):
-    spool = tempfile.SpooledTemporaryFile(max_size=crypto.MAX_BUFFER_SIZE)  # noqa: SIM115 -- response owns it
+    spool = _SealedSpool()
     # Roll large plaintext to disk without holding a second full plaintext copy.
     pending = bytearray()
     decryptor = None
