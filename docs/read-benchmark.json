@@ -1,0 +1,18 @@
+{
+  "baseline": {
+    "samples": 10,
+    "bytes": 33554432,
+    "median_ms": 317.12,
+    "max_ms": 332.85,
+    "median_MiB_s": 100.91,
+    "sampled_peak_RSS_MiB": 179.23
+  },
+  "changed": {
+    "samples": 10,
+    "bytes": 33554432,
+    "median_ms": 289.26,
+    "max_ms": 331.64,
+    "median_MiB_s": 110.63,
+    "sampled_peak_RSS_MiB": 175.06
+  }
+}

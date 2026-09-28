@@ -4,11 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import ctypes
-import gc
 import os
-import sys
-from collections.abc import Callable
 
 import structlog
 
@@ -27,26 +23,6 @@ logger = structlog.get_logger(__name__)
 # Constants
 MIN_RESERVATION = 64 * 1024  # 64KB minimum per request
 MAX_BUFFER_SIZE = 8 * 1024 * 1024  # 8MB streaming buffer size
-
-
-def _create_malloc_release() -> Callable[[], int] | None:
-    """Create platform-specific function to release memory back to OS.
-
-    Only works on Linux via malloc_trim(0). Returns None on other platforms.
-    """
-    if sys.platform != "linux":
-        return None
-
-    try:
-        libc = ctypes.CDLL("libc.so.6")
-        libc.malloc_trim.argtypes = [ctypes.c_size_t]
-        libc.malloc_trim.restype = ctypes.c_int
-        return lambda: libc.malloc_trim(0)
-    except OSError, AttributeError:
-        return None
-
-
-_malloc_release = _create_malloc_release()
 
 
 BACKPRESSURE_TIMEOUT = int(os.environ.get("S3PROXY_BACKPRESSURE_TIMEOUT", "120"))
@@ -195,18 +171,6 @@ class ConcurrencyLimiter:
             MEMORY_RESERVED_BYTES.set(self._active_bytes)
             self._condition.notify_all()
 
-        # Run garbage collection and release memory to OS
-        gc.collect(0)
-        gc.collect(1)
-        gc.collect(2)
-
-        if _malloc_release:
-            with contextlib.suppress(OSError):
-                _malloc_release()
-
-        # Yield to allow OS memory reclaim
-        await asyncio.sleep(0)
-
 
 # Default instance used by module-level functions
 _default = ConcurrencyLimiter(limit_mb=int(os.environ.get("S3PROXY_MEMORY_LIMIT_MB", "64")))
@@ -225,9 +189,9 @@ def estimate_memory_footprint(method: str, content_length: int) -> int:
     if method in ("HEAD", "DELETE"):
         return 0
     if method == "GET":
-        return MAX_BUFFER_SIZE
+        return 4 * MAX_BUFFER_SIZE
     if method == "POST":
-        return MIN_RESERVATION
+        return max(MIN_RESERVATION, 2 * min(max(content_length, 0), MAX_BUFFER_SIZE))
     return max(MIN_RESERVATION, governor_memory_footprint(content_length))
 
 

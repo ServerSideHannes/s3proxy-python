@@ -17,7 +17,7 @@ import pytest
 
 from s3proxy.handlers import S3ProxyHandler
 from s3proxy.state import MultipartStateManager
-from s3proxy.state.metadata import _internal_meta_key
+from s3proxy.state.metadata import GENERATION_KEY, generation_meta_key
 
 BUCKET = "backups"
 
@@ -109,7 +109,9 @@ async def test_multipart_object_copy_copies_sidecar_and_roundtrips(settings, moc
     body = b"m" * (256 * 1024)  # streamed as multiple parts -> real sidecar
     await handler.handle_put_object(_stream_put_request(f"/{BUCKET}/sst/big.db", body), credentials)
     # sanity: a multipart sidecar exists for the source
-    assert mock_s3._key(BUCKET, _internal_meta_key("sst/big.db")) in mock_s3.objects
+    source_head = await mock_s3.head_object(BUCKET, "sst/big.db")
+    manifest = generation_meta_key(source_head["Metadata"][GENERATION_KEY])
+    assert mock_s3._key(BUCKET, manifest) in mock_s3.objects
 
     mark = len(mock_s3.call_history)
     await handler.handle_copy_object(
@@ -119,7 +121,8 @@ async def test_multipart_object_copy_copies_sidecar_and_roundtrips(settings, moc
 
     copied = _keys_touched(during, "copy_object")
     assert "sst/big.db.snap" in copied  # assembled ciphertext, server-side
-    assert _internal_meta_key("sst/big.db.snap") in copied  # sidecar, server-side
+    dest_head = await mock_s3.head_object(BUCKET, "sst/big.db.snap")
+    assert dest_head["Metadata"][GENERATION_KEY] == source_head["Metadata"][GENERATION_KEY]
     assert "sst/big.db" not in _keys_touched(during, "get_object")  # no bulk download
     assert "sst/big.db.snap" not in _keys_touched(during, "put_object")  # no re-upload
 

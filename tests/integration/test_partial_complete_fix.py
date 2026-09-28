@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 
 from s3proxy import crypto
 from s3proxy.state import InternalPartMetadata, PartMetadata
@@ -19,6 +20,10 @@ class TestPartialMultipartCompletion:
         completes with 3 parts, the metadata should only reference the 3 completed parts.
         """
         mock_client = AsyncMock()
+        mock_client.head_object = AsyncMock(return_value={"ContentLength": 0})
+        mock_client.get_object = AsyncMock(
+            side_effect=ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+        )
         # Make mock_client an async context manager
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
@@ -50,7 +55,7 @@ class TestPartialMultipartCompletion:
             await handler.multipart_manager.add_part("bucket", "key", "upload-123", part)
 
         # Mock S3 client responses
-        mock_client.complete_multipart_upload = AsyncMock()
+        mock_client.complete_multipart_upload = AsyncMock(return_value={"ETag": "backend-etag"})
         mock_client.head_object = AsyncMock(
             return_value={"ContentLength": 3 * 1028}  # Only 3 parts completed
         )
@@ -126,6 +131,10 @@ class TestPartialMultipartCompletion:
     async def test_complete_logs_size_mismatch(self, handler, settings):
         """Test that size mismatches are logged but don't fail the upload."""
         mock_client = AsyncMock()
+        mock_client.head_object = AsyncMock(return_value={"ContentLength": 0})
+        mock_client.get_object = AsyncMock(
+            side_effect=ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+        )
         # Make mock_client an async context manager
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
@@ -154,7 +163,7 @@ class TestPartialMultipartCompletion:
             )
             await handler.multipart_manager.add_part("bucket", "key", "upload-123", part)
 
-        mock_client.complete_multipart_upload = AsyncMock()
+        mock_client.complete_multipart_upload = AsyncMock(return_value={"ETag": "backend-etag"})
         # Return size that doesn't match our metadata (simulate S3 corruption or issue)
         mock_client.head_object = AsyncMock(
             return_value={"ContentLength": 9999}  # Wrong size
@@ -194,6 +203,10 @@ class TestPartialMultipartCompletion:
         from s3proxy.errors import S3Error
 
         mock_client = AsyncMock()
+        mock_client.head_object = AsyncMock(return_value={"ContentLength": 0})
+        mock_client.get_object = AsyncMock(
+            side_effect=ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+        )
         # Make mock_client an async context manager
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)

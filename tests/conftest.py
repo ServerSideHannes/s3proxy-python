@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import fakeredis.aioredis
 import pytest
+from botocore.exceptions import ClientError
 
 # Set environment variables before importing s3proxy modules
 os.environ.setdefault("S3PROXY_HOST", "http://localhost:9000")
@@ -207,7 +208,9 @@ class MockS3Client:
         }
         return {"ETag": f'"{hashlib.md5(body).hexdigest()}"'}
 
-    async def get_object(self, bucket: str, key: str, range_header: str | None = None) -> dict:
+    async def get_object(
+        self, bucket: str, key: str, range_header: str | None = None, if_match: str | None = None
+    ) -> dict:
         """Retrieve an object."""
         self.call_history.append(
             ("get_object", {"bucket": bucket, "key": key, "range": range_header})
@@ -341,6 +344,7 @@ class MockS3Client:
         metadata: dict[str, str] | None = None,
         metadata_directive: str = "COPY",
         content_type: str | None = None,
+        **kwargs,
     ) -> dict:
         """Copy an object."""
         self.call_history.append(
@@ -413,6 +417,8 @@ class MockS3Client:
             "Bucket": bucket,
             "Key": key,
             "Parts": {},
+            "Metadata": kwargs.get("metadata", {}),
+            "ContentType": kwargs.get("content_type", "application/octet-stream"),
             "Initiated": datetime.now(UTC),
         }
         return {"UploadId": upload_id}
@@ -466,8 +472,8 @@ class MockS3Client:
         etag = hashlib.md5(body).hexdigest()
         self.objects[self._key(bucket, key)] = {
             "Body": body,
-            "Metadata": {},
-            "ContentType": "application/octet-stream",
+            "Metadata": upload.get("Metadata", {}),
+            "ContentType": upload.get("ContentType", "application/octet-stream"),
             "ContentLength": len(body),
             "ETag": etag,
             "LastModified": datetime.now(UTC),
@@ -652,6 +658,7 @@ class MockS3Client:
         part_number: int,
         copy_source: str,
         copy_source_range: str | None = None,
+        copy_source_if_match: str | None = None,
     ) -> dict:
         """Copy a part from another object."""
         self.call_history.append(
@@ -704,9 +711,9 @@ class MockS3Client:
 
     def _not_found_error(self, key: str):
         """Create a NoSuchKey error."""
-        error = Exception(f"NoSuchKey: {key}")
-        error.response = {"Error": {"Code": "NoSuchKey", "Message": f"Key not found: {key}"}}
-        return error
+        return ClientError(
+            {"Error": {"Code": "NoSuchKey", "Message": f"Key not found: {key}"}}, "GetObject"
+        )
 
     def _bucket_not_found_error(self, bucket: str):
         """Create a NoSuchBucket error."""

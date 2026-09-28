@@ -1,11 +1,13 @@
 """PUT object operations with encryption support."""
 
+import asyncio
 import base64
 import hashlib
 from collections.abc import AsyncIterator
 from typing import Any
 
 import structlog
+from botocore.exceptions import ClientError
 from fastapi import Request, Response
 from starlette.requests import ClientDisconnect
 from structlog.stdlib import BoundLogger
@@ -14,14 +16,14 @@ from ... import crypto
 from ...client import S3Client, S3Credentials
 from ...disconnect import ClientDisconnectError
 from ...errors import S3Error
-from ...signature import verify_deferred_payload_hash
+from ...signature import verify_deferred_payload_hash, verify_payload_hash
 from ...state import (
     MultipartMetadata,
     PartMetadata,
     save_multipart_metadata,
 )
+from ...state.metadata import FORMAT_KEY, generation_for, multipart_headers
 from ...streaming import decode_aws_chunked, decode_aws_chunked_stream
-from ...utils import etag_matches
 from ..base import BaseHandler
 
 logger: BoundLogger = structlog.get_logger(__name__)
@@ -52,29 +54,9 @@ class PutObjectMixin(BaseHandler):
     async def handle_put_object(self, request: Request, creds: S3Credentials) -> Response:
         bucket, key = self._parse_path(request.url.path)
         async with self._client(creds) as client:
-            # Check If-None-Match header (prevents overwriting existing objects)
             if_none_match = request.headers.get("if-none-match")
-            if if_none_match:
-                try:
-                    head_resp = await client.head_object(bucket, key)
-                    # Object exists - check if etag matches
-                    if if_none_match.strip() == "*":
-                        # * means fail if object exists at all
-                        raise S3Error.precondition_failed(
-                            "At least one of the pre-conditions you specified did not hold"
-                        )
-                    # Check specific etag match
-                    metadata = head_resp.get("Metadata", {})
-                    existing_etag = self._get_effective_etag(metadata, head_resp.get("ETag", ""))
-                    if etag_matches(existing_etag, if_none_match):
-                        raise S3Error.precondition_failed(
-                            "At least one of the pre-conditions you specified did not hold"
-                        )
-                except S3Error:
-                    raise
-                except Exception:
-                    # Object doesn't exist - proceed with upload
-                    pass
+            if if_none_match and if_none_match != "*":
+                raise S3Error.invalid_argument("If-None-Match on PUT must be '*'")
             content_type = request.headers.get("content-type", "application/octet-stream")
             content_sha = request.headers.get("x-amz-content-sha256", "")
             content_encoding = request.headers.get("content-encoding", "")
@@ -91,7 +73,12 @@ class PutObjectMixin(BaseHandler):
             needs_chunked_decode = "aws-chunked" in content_encoding or is_streaming_sig
 
             # Stream large uploads to avoid buffering
-            if is_unsigned or is_streaming_sig or content_length > crypto.MAX_BUFFER_SIZE:
+            if (
+                is_unsigned
+                or is_streaming_sig
+                or content_length > crypto.MAX_BUFFER_SIZE
+                or "content-length" not in request.headers
+            ):
                 logger.debug(
                     "PUT_STREAMING",
                     bucket=bucket,
@@ -159,6 +146,7 @@ class PutObjectMixin(BaseHandler):
         if needs_chunked_decode:
             body = decode_aws_chunked(body)
 
+        verify_payload_hash(request, hashlib.sha256(body).hexdigest())
         kid, kek = self.keyring.key_for(client.credentials.access_key)
         encrypted = crypto.encrypt_object(body, kek)
         logger.debug(
@@ -176,6 +164,8 @@ class PutObjectMixin(BaseHandler):
             key,
             encrypted.ciphertext,
             metadata={
+                **self._user_metadata(request),
+                FORMAT_KEY: "single-v3",
                 self.settings.dektag_name: base64.b64encode(encrypted.wrapped_dek).decode(),
                 self.settings.kidtag_name: kid,
                 "client-etag": etag,
@@ -185,6 +175,7 @@ class PutObjectMixin(BaseHandler):
             cache_control=cache_control,
             expires=expires,
             tagging=tagging,
+            **({"if_none_match": "*"} if request.headers.get("if-none-match") else {}),
         )
         return Response(headers={"ETag": f'"{etag}"'})
 
@@ -209,6 +200,12 @@ class PutObjectMixin(BaseHandler):
             bucket,
             key,
             content_type=content_type,
+            metadata={
+                **self._user_metadata(request),
+                **multipart_headers(wrapped_dek),
+                self.settings.dektag_name: base64.b64encode(wrapped_dek).decode(),
+                self.settings.kidtag_name: kid,
+            },
             cache_control=cache_control,
             expires=expires,
             tagging=tagging,
@@ -227,7 +224,7 @@ class PutObjectMixin(BaseHandler):
         async def upload_part(data: bytes) -> None:
             nonlocal part_num
             part_num += 1
-            nonce = crypto.derive_part_nonce(upload_id, part_num)
+            nonce = crypto.generate_nonce()
             data_len = len(data)
             data_md5 = hashlib.md5(data, usedforsecurity=False).hexdigest()
             ciphertext = crypto.encrypt(data, dek, nonce)
@@ -283,13 +280,9 @@ class PutObjectMixin(BaseHandler):
 
             # Verify SHA256 if provided, or deferred SigV4 after streaming hash
             if deferred_sig:
-                try:
-                    verify_deferred_payload_hash(
-                        request, request.app.state.verifier, sha256_hash.hexdigest()
-                    )
-                except S3Error:
-                    await client.abort_multipart_upload(bucket, key, upload_id)
-                    raise
+                verify_deferred_payload_hash(
+                    request, request.app.state.verifier, sha256_hash.hexdigest()
+                )
             elif expected_sha256 is not None:
                 computed_sha256 = sha256_hash.hexdigest()
                 if computed_sha256 != expected_sha256:
@@ -301,19 +294,22 @@ class PutObjectMixin(BaseHandler):
                         expected=expected_sha256,
                         computed=computed_sha256,
                     )
-                    await client.abort_multipart_upload(bucket, key, upload_id)
                     raise S3Error.signature_does_not_match(
                         f"SHA256 mismatch: {computed_sha256} != {expected_sha256}"
                     )
 
             # Complete upload
-            await client.complete_multipart_upload(bucket, key, upload_id, parts_complete)
+            if not parts_complete:
+                await upload_part(b"")
             await save_multipart_metadata(
                 client,
                 bucket,
                 key,
                 MultipartMetadata(
-                    version=2,
+                    version=3,
+                    generation=generation_for(wrapped_dek),
+                    upload_id=upload_id,
+                    client_etag=md5_hash.hexdigest(),
                     part_count=len(parts_meta),
                     total_plaintext_size=total_plaintext_size,
                     parts=parts_meta,
@@ -322,6 +318,13 @@ class PutObjectMixin(BaseHandler):
                 ),
             )
 
+            await client.complete_multipart_upload(
+                bucket,
+                key,
+                upload_id,
+                parts_complete,
+                **({"if_none_match": "*"} if request.headers.get("if-none-match") else {}),
+            )
             etag = md5_hash.hexdigest()
             logger.info(
                 "PUT_STREAMING_COMPLETE",
@@ -336,7 +339,8 @@ class PutObjectMixin(BaseHandler):
         except ClientDisconnectError, ClientDisconnect:
             await self._safe_abort(client, bucket, key, upload_id)
             raise ClientDisconnectError.raised() from None
-        except S3Error:
+        except S3Error, ClientError, asyncio.CancelledError:
+            await self._safe_abort(client, bucket, key, upload_id)
             raise
         except Exception as e:
             logger.error(

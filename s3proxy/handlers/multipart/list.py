@@ -25,6 +25,37 @@ class ListPartsMixin(BaseHandler):
             part_number_marker = int(part_number_marker) if part_number_marker else None
             max_parts = int(query.get("max-parts", ["1000"])[0])
 
+            if not 0 <= max_parts <= 1000 or (part_number_marker or 0) < 0:
+                raise S3Error.invalid_argument("Invalid ListParts pagination")
+            state = await self.multipart_manager.get_upload(bucket, key, upload_id)
+            if state is not None and state.layout_version >= 3:
+                accepted = sorted(
+                    (p for p in state.parts.values() if p.part_number > (part_number_marker or 0)),
+                    key=lambda p: p.part_number,
+                )
+                page = accepted[:max_parts]
+                return Response(
+                    content=xml_responses.list_parts(
+                        bucket=bucket,
+                        key=key,
+                        upload_id=upload_id,
+                        parts=[
+                            {
+                                "PartNumber": p.part_number,
+                                "ETag": p.md5,
+                                "Size": p.plaintext_size,
+                                "LastModified": state.created_at.isoformat(),
+                            }
+                            for p in page
+                        ],
+                        part_number_marker=part_number_marker,
+                        next_part_number_marker=page[-1].part_number if page else None,
+                        max_parts=max_parts,
+                        is_truncated=len(accepted) > len(page),
+                        storage_class="STANDARD",
+                    ),
+                    media_type="application/xml",
+                )
             try:
                 resp = await client.list_parts(
                     bucket, key, upload_id, part_number_marker, max_parts

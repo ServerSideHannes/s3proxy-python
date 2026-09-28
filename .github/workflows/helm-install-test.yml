@@ -49,7 +49,7 @@ jobs:
               spec:
                 containers:
                 - name: minio
-                  image: minio/minio:latest
+                  image: pgsty/minio:latest
                   args: ["server", "/data"]
                   env:
                   - name: MINIO_ROOT_USER

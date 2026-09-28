@@ -132,6 +132,11 @@ async def test_small_put_without_header_loads_body_once():
     payload = b"x" * (4 * MB)
     request = _make_request(content_length=len(payload))
     request.body = AsyncMock(return_value=payload)
+
+    async def chunks():
+        yield payload
+
+    request.stream = MagicMock(side_effect=chunks)
     verifier = MagicMock()
     verifier.verify = MagicMock(return_value=(True, MagicMock(), ""))
 
@@ -139,7 +144,8 @@ async def test_small_put_without_header_loads_body_once():
         dispatcher_cls.return_value.dispatch = AsyncMock(return_value=None)
         await _handle_proxy_request_impl(request, MagicMock(), verifier)
 
-    request.body.assert_awaited_once()
+    request.stream.assert_called_once()
+    request.body.assert_not_awaited()
     assert request.state.s3proxy_preloaded_body == payload
     verifier.verify.assert_called_once()
 

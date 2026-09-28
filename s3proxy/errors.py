@@ -93,6 +93,16 @@ class S3Error(HTTPException):
     def invalid_request(cls, message: str) -> S3Error:
         return cls(400, "InvalidRequest", message)
 
+    @classmethod
+    def bad_digest(cls, checksum: str) -> S3Error:
+        return cls(
+            400, "BadDigest", f"The {checksum} you specified did not match the calculated checksum."
+        )
+
+    @classmethod
+    def invalid_digest(cls, checksum: str) -> S3Error:
+        return cls(400, "InvalidDigest", f"The {checksum} you specified was invalid.")
+
     # 403 Forbidden variants
     @classmethod
     def access_denied(cls, message: str = "Access Denied") -> S3Error:
@@ -250,6 +260,14 @@ def raise_for_client_error(
     msg = e.response.get("Error", {}).get("Message", str(e))
     _log_upstream_failure(source="client_error", exc=e, bucket=bucket, key=key)
 
+    if code == "PreconditionFailed":
+        raise S3Error.precondition_failed(msg) from e
+    if code in ("AccessDenied", "403"):
+        raise S3Error.access_denied(msg) from e
+    if code == "InvalidRange":
+        raise S3Error.invalid_range(msg) from e
+    if code == "ConditionalRequestConflict":
+        raise S3Error(409, code, msg) from e
     if code == "NoSuchUpload":
         raise S3Error.no_such_upload(msg) from e
     if code in ("NoSuchKey", "404"):

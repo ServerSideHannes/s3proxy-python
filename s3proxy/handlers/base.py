@@ -220,9 +220,12 @@ class BaseHandler:
         self.multipart_manager = multipart_manager
         self.complete_upload_lock = complete_upload_lock or create_complete_upload_lock()
         self.keyring = settings.keyring
+        from ..client.pool import S3ClientPool
+
+        self.client_pool = S3ClientPool(settings)
 
     def _client(self, creds: S3Credentials) -> S3Client:
-        return S3Client(self.settings, creds)
+        return self.client_pool.acquire(creds)
 
     def _parse_path(self, path: str) -> tuple[str, str]:
         if m := PATH_RE.match(path):
@@ -251,6 +254,16 @@ class BaseHandler:
             self.settings.kidtag_name.lower(),
             "client-etag",
             "plaintext-size",
+            "s3proxy-format",
+            "s3proxy-generation",
+        }
+
+    def _user_metadata(self, request: Request) -> dict[str, str]:
+        internal = self._internal_meta_keys()
+        return {
+            k[11:]: v
+            for k, v in request.headers.items()
+            if k.startswith("x-amz-meta-") and k[11:] not in internal
         }
 
     def _parse_range(self, header: str, size: int) -> tuple[int, int]:
@@ -374,12 +387,56 @@ class BaseHandler:
 
         return None
 
+    async def _resolve_object(self, client, bucket, key, head=None):
+        from ..state.metadata import load_multipart_metadata, multipart_etag
+        from ..state.object import ObjectDescriptor
+
+        if head is None:
+            head = await client.head_object(bucket, key)
+        multipart = await load_multipart_metadata(client, bucket, key, head)
+        metadata = head.get("Metadata", {})
+        return ObjectDescriptor(
+            head=head,
+            multipart=multipart,
+            plaintext_size=(
+                multipart.total_plaintext_size
+                if multipart
+                else self._get_plaintext_size(metadata, head.get("ContentLength", 0))
+            ),
+            etag=(
+                multipart_etag(multipart)
+                if multipart
+                else self._get_effective_etag(metadata, head.get("ETag", ""))
+            ),
+        )
+
     async def _download_encrypted_single(
         self, client: S3Client, bucket: str, key: str, wrapped_dek_b64: str, kid: str = ""
     ) -> bytes:
         ciphertext = await read_source_bytes(client, bucket, key)
         wrapped_dek = base64.b64decode(wrapped_dek_b64)
         return crypto.decrypt_object(ciphertext, wrapped_dek, self.keyring.key_by_id(kid))
+
+    async def _iter_single_plaintext(
+        self, client, bucket, key, wrapped_dek_b64, kid="", start=0, end=None, if_match=None
+    ):
+        from contextlib import aclosing
+
+        from ..streaming.authenticated import decrypt_to_file, file_range
+
+        dek = crypto.unwrap_key(base64.b64decode(wrapped_dek_b64), self.keyring.key_by_id(kid))
+        response = await client.get_object(
+            bucket, key, **({"if_match": if_match} if if_match else {})
+        )
+        spool, length = await decrypt_to_file(response["Body"], dek)
+        try:
+            async with aclosing(
+                file_range(spool, start, length - 1 if end is None else end)
+            ) as stream:
+                async for chunk in stream:
+                    yield chunk
+        finally:
+            spool.close()
 
     async def _iter_multipart_plaintext(
         self,
@@ -390,6 +447,8 @@ class BaseHandler:
         dek: bytes,
         range_start: int | None = None,
         range_end: int | None = None,
+        *,
+        if_match=None,
     ) -> AsyncIterator[bytes]:
         """Yield decrypted plaintext for a multipart-encrypted object, one frame
         at a time.
@@ -405,44 +464,17 @@ class BaseHandler:
         ~50MB client part. Frames outside the requested plaintext range are skipped
         (no fetch); frames that partially overlap are trimmed before yielding.
         """
-        sorted_parts = sorted(meta.parts, key=lambda p: p.part_number)
-        pt_offset = 0
-        ct_offset = 0
+        from contextlib import aclosing
 
-        for part in sorted_parts:
-            if part.internal_parts:
-                segments = [
-                    (ip.plaintext_size, ip.ciphertext_size)
-                    for ip in sorted(part.internal_parts, key=lambda p: p.internal_part_number)
-                ]
-            else:
-                segments = [(part.plaintext_size, part.ciphertext_size)]
+        from ..streaming.frames import plaintext_frames
 
-            for seg_pt_size, seg_ct_size in segments:
-                for fsize in crypto.ciphertext_frame_byte_sizes(seg_pt_size, seg_ct_size):
-                    frame_pt_size = fsize - crypto.ENCRYPTION_OVERHEAD
-                    frame_pt_end = pt_offset + frame_pt_size - 1
-
-                    in_range = range_start is None or (
-                        frame_pt_end >= range_start and pt_offset <= range_end
-                    )
-
-                    if in_range:
-                        ct_end = ct_offset + fsize - 1
-                        ciphertext = await read_source_bytes(
-                            client, bucket, key, f"bytes={ct_offset}-{ct_end}"
-                        )
-                        plaintext = crypto.decrypt(ciphertext, dek)
-
-                        if range_start is not None:
-                            trim_start = max(0, range_start - pt_offset)
-                            trim_end = min(frame_pt_size, range_end - pt_offset + 1)
-                            plaintext = plaintext[trim_start:trim_end]
-
-                        yield plaintext
-
-                    pt_offset += frame_pt_size
-                    ct_offset += fsize
+        async with aclosing(
+            plaintext_frames(
+                client, bucket, key, meta, dek, range_start, range_end, if_match=if_match
+            )
+        ) as stream:
+            async for chunk in stream:
+                yield chunk
 
     async def _download_encrypted_multipart(
         self,
