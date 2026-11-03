@@ -56,6 +56,9 @@ class MultipartUploadState:
     # shadow tars). Maps client part N → internal N so 600-part uploads stay under
     # S3's 10k part limit. Cleared on the first multi-internal client part (Scylla).
     dense_single_internal: bool = True
+    # Inclusive internal part range reserved for each client part, recorded when
+    # the part starts uploading so concurrent and out-of-order parts see it.
+    allocations: dict[int, tuple[int, int]] = field(default_factory=dict)
     # Hybrid passthrough may leave a sub-5MB plaintext suffix here when the
     # client part range ends mid internal frame but more client parts follow.
     deferred_copy_tail: bytes = b""

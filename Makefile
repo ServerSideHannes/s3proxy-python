@@ -41,6 +41,7 @@ INTEGRATION_multipart_TESTS = \
 	tests/integration/test_part_ordering.py \
 	tests/integration/test_sequential_part_numbering.py \
 	tests/integration/test_sequential_part_numbering_e2e.py \
+	tests/integration/test_multipart_part_placement_e2e.py \
 	tests/integration/test_large_file_streaming.py \
 	tests/integration/test_entity_too_small_errors.py \
 	tests/integration/test_entity_too_small_fix.py \

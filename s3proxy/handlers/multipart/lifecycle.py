@@ -382,7 +382,21 @@ class LifecycleMixin(BaseHandler):
         if not s3_parts:
             raise S3Error.invalid_part("No valid parts found")
 
-        s3_parts.sort(key=lambda p: p["PartNumber"])
+        # S3 concatenates parts by number, but reads locate each client part by
+        # summing sizes in client order. Sorting here would hide a mismatch and
+        # produce an object that cannot be decrypted.
+        numbers = [p["PartNumber"] for p in s3_parts]
+        if any(a >= b for a, b in zip(numbers, numbers[1:], strict=False)):
+            logger.error(
+                "INTERNAL_PART_ORDER_VIOLATION",
+                bucket=bucket,
+                key=key,
+                upload_id=upload_id[:20] + "...",
+                internal_parts=numbers,
+            )
+            raise S3Error.invalid_part(
+                "Internal part numbers overlap or are out of client-part order; restart the upload"
+            )
         return s3_parts, completed_parts, total_plaintext
 
     async def _complete_multipart_upload_with_retry(
