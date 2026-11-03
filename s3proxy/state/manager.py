@@ -6,10 +6,10 @@ from structlog.stdlib import BoundLogger
 from ..crypto import (
     MAX_INTERNAL_PARTS_PER_CLIENT,
     S3_MAX_PART_NUMBER,
-    allocate_client_internal_range,
     internal_part_range,
 )
 from ..errors import S3Error
+from .allocation import PartPlacementError, place_client_part
 from .models import (
     MultipartUploadState,
     PartMetadata,
@@ -230,26 +230,25 @@ class MultipartStateManager:
         count: int,
         client_part_number: int = 0,
     ) -> int:
-        """Allocate internal part numbers based on client part number.
+        """Allocate internal part numbers for a client part.
 
-        Each client part gets a reserved range of MAX_INTERNAL_PARTS_PER_CLIENT
-        internal part numbers to avoid conflicts.
+        With a client part number, the range is placed by ``place_client_part`` so
+        it stays disjoint from, and ordered like, every other client part's range
+        whatever order they arrive in; the allocation is recorded in the upload
+        state. Without one (UploadPartCopy), numbers are handed out sequentially.
         """
         if client_part_number > 0:
             sk = self._storage_key(bucket, key, upload_id)
             start = 1
             end = 1
             allocation_mode = "sparse"
-            dense_at_alloc = True
 
             def updater(data: bytes) -> bytes:
-                nonlocal start, end, allocation_mode, dense_at_alloc
+                nonlocal start, end, allocation_mode
                 state = deserialize_upload_state(data)
                 if state is None:
                     raise StateMissingError(f"Upload state corrupted for {bucket}/{key}")
 
-                sparse_start, sparse_end = internal_part_range(client_part_number, count)
-                dense_at_alloc = state.dense_single_internal
                 if count > 1 and state.dense_single_internal:
                     state.dense_single_internal = False
                     logger.info(
@@ -259,16 +258,16 @@ class MultipartStateManager:
                         upload_id=self._truncate_id(upload_id),
                         client_part=client_part_number,
                         requested=count,
-                        sparse_range=f"{sparse_start}-{sparse_end}",
                     )
 
                 try:
-                    start, end = allocate_client_internal_range(
+                    start, end = place_client_part(
+                        state.allocations,
                         client_part_number,
                         count,
-                        dense_single_internal=state.dense_single_internal,
+                        single_internal=state.dense_single_internal,
                     )
-                except ValueError as e:
+                except PartPlacementError as e:
                     logger.error(
                         "INTERNAL_PART_ALLOCATION_REJECTED",
                         bucket=bucket,
@@ -276,32 +275,18 @@ class MultipartStateManager:
                         upload_id=self._truncate_id(upload_id),
                         client_part=client_part_number,
                         requested=count,
-                        dense_single_internal=dense_at_alloc,
-                        sparse_range=f"{sparse_start}-{sparse_end}",
-                        dense_range=f"{client_part_number}-{client_part_number}"
-                        if count == 1
-                        else None,
-                        max_per_client=MAX_INTERNAL_PARTS_PER_CLIENT,
+                        placed_parts=len(state.allocations),
                         error=str(e),
                     )
                     raise
 
-                if count > MAX_INTERNAL_PARTS_PER_CLIENT and not state.dense_single_internal:
-                    logger.warning(
-                        "INTERNAL_PARTS_EXCEED_RANGE",
-                        bucket=bucket,
-                        key=key,
-                        client_part=client_part_number,
-                        requested=count,
-                        max=MAX_INTERNAL_PARTS_PER_CLIENT,
-                    )
-
-                allocation_mode = (
-                    "dense"
-                    if dense_at_alloc and count == 1 and start == client_part_number
-                    else "sparse"
-                )
-
+                state.allocations[client_part_number] = (start, end)
+                if start == client_part_number and count == 1:
+                    allocation_mode = "dense"
+                elif start == internal_part_range(client_part_number, 1)[0]:
+                    allocation_mode = "sparse"
+                else:
+                    allocation_mode = "compact"
                 return serialize_upload_state(state)
 
             try:
@@ -323,7 +308,6 @@ class MultipartStateManager:
                 start=start,
                 end=end,
                 allocation_mode=allocation_mode,
-                dense_single_internal=dense_at_alloc and count == 1,
             )
             if client_part_number >= 500:
                 logger.warning(

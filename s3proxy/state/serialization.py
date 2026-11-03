@@ -55,6 +55,7 @@ def serialize_upload_state(state: MultipartUploadState) -> bytes:
         if state.deferred_copy_tail
         else "",
         "dense_single_internal": state.dense_single_internal,
+        "allocations": {str(pn): list(rng) for pn, rng in state.allocations.items()},
         "parts": {
             str(pn): {
                 "part_number": p.part_number,
@@ -154,6 +155,12 @@ def deserialize_upload_state(data: bytes) -> MultipartUploadState | None:
                 part_count=len(parts),
             )
 
+        allocations = {int(pn): (rng[0], rng[1]) for pn, rng in obj.get("allocations", {}).items()}
+        for pn, part in parts.items():
+            if pn not in allocations and part.internal_parts:
+                numbers = [ip.internal_part_number for ip in part.internal_parts]
+                allocations[pn] = (min(numbers), max(numbers))
+
         return MultipartUploadState(
             dek=base64.b64decode(obj["dek"]),
             bucket=obj["bucket"],
@@ -168,6 +175,7 @@ def deserialize_upload_state(data: bytes) -> MultipartUploadState | None:
             if obj.get("deferred_copy_tail")
             else b"",
             dense_single_internal=dense_single_internal,
+            allocations=allocations,
         )
     except (KeyError, TypeError, ValueError) as e:
         logger.error(
