@@ -6,7 +6,9 @@ services:
       - "6379:6379"
 
   minio:
-    image: minio/minio
+    image: bitnamilegacy/minio:2025.7.23-debian-12-r5
+    user: root
+    entrypoint: ["minio"]
     container_name: s3proxy-test-minio
     ports:
       - "9000:9000"
