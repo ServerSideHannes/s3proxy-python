@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import parse_qs
+
 from prometheus_client import Counter, Gauge, Histogram
 
 # Request metrics
@@ -69,6 +71,7 @@ def get_operation_name(method: str, path: str, query: str) -> str:
     Returns:
         S3 operation name for metrics labeling.
     """
+    keys = parse_qs(query, keep_blank_values=True)
     is_bucket_only = "/" not in path.strip("/") and bool(path.strip("/"))
     is_root = path.strip("/") == ""
 
@@ -77,15 +80,15 @@ def get_operation_name(method: str, path: str, query: str) -> str:
         return "ListBuckets"
 
     # Batch delete
-    if "delete" in query and method == "POST":
+    if "delete" in keys and method == "POST":
         return "DeleteObjects"
 
     # Multipart operations
-    if "uploadId" in query:
+    if "uploadId" in keys:
         if method == "GET" and "partNumber" not in query:
             return "ListParts"
         if method == "PUT":
-            if "x-amz-copy-source" in query:
+            if "x-amz-copy-source" in keys:
                 return "UploadPartCopy"
             return "UploadPart"
         if method == "POST":
@@ -94,7 +97,7 @@ def get_operation_name(method: str, path: str, query: str) -> str:
             return "AbortMultipartUpload"
 
     # List/Create multipart uploads
-    if "uploads" in query:
+    if "uploads" in keys:
         if method == "GET":
             return "ListMultipartUploads"
         if method == "POST":
@@ -102,7 +105,7 @@ def get_operation_name(method: str, path: str, query: str) -> str:
 
     # Bucket operations
     if is_bucket_only:
-        if "location" in query and method == "GET":
+        if "location" in keys and method == "GET":
             return "GetBucketLocation"
         if method == "PUT":
             return "CreateBucket"
@@ -114,7 +117,7 @@ def get_operation_name(method: str, path: str, query: str) -> str:
             return "ListObjects"
 
     # Object tagging
-    if "tagging" in query:
+    if "tagging" in keys:
         if method == "GET":
             return "GetObjectTagging"
         if method == "PUT":
