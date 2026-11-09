@@ -86,5 +86,5 @@ if __name__ == "__main__":
     test_bare_bucket_get_is_v1_list()
     test_v2_list_still_routes_to_v2()
     test_subresource_get_still_forwards()
-    print("ok")
     test_prefix_containing_subresource_name_is_still_a_list()
+    print("ok")
