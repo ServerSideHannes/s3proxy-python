@@ -74,7 +74,7 @@ class RequestDispatcher:
             Response from the appropriate handler method.
         """
         method = request.method
-        query = str(request.url.query)
+        query = parse_qs(str(request.url.query), keep_blank_values=True)
         path = request.url.path
         headers = {k.lower(): v for k, v in request.headers.items()}
 
@@ -106,8 +106,7 @@ class RequestDispatcher:
 
         # Bucket listing (fallthrough from bucket operations)
         if self._is_bucket_only_path(path) and method == METHOD_GET:
-            query_params = parse_qs(query, keep_blank_values=True)
-            list_type = query_params.get("list-type", ["1"])[0]
+            list_type = query.get("list-type", ["1"])[0]
             if list_type == "2":
                 return await self.handler.handle_list_objects(request, creds)
             return await self.handler.handle_list_objects_v1(request, creds)
@@ -124,7 +123,7 @@ class RequestDispatcher:
         request: Request,
         creds: S3Credentials,
         method: str,
-        query: str,
+        query: dict[str, list[str]],
         headers: dict[str, str],
     ) -> PlainTextResponse:
         """Handle multipart upload operations."""
@@ -145,7 +144,7 @@ class RequestDispatcher:
         request: Request,
         creds: S3Credentials,
         method: str,
-        query: str,
+        query: dict[str, list[str]],
     ) -> PlainTextResponse | None:
         """Handle bucket-level operations.
 
@@ -169,9 +168,7 @@ class RequestDispatcher:
             # list-type=2), not a bucket sub-resource. Fall through to the list
             # handler, which serves it via the backend's V2 API — raw-forwarding it
             # sends V1 to the backend, which Hetzner & co. reject with HTTP 400.
-            if method == METHOD_GET and set(parse_qs(query, keep_blank_values=True)) <= (
-                LIST_QUERY_KEYS
-            ):
+            if method == METHOD_GET and set(query) <= LIST_QUERY_KEYS:
                 return None
             return await self.handler.forward_request(request, creds)
 
@@ -190,7 +187,7 @@ class RequestDispatcher:
         request: Request,
         creds: S3Credentials,
         method: str,
-        query: str,
+        query: dict[str, list[str]],
     ) -> PlainTextResponse:
         """Handle standard object operations."""
         if QUERY_TAGGING in query:

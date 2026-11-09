@@ -73,9 +73,18 @@ def test_subresource_get_still_forwards():
     assert _route("GET", "/bkt", "location") == "location"
 
 
+def test_prefix_containing_subresource_name_is_still_a_list():
+    # scylla-manager lists prefixes like .../table/geocoded_locations/
+    for word in ("location", "versioning", "uploads", "delete", "tagging"):
+        q = f"list-type=2&prefix=keyspace%2Fmain%2Ftable%2Fgeocoded_{word}s%2F"
+        assert _route("GET", "/bkt", q) == "v2", word
+        assert _route("GET", "/bkt", f"prefix=x_{word}%2F&delimiter=%2F") == "v1", word
+
+
 if __name__ == "__main__":
     test_v1_list_with_params_routes_to_v1_handler()
     test_bare_bucket_get_is_v1_list()
     test_v2_list_still_routes_to_v2()
     test_subresource_get_still_forwards()
     print("ok")
+    test_prefix_containing_subresource_name_is_still_a_list()
